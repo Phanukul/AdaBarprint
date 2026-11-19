@@ -137,6 +137,7 @@ export interface DesignerProductItem {
   FTPdtName: string;
   FTPdtNameOth?: string | null;
   FTPdtUnit?: string | null;
+  FTPdtDim?: string | null;
   FCPdtPrice?: number | null;
   FTPdtImg?: string | null;
   bars?: Array<{ FTPdbBarCode: string }>;
@@ -793,6 +794,8 @@ export function LabelDesigner({
     const isPromo = priType === '2';
     const promoPrice = isPromo ? Math.max(1, Math.round(basePrice * 0.8 * 100) / 100) : basePrice;
 
+    const promoRate = isPromo ? '20%' : '';
+
     return {
       barcode: bar,
       priType,
@@ -803,9 +806,9 @@ export function LabelDesigner({
           name: pdtName,
           name_oth: pdtNameOth,
           barcode: bar,
-          dim: '250 ก.',
-          unit: picked?.FTPdtUnit || 'ชิ้น',
-          sub_dept: 'D01',
+          dim: picked?.FTPdtDim || '',
+          unit: picked?.FTPdtUnit || '',
+          sub_dept: '',
           image: picked?.FTPdtImg || '',
         },
         price: {
@@ -813,17 +816,17 @@ export function LabelDesigner({
           old_value: isPromo ? basePrice : undefined,
         },
         promotion: {
-          text: isPromo ? 'ลดพิเศษ 20%' : '',
-          name: isPromo ? 'ลดพิเศษ 20%' : '',
-          interval: isPromo ? 'เริ่ม 01/11/26 ถึง 30/11/26' : '',
+          text: isPromo ? `ลดพิเศษ ${promoRate}` : '',
+          name: isPromo ? `ลดพิเศษ ${promoRate}` : '',
+          interval: '',
           is_discount: isPromo,
           isDiscount: isPromo,
         },
         tag: {
-          selling_unit: picked?.FTPdtUnit || 'ชิ้น',
+          selling_unit: picked?.FTPdtUnit || '',
           pri_per_unit: '',
           pri_status: 'AC',
-          sub_dept: 'D01',
+          sub_dept: '',
           print_date: new Date().toISOString(),
         },
         store: {
@@ -993,26 +996,29 @@ export function LabelDesigner({
     }
   };
 
+  const stripDecorativeElements = (elements: DesignElement[]): DesignElement[] =>
+    elements.filter((el) => {
+      if (el.type === 'rect' || el.type === 'circle' || el.type === 'line' || el.type === 'icon') {
+        return false;
+      }
+      if (
+        el.type === 'static' &&
+        (el.label.includes('หัวป้าย') ||
+          el.label.includes('แบรนด์') ||
+          (el.text || '').includes('ราคาสินค้า'))
+      ) {
+        return false;
+      }
+      return true;
+    });
+
   const handleToggleDesignMode = (mode: 'full' | 'preprint') => {
     if ((doc.designMode || 'full') === mode) return;
     if (mode === 'preprint') {
       const psInfo = findPaperPreset(currentSize.FTLbsPaperSize);
       const existingPp = doc.preprint;
       const hasBg = Boolean(existingPp?.cellBgDataUrl || existingPp?.sheetBgDataUrl);
-      const strippedElements = doc.elements.filter((el) => {
-        if (el.type === 'rect' || el.type === 'circle' || el.type === 'line' || el.type === 'icon') {
-          return false;
-        }
-        if (
-          el.type === 'static' &&
-          (el.label.includes('หัวป้าย') ||
-            el.label.includes('UFM') ||
-            (el.text || '').includes('ราคาสินค้า'))
-        ) {
-          return false;
-        }
-        return true;
-      });
+      const strippedElements = stripDecorativeElements(doc.elements);
       commitDoc({
         ...doc,
         designMode: 'preprint',
@@ -1088,11 +1094,7 @@ export function LabelDesigner({
     const hMm = pp.FCPprLabelH ?? doc.height;
     let nextElements = doc.elements.map((el) => ({ ...el }));
     if (impStripDecor) {
-      nextElements = nextElements.filter((el) => {
-        if (el.type === 'rect' || el.type === 'circle' || el.type === 'icon') return false;
-        if (el.type === 'static' && (el.label.includes('หัวป้าย') || el.label.includes('UFM'))) return false;
-        return true;
-      });
+      nextElements = stripDecorativeElements(nextElements);
     }
     commitDoc({
       ...doc,
@@ -1233,11 +1235,7 @@ export function LabelDesigner({
 
       let nextElements = doc.elements.map((el) => ({ ...el }));
       if (impStripDecor) {
-        nextElements = nextElements.filter((el) => {
-          if (el.type === 'rect' || el.type === 'circle' || el.type === 'icon') return false;
-          if (el.type === 'static' && (el.label.includes('หัวป้าย') || el.label.includes('UFM'))) return false;
-          return true;
-        });
+        nextElements = stripDecorativeElements(nextElements);
         // Nudge data items away from top/bottom Pre-print header strips if they are very close to the top edge
         nextElements = nextElements.map((el) =>
           el.y < 6 ? { ...el, y: roundMm(Math.min(Math.max(10, hMm * 0.16), Math.max(6, hMm - el.height - 4)), 0.5) } : el

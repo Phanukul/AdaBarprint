@@ -327,7 +327,7 @@ async fn fetch_lan_printers(pool: &SqlitePool) -> Vec<Value> {
 
     rows.into_iter()
         .map(|(code, brand, name, ip_port, ref_json, sta)| {
-            let mut ip = "192.168.1.100".to_string();
+            let mut ip = String::new();
             let mut port = 9100_i64;
             if let Some(ref s) = ip_port {
                 if let Some((h, p)) = s.rsplit_once(':') {
@@ -3350,7 +3350,8 @@ pub async fn post_print_send(
         return err_json(StatusCode::BAD_REQUEST, "ไม่สามารถสร้างคำสั่งพิมพ์ได้");
     }
 
-    let (success, message, bytes_sent) = if preview_only || brand == PrinterBrand::Samsung {
+    let (success, message, bytes_sent) =
+        if preview_only || brand == PrinterBrand::Samsung || brand == PrinterBrand::Windows {
         (
             true,
             format!("สร้างตัวอย่างคำสั่ง {} สำเร็จ (ไม่ได้ส่งพิมพ์จริง)", brand.language_label()),
@@ -3587,6 +3588,13 @@ pub async fn post_import(
     let mut fail = 0i64;
     let mut errors: Vec<String> = Vec::new();
 
+    let default_bch_code: String = sqlx::query_scalar::<_, String>(
+        "SELECT COALESCE(NULLIF((SELECT FTSopValue FROM TCNSSysOption WHERE FTSopCode = 'DefaultBranch' LIMIT 1), ''), (SELECT FTBchCode FROM TCNMBranch ORDER BY FTBchCode ASC LIMIT 1), '')",
+    )
+    .fetch_one(&st.pool)
+    .await
+    .unwrap_or_default();
+
     for (idx, rec_res) in rdr.records().enumerate() {
         let row_num = idx + 2;
         let record = match rec_res {
@@ -3674,7 +3682,7 @@ pub async fn post_import(
                     "INSERT INTO TCNMPdtPri (FTPdtCode, FTBchCode, FTPpcPriType, FCPpcPrice, FCPpcUnitPrice, FTPpcStaUse, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy) VALUES (?, ?, ?, ?, ?, ?, ?, 'IMPORT', ?, 'IMPORT') ON CONFLICT(FTPdtCode, FTBchCode, FTPpcPriType) DO UPDATE SET FCPpcPrice = excluded.FCPpcPrice, FCPpcUnitPrice = excluded.FCPpcUnitPrice, FDLastUpdOn = excluded.FDLastUpdOn"
                 )
                 .bind(map.get("FTPdtCode").map(|s| s.as_str()).unwrap_or(""))
-                .bind(map.get("FTBchCode").map(|s| s.as_str()).unwrap_or("00001"))
+                .bind(map.get("FTBchCode").map(|s| s.as_str()).unwrap_or(default_bch_code.as_str()))
                 .bind(map.get("FTPpcPriType").map(|s| s.as_str()).unwrap_or("1"))
                 .bind(price).bind(unit_price)
                 .bind(map.get("FTPpcStaUse").map(|s| s.as_str()).unwrap_or("1"))

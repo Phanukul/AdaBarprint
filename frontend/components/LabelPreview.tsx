@@ -617,7 +617,7 @@ export function LabelPreview({
         {/* Top Green Header + Red Oval UFM Fuji Super */}
         <div style={{ background: '#3b6e38', height: `${9 * scale}mm`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
           <div style={{ background: '#c9302c', color: '#fff', borderRadius: '999px', padding: `${0.5 * scale}mm ${3 * scale}mm`, fontSize: `${2.2 * scale}mm`, fontWeight: 700, fontStyle: 'italic', lineHeight: 1.1 }}>
-            UFM Fuji Super
+            {storeInfo.name || 'UFM Fuji Super'}
           </div>
         </div>
         {/* Dept + SubCode */}
@@ -717,7 +717,7 @@ export function LabelPreview({
         {/* Bottom Bar */}
         <div style={{ background: headerBg, height: `${4.5 * scale}mm`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
           <div style={{ background: '#c9302c', color: '#fff', borderRadius: '999px', padding: `${0.2 * scale}mm ${2.5 * scale}mm`, fontSize: `${1.9 * scale}mm`, fontWeight: 700, fontStyle: 'italic' }}>
-            UFM Fuji Super
+            {storeInfo.name || 'UFM Fuji Super'}
           </div>
         </div>
       </div>
@@ -749,7 +749,7 @@ export function LabelPreview({
       >
         <div style={{ background: isPromo ? 'linear-gradient(90deg, #eab308, #facc15)' : '#3b6e38', padding: `${2 * scale}mm ${4 * scale}mm`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div style={{ background: '#c9302c', color: '#fff', borderRadius: '999px', padding: `${1 * scale}mm ${5 * scale}mm`, fontSize: `${4.5 * scale}mm`, fontWeight: 800, fontStyle: 'italic' }}>
-            UFM Fuji Super
+            {storeInfo.name || 'UFM Fuji Super'}
           </div>
           <div style={{ background: isPromo ? '#ca8a04' : '#166534', color: '#fff', padding: `${1 * scale}mm ${4 * scale}mm`, fontSize: `${4 * scale}mm`, fontWeight: 700, borderRadius: `${1 * scale}mm` }}>
             {isPromo ? `${promo.interval || tag.print_date || ''} - มีจำนวนจำกัด` : (tag.print_date || '')}
@@ -828,7 +828,7 @@ export function LabelPreview({
         <div style={{ width: '28%', background: isPromo ? '#facc15' : '#3b6e38', padding: `${2 * scale}mm`, display: 'flex', flexDirection: 'column', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
           <div style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={{ background: '#c9302c', color: '#fff', borderRadius: '999px', padding: `${0.6 * scale}mm ${2.8 * scale}mm`, fontSize: `${2.3 * scale}mm`, fontWeight: 700, fontStyle: 'italic' }}>
-              UFM Fuji Super
+              {storeInfo.name || 'UFM Fuji Super'}
             </div>
             {isPromo && (
               <span style={{ color: '#c9302c', fontSize: `${4.2 * scale}mm`, fontWeight: 900, fontStyle: 'italic', transform: 'rotate(-6deg)' }}>セール!</span>

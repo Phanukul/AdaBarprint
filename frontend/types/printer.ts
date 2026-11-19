@@ -1,4 +1,4 @@
-export type PrinterBrand = 'ZEBRA' | 'HONEYWELL' | 'TSC' | 'ARGOX' | 'GODEX' | 'BIXOLON' | 'SAMSUNG';
+export type PrinterBrand = 'ZEBRA' | 'HONEYWELL' | 'TSC' | 'ARGOX' | 'GODEX' | 'BIXOLON' | 'SAMSUNG' | 'WINDOWS';
 
 export type PrinterLanguage = 'ZPL' | 'DP' | 'TSPL' | 'PPLA' | 'EZPL' | 'BXL' | 'A4';
 

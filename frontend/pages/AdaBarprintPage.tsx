@@ -411,7 +411,7 @@ export default function AdaBarprintPage() {
         merged.push({
           id: `win-${wp.name}`,
           name: wp.name,
-          brand: 'SAMSUNG',
+          brand: 'WINDOWS',
           model: wp.name,
           ip: 'Windows',
           port: 9100,
@@ -1213,7 +1213,7 @@ export default function AdaBarprintPage() {
         return;
       }
 
-      if (printer && printer.brand !== 'SAMSUNG') {
+      if (printer && printer.brand !== 'WINDOWS' && printer.brand !== 'SAMSUNG') {
         const res = await fetch('/api/print/send', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

@@ -294,7 +294,7 @@ export function SettingsPanel({
   const [lanId, setLanId] = useState('');
   const [lanName, setLanName] = useState('');
   const [lanBrand, setLanBrand] = useState<PrinterBrand>('GODEX');
-  const [lanIp, setLanIp] = useState('192.168.1.100');
+  const [lanIp, setLanIp] = useState('');
   const [lanPort, setLanPort] = useState(9100);
   const [lanDpi, setLanDpi] = useState(203);
   const [lanSpeed, setLanSpeed] = useState(4);
@@ -720,7 +720,7 @@ export function SettingsPanel({
     setLanId('');
     setLanName('');
     setLanBrand('GODEX');
-    setLanIp('192.168.1.100');
+    setLanIp('');
     setLanPort(9100);
     setLanDpi(203);
     setLanSpeed(4);
@@ -2366,8 +2366,11 @@ export function SettingsPanel({
                   <SelectContent>
                     <SelectItem value="GODEX">GODEX (EZPL)</SelectItem>
                     <SelectItem value="TSC">TSC (TSPL)</SelectItem>
-                    <SelectItem value="XPRINTER">XPRINTER (ESC/POS)</SelectItem>
-                    <SelectItem value="SAMSUNG">SAMSUNG (Windows/A4)</SelectItem>
+                    <SelectItem value="ZEBRA">ZEBRA (ZPL)</SelectItem>
+                    <SelectItem value="HONEYWELL">HONEYWELL (Fingerprint)</SelectItem>
+                    <SelectItem value="ARGOX">ARGOX (PPLZ)</SelectItem>
+                    <SelectItem value="BIXOLON">BIXOLON (BXL)</SelectItem>
+                    <SelectItem value="WINDOWS">WINDOWS (A4 / Spooler)</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -2387,6 +2390,7 @@ export function SettingsPanel({
                 <Input
                   value={lanIp}
                   onChange={(e) => setLanIp(e.target.value)}
+                  placeholder="เช่น 192.168.1.100"
                   className="h-8 text-xs font-mono"
                 />
               </div>

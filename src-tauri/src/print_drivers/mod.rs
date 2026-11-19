@@ -17,6 +17,7 @@ pub enum PrinterBrand {
     Godex,
     Bixolon,
     Samsung,
+    Windows,
 }
 
 impl PrinterBrand {
@@ -29,6 +30,7 @@ impl PrinterBrand {
             "GODEX" => Some(Self::Godex),
             "BIXOLON" => Some(Self::Bixolon),
             "SAMSUNG" => Some(Self::Samsung),
+            "WINDOWS" => Some(Self::Windows),
             _ => None,
         }
     }
@@ -42,6 +44,7 @@ impl PrinterBrand {
             Self::Godex => "GODEX",
             Self::Bixolon => "BIXOLON",
             Self::Samsung => "SAMSUNG",
+            Self::Windows => "WINDOWS",
         }
     }
 
@@ -54,6 +57,7 @@ impl PrinterBrand {
             Self::Godex => "GODEX",
             Self::Bixolon => "BIXOLON",
             Self::Samsung => "Samsung (A4)",
+            Self::Windows => "Windows Printer",
         }
     }
 
@@ -65,7 +69,7 @@ impl PrinterBrand {
             Self::Argox => "PPLZ (ZPL-compat)",
             Self::Godex => "EZPL",
             Self::Bixolon => "BXL Label Script",
-            Self::Samsung => "A4 / Windows Print",
+            Self::Samsung | Self::Windows => "A4 / Windows Print",
         }
     }
 
@@ -77,7 +81,7 @@ impl PrinterBrand {
             Self::Argox => "pplz",
             Self::Godex => "ezpl",
             Self::Bixolon => "bxl",
-            Self::Samsung => "html",
+            Self::Samsung | Self::Windows => "html",
         }
     }
 }
@@ -464,7 +468,7 @@ pub fn generate_commands(
                 PrinterBrand::Argox => generate_zpl_like_label(ctx, elements, opts, true),
                 PrinterBrand::Tsc | PrinterBrand::Bixolon => generate_tspl_like_label(ctx, elements, opts),
                 PrinterBrand::Honeywell => generate_dp_label(ctx, elements, opts),
-                PrinterBrand::Samsung => format!("A4_PRINT:{}", ctx.get("product").and_then(|p| p.get("name")).and_then(|v| v.as_str()).unwrap_or("")),
+                PrinterBrand::Samsung | PrinterBrand::Windows => format!("A4_PRINT:{}", ctx.get("product").and_then(|p| p.get("name")).and_then(|v| v.as_str()).unwrap_or("")),
             };
             parts.push(cmd);
         }
@@ -491,8 +495,8 @@ pub fn generate_test_pattern(brand: PrinterBrand, dpi: u32, width_mm: f64, heigh
         PrinterBrand::Honeywell => {
             "INPUT OFF\r\nCLL\r\nPP 20,20\r\nFT \"Swiss 721 BT\",12\r\nPT \"AdaPos 6.0 PrintBar TEST\"\r\nPP 20,70\r\nBT \"EAN13\"\r\nBH 80\r\nPB \"8850001000014\"\r\nPF 1".to_string()
         }
-        PrinterBrand::Samsung => {
-            "A4 Windows Print Mode (Samsung M262x 282x Series Class Driver)".to_string()
+        PrinterBrand::Samsung | PrinterBrand::Windows => {
+            "Windows Print Mode (System Printer Driver)".to_string()
         }
     }
 }

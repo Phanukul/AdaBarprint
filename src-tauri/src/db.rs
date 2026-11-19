@@ -736,7 +736,7 @@ pub async fn seed_defaults(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         ("DefaultTemplate", "PrintBar", "รูปแบบป้ายเริ่มต้น", "ADA-100x38", "รหัสแบบป้ายเริ่มต้นเมื่อเปิดหน้าจอ", 2),
         ("DefaultPrinter", "PrintBar", "เครื่องพิมพ์เริ่มต้น", "", "ชื่อเครื่องพิมพ์เริ่มต้น", 3),
         ("DefaultDpi", "PrintBar", "ความละเอียด DPI เริ่มต้น", "203", "ความละเอียดเครื่องพิมพ์เริ่มต้น", 4),
-        ("UrlTemplate", "PrintBar", "URL Template สำหรับ QR", "https://firster.com/product/{code}/?branch={bch}", "รูปแบบ URL สินค้าใน QR Code", 5),
+        ("UrlTemplate", "PrintBar", "URL Template สำหรับ QR", "", "รูปแบบ URL สินค้าใน QR Code", 5),
         ("DefaultUser", "PrintBar", "รหัสผู้ใช้งานเริ่มต้น", "ADMIN", "ชื่อผู้ใช้งานที่บันทึกลง Transaction Log", 6),
     ];
     for (code, app, name, val, desc, seq) in sys_opts {
@@ -838,13 +838,13 @@ pub async fn seed_defaults(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 }
 
 pub async fn ensure_ufm_label_sizes(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    let has_seed_ver: Option<(String,)> = sqlx::query_as(
-        "SELECT FTSopValue FROM TCNSSysOption WHERE FTSopCode = 'SeedVersion' AND FTSopValue = '2' LIMIT 1",
+    let has_done: Option<(String,)> = sqlx::query_as(
+        "SELECT FTSopValue FROM TCNSSysOption WHERE FTSopCode IN ('SeedUfmDone', 'SeedVersion') LIMIT 1",
     )
     .fetch_optional(pool)
     .await
     .unwrap_or(None);
-    if has_seed_ver.is_some() {
+    if has_done.is_some() {
         return Ok(());
     }
     let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -863,17 +863,22 @@ pub async fn ensure_ufm_label_sizes(pool: &SqlitePool) -> Result<(), sqlx::Error
         .bind(&now).bind(&now)
         .execute(pool).await?;
     }
+    sqlx::query(
+        "INSERT OR IGNORE INTO TCNSSysOption (FTSopCode, FTSopApp, FTSopName, FTSopValue, FTSopDesc, FNSopSeq, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy) VALUES ('SeedUfmDone', 'PrintBar', 'สถานะสร้างขนาด UFM ตั้งต้น', '1', 'ป้องกันการสร้างซ้ำเมื่อผู้ใช้ลบออก', 97, ?, 'SYSTEM', ?, 'SYSTEM')"
+    )
+    .bind(&now).bind(&now)
+    .execute(pool).await?;
     Ok(())
 }
 
 pub async fn ensure_ada_label_sizes(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    let has_seed_ver: Option<(String,)> = sqlx::query_as(
-        "SELECT FTSopValue FROM TCNSSysOption WHERE FTSopCode = 'SeedVersion' AND FTSopValue = '2' LIMIT 1",
+    let has_done: Option<(String,)> = sqlx::query_as(
+        "SELECT FTSopValue FROM TCNSSysOption WHERE FTSopCode IN ('SeedAdaDone', 'SeedVersion') LIMIT 1",
     )
     .fetch_optional(pool)
     .await
     .unwrap_or(None);
-    if has_seed_ver.is_some() {
+    if has_done.is_some() {
         return Ok(());
     }
     let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -894,5 +899,10 @@ pub async fn ensure_ada_label_sizes(pool: &SqlitePool) -> Result<(), sqlx::Error
         .bind(&now).bind(&now)
         .execute(pool).await?;
     }
+    sqlx::query(
+        "INSERT OR IGNORE INTO TCNSSysOption (FTSopCode, FTSopApp, FTSopName, FTSopValue, FTSopDesc, FNSopSeq, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy) VALUES ('SeedAdaDone', 'PrintBar', 'สถานะสร้างขนาด ADA ตั้งต้น', '1', 'ป้องกันการสร้างซ้ำเมื่อผู้ใช้ลบออก', 98, ?, 'SYSTEM', ?, 'SYSTEM')"
+    )
+    .bind(&now).bind(&now)
+    .execute(pool).await?;
     Ok(())
 }
