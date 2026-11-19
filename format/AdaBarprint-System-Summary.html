@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>เอกสารสรุปโปรแกรม สถาปัตยกรรม และตารางฐานข้อมูล — AdaBarprint</title>
+  <style>
+    :root {
+      --teal: #007a87;
+      --teal-dark: #005b66;
+      --teal-soft: #e6f4f6;
+      --slate-900: #0f172a;
+      --slate-800: #1e293b;
+      --slate-700: #334155;
+      --slate-600: #475569;
+      --slate-200: #e2e8f0;
+      --slate-100: #f1f5f9;
+      --slate-50: #f8fafc;
+      --amber: #d97706;
+      --amber-soft: #fffbeb;
+      --green: #059669;
+      --green-soft: #ecfdf5;
+      --blue: #0284c7;
+      --blue-soft: #eff6ff;
+      --purple: #7c3aed;
+      --purple-soft: #f5f3ff;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: "Sarabun", "Noto Sans Thai", "Segoe UI", Tahoma, sans-serif;
+      color: var(--slate-800);
+      background: var(--slate-50);
+      line-height: 1.65;
+      font-size: 14.5px;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      background: #1a2430;
+      color: #fff;
+      border-bottom: 3px solid var(--teal);
+      padding: 12px 24px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.18);
+    }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand-badge {
+      background: var(--teal);
+      color: #fff;
+      font-weight: 700;
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 13.5px;
+    }
+    .brand h1 { margin: 0; font-size: 18px; font-weight: 700; }
+    .brand p { margin: 0; font-size: 12px; color: #cbd5e1; }
+    .top-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .btn-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+      border: 1px solid rgba(255,255,255,0.22);
+      color: #fff;
+      background: rgba(255,255,255,0.08);
+    }
+    .btn-link.primary { background: var(--teal); border-color: var(--teal); }
+    .btn-link:hover { opacity: 0.92; }
+
+    .layout {
+      max-width: 1440px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 270px 1fr;
+      gap: 24px;
+      padding: 24px;
+      align-items: start;
+    }
+    .toc {
+      position: sticky;
+      top: 82px;
+      background: #fff;
+      border: 1px solid var(--slate-200);
+      border-radius: 12px;
+      padding: 16px;
+      max-height: calc(100vh - 104px);
+      overflow-y: auto;
+      box-shadow: 0 1px 4px rgba(15, 23, 42, 0.05);
+    }
+    .toc h2 {
+      margin: 0 0 10px 0;
+      font-size: 13.5px;
+      color: var(--teal-dark);
+      border-bottom: 1px solid var(--slate-200);
+      padding-bottom: 8px;
+    }
+    .toc ul { list-style: none; padding: 0; margin: 0; }
+    .toc li { margin: 2px 0; }
+    .toc a {
+      display: block;
+      padding: 6px 10px;
+      border-radius: 6px;
+      color: var(--slate-700);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 500;
+    }
+    .toc a:hover { background: var(--teal-soft); color: var(--teal-dark); }
+    .toc .sub { padding-left: 20px; font-size: 12px; color: var(--slate-600); font-weight: 400; }
+
+    .content { min-width: 0; display: flex; flex-direction: column; gap: 24px; }
+    .card {
+      background: #fff;
+      border: 1px solid var(--slate-200);
+      border-radius: 14px;
+      padding: 24px 28px;
+      box-shadow: 0 1px 6px rgba(15, 23, 42, 0.04);
+      scroll-margin-top: 84px;
+    }
+    .card h2 {
+      margin: 0 0 14px 0;
+      font-size: 20px;
+      color: var(--slate-900);
+      border-bottom: 2px solid var(--teal-soft);
+      padding-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .card h3 {
+      margin: 20px 0 10px 0;
+      font-size: 16px;
+      color: var(--teal-dark);
+      scroll-margin-top: 84px;
+    }
+    .tag {
+      display: inline-block;
+      padding: 2px 9px;
+      border-radius: 999px;
+      font-size: 11.5px;
+      font-weight: 700;
+    }
+    .tag.ro { background: var(--blue-soft); color: var(--blue); border: 1px solid #bfdbfe; }
+    .tag.rw { background: var(--green-soft); color: var(--green); border: 1px solid #a7f3d0; }
+    .tag.api { background: var(--purple-soft); color: var(--purple); border: 1px solid #ddd6fe; }
+    .tag.num { background: var(--teal); color: #fff; font-size: 12.5px; padding: 3px 10px; }
+
+    .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin: 14px 0; }
+    .kpi {
+      border: 1px solid var(--slate-200);
+      border-radius: 10px;
+      padding: 14px;
+      background: var(--slate-50);
+    }
+    .kpi .val { font-size: 22px; font-weight: 800; color: var(--teal-dark); }
+    .kpi .lbl { font-size: 12.5px; color: var(--slate-600); margin-top: 2px; }
+
+    .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); gap: 14px; margin: 12px 0; }
+    .box {
+      border: 1px solid var(--slate-200);
+      background: var(--slate-50);
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0;
+      font-size: 13px;
+    }
+    th, td {
+      border: 1px solid var(--slate-200);
+      padding: 7px 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #2e3b48; color: #fff; font-weight: 600; }
+    tr:nth-child(even) td { background: var(--slate-50); }
+    code {
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12px;
+      background: var(--slate-100);
+      border: 1px solid var(--slate-200);
+      padding: 1px 5px;
+      border-radius: 4px;
+      color: var(--teal-dark);
+      word-break: break-word;
+    }
+    .flow-wrap {
+      overflow-x: auto;
+      background: var(--slate-50);
+      border: 1px solid var(--slate-200);
+      border-radius: 10px;
+      padding: 16px;
+      margin: 14px 0;
+    }
+    .callout {
+      border-radius: 10px;
+      padding: 12px 16px;
+      margin: 12px 0;
+      border-left: 4px solid var(--teal);
+      background: var(--teal-soft);
+      font-size: 13.5px;
+    }
+    .callout.amber { border-left-color: var(--amber); background: var(--amber-soft); color: #78350f; }
+
+    @media (max-width: 960px) {
+      .layout { grid-template-columns: 1fr; padding: 14px; }
+      .toc { position: static; max-height: none; }
+    }
+    @media print {
+      .topbar, .toc, .top-actions { display: none !important; }
+      .layout { display: block; padding: 0; }
+      .card { box-shadow: none; break-inside: avoid; border: 1px solid #cbd5e1; margin-bottom: 14px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-badge">System Summary</div>
+      <div>
+        <h1>เอกสารสรุปโปรแกรม AdaBarprint — สถาปัตยกรรม, ไดร์เวอร์พิมพ์ และตารางฐานข้อมูล</h1>
+        <p>อ้างอิงจากโค้ดจริง: Frontend (React 19 + TypeScript) · Backend (Rust Axum + SQLx + Tauri v2) · Database (db/AdaAccD.db)</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <button class="btn-link primary" type="button" onclick="window.print()">พิมพ์ / บันทึก PDF</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="toc">
+      <h2>สารบัญเอกสารระบบ</h2>
+      <ul>
+        <li><a href="#sum-overview">1. สรุปภาพรวมและ Tech Stack</a></li>
+        <li><a href="#sum-flow">2. สถาปัตยกรรมและการไหลข้อมูล</a></li>
+        <li><a href="#sum-modules">3. โครงสร้างไฟล์และโมดูลหลัก</a></li>
+        <li><a href="#sum-db">4. ตารางฐานข้อมูลที่ใช้งานทั้งหมด</a></li>
+        <li><a class="sub" href="#sum-db-pos">4.1 ตาราง POS Master (Read-Only 25 ตาราง)</a></li>
+        <li><a class="sub" href="#sum-db-barprint">4.2 ตารางระบบ AdaBarprint (Read/Write 15 ตาราง)</a></li>
+        <li><a href="#sum-api">5. รายการ API Endpoints ทั้งหมด</a></li>
+        <li><a href="#sum-drivers">6. ไดร์เวอร์เครื่องพิมพ์ &amp; สเกล 1:1 mm</a></li>
+        <li><a href="#sum-samples">7. ชุดตัวอย่าง Pre-Print Samples</a></li>
+      </ul>
+    </aside>
+
+    <main class="content">
+      <!-- 1. Overview -->
+      <section class="card" id="sum-overview">
+        <h2><span class="tag num">1</span> สรุปภาพรวมโปรแกรมและ Tech Stack</h2>
+        <p>
+          <strong>AdaBarprint</strong> (v0.2.1) เป็นระบบออกแบบและสั่งพิมพ์ป้ายราคา / บาร์โค้ด / Pre-Print สำหรับ POS (AdaPos+) ที่รวมทั้ง Desktop App (<strong>Tauri v2</strong>) และ Web Server (<strong>Rust Axum</strong> + <strong>React/Vite</strong>) เข้าด้วยกัน โดยอ่านข้อมูลสินค้า/ราคา/โปรโมชันจากฐานข้อมูล <code>db/AdaAccD.db</code> และจัดเก็บแม่แบบป้าย การผูกเครื่องพิมพ์/ถาด และประวัติการพิมพ์ไว้ในฐานข้อมูลเดียวกันผ่าน SQLite WAL Mode
+        </p>
+
+        <div class="kpi-grid">
+          <div class="kpi"><div class="val">40 ตาราง</div><div class="lbl">ตารางฐานข้อมูลที่ระบบใช้งานจริง<br/>(POS Read-Only 25 + AdaBarprint 15)</div></div>
+          <div class="kpi"><div class="val">40 Routes</div><div class="lbl">REST API Endpoints ใน Axum Router<br/>(<code>src-tauri/src/lib.rs</code>)</div></div>
+          <div class="kpi"><div class="val">8 แบรนด์</div><div class="lbl">ไดร์เวอร์ที่รองรับ<br/>(Windows GDI + ZPL/EZPL/TSPL/DP/PPLZ/BXL)</div></div>
+          <div class="kpi"><div class="val">12 ขนาดกระดาษ</div><div class="lbl">Preset แผ่น &amp; ม้วน Thermal Roll<br/>(A3/A4/A5/A6/B5/Letter/Legal/Custom)</div></div>
+        </div>
+
+        <div class="grid-2">
+          <div class="box">
+            <strong>Frontend Stack (<code>frontend/</code>)</strong>
+            <ul style="margin:6px 0 0;padding-left:18px;font-size:13.5px;">
+              <li>React <code>19.0</code> + TypeScript <code>5</code> + Vite <code>5.4</code> + Tailwind CSS <code>4</code> + Radix UI</li>
+              <li><code>jsbarcode 3.12.3</code> สร้างบาร์โค้ดเวกเตอร์ SVG (EAN-13, EAN-8, CODE128)</li>
+              <li><code>pdfjs-dist 6.5.438</code> + <code>scripts/sync-pdfjs-assets.mjs</code> เสิร์ฟ WASM/ICC/CMap/Standard Fonts สำหรับนำเข้าฟอร์ม Pre-Print PDF ครบทุก Mask/ColorSpace</li>
+            </ul>
+          </div>
+          <div class="box">
+            <strong>Backend &amp; Desktop Stack (<code>src-tauri/</code>)</strong>
+            <ul style="margin:6px 0 0;padding-left:18px;font-size:13.5px;">
+              <li>Rust + <code>axum</code> HTTP Server (พอร์ต <code>3000</code> โหมดเว็บ / Random local port ใน Tauri)</li>
+              <li><code>sqlx</code> SQLite Connection Pool (<code>db/AdaAccD.db</code>) + WAL Mode</li>
+              <li>Windows Native Print ผ่าน PowerShell + .NET <code>System.Drawing.Printing.PrintDocument</code> (GDI-DEVMODE <code>PageUnit = Millimeter</code> 1:1 mm)</li>
+              <li>Raw TCP <code>9100</code> Print Driver Engine สำหรับเครื่องม้วน Thermal Roll</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- 2. System Architecture & Flow -->
+      <section class="card" id="sum-flow">
+        <h2><span class="tag num">2</span> สถาปัตยกรรมและการไหลของข้อมูล (Data &amp; Print Flow)</h2>
+        <div class="flow-wrap">
+          <svg viewBox="0 0 1020 340" width="100%" style="min-width:760px;height:auto;display:block;font-family:Sarabun,sans-serif;">
+            <defs>
+              <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#007a87" />
+              </marker>
+            </defs>
+            <!-- Column 1: Frontend -->
+            <rect x="20" y="25" width="230" height="290" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+            <rect x="20" y="25" width="230" height="36" rx="12" fill="#007a87"/>
+            <text x="135" y="48" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">Frontend (React + Vite)</text>
+            <rect x="36" y="76" width="198" height="48" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+            <text x="135" y="97" text-anchor="middle" fill="#0f172a" font-size="13" font-weight="700">AdaBarprintPage.tsx</text>
+            <text x="135" y="114" text-anchor="middle" fill="#475569" font-size="11.5">กรองสินค้า · สแกน · คิวพิมพ์ · CSV</text>
+            <rect x="36" y="136" width="198" height="48" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+            <text x="135" y="157" text-anchor="middle" fill="#0f172a" font-size="13" font-weight="700">LabelDesigner.tsx</text>
+            <text x="135" y="174" text-anchor="middle" fill="#475569" font-size="11.5">Design Canvas · Pre-Print PDF/WASM</text>
+            <rect x="36" y="196" width="198" height="48" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+            <text x="135" y="217" text-anchor="middle" fill="#0f172a" font-size="13" font-weight="700">SettingsPanel.tsx</text>
+            <text x="135" y="234" text-anchor="middle" fill="#475569" font-size="11.5">5 แท็บตั้งค่าขนาดป้าย/ถาด/LAN</text>
+            <rect x="36" y="256" width="198" height="44" rx="8" fill="#fffbeb" stroke="#fcd34d"/>
+            <text x="135" y="276" text-anchor="middle" fill="#92400e" font-size="12" font-weight="700">LabelPreview + previewMedia.ts</text>
+            <text x="135" y="291" text-anchor="middle" fill="#78350f" font-size="11">Preview Roll/A4/A5 &amp; Lazy Capture</text>
+
+            <!-- Arrows Frontend -> Backend -->
+            <line x1="250" y1="100" x2="318" y2="100" stroke="#007a87" stroke-width="2" marker-end="url(#arrow)"/>
+            <line x1="250" y1="160" x2="318" y2="160" stroke="#007a87" stroke-width="2" marker-end="url(#arrow)"/>
+            <line x1="250" y1="220" x2="318" y2="220" stroke="#007a87" stroke-width="2" marker-end="url(#arrow)"/>
+            <line x1="250" y1="278" x2="318" y2="278" stroke="#007a87" stroke-width="2" marker-end="url(#arrow)"/>
+
+            <!-- Column 2: Rust Backend -->
+            <rect x="324" y="25" width="270" height="290" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+            <rect x="324" y="25" width="270" height="36" rx="12" fill="#24303c"/>
+            <text x="459" y="48" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">Rust Backend (Axum + Tauri)</text>
+            <rect x="340" y="76" width="238" height="58" rx="8" fill="#eff6ff" stroke="#bfdbfe"/>
+            <text x="459" y="96" text-anchor="middle" fill="#1e3a8a" font-size="13" font-weight="700">routes.rs (Product &amp; Price Engine)</text>
+            <text x="459" y="112" text-anchor="middle" fill="#334155" font-size="11">/api/products · /api/print/build-line</text>
+            <text x="459" y="126" text-anchor="middle" fill="#334155" font-size="11">คำนวณราคา 4PDT + เช็กโปรโมชัน PmtHD/DT</text>
+            <rect x="340" y="146" width="238" height="54" rx="8" fill="#ecfdf5" stroke="#a7f3d0"/>
+            <text x="459" y="166" text-anchor="middle" fill="#065f46" font-size="13" font-weight="700">Template, Preprint &amp; Config APIs</text>
+            <text x="459" y="183" text-anchor="middle" fill="#334155" font-size="11">/api/label-sizes · /api/templates · /api/preprints</text>
+            <text x="459" y="196" text-anchor="middle" fill="#334155" font-size="11">/api/label-printers · /api/paper-sizes</text>
+            <rect x="340" y="212" width="238" height="88" rx="8" fill="#f5f3ff" stroke="#ddd6fe"/>
+            <text x="459" y="233" text-anchor="middle" fill="#5b21b6" font-size="13" font-weight="700">Print Dispatcher &amp; Job Logger</text>
+            <text x="459" y="250" text-anchor="middle" fill="#334155" font-size="11">1) /api/print/create-job -&gt; Job / JobDt / Log</text>
+            <text x="459" y="265" text-anchor="middle" fill="#334155" font-size="11">2) /api/print/windows-direct (GDI 1:1 mm Split Tray)</text>
+            <text x="459" y="280" text-anchor="middle" fill="#334155" font-size="11">3) print_drivers/mod.rs (EZPL/ZPL/TSPL TCP 9100)</text>
+
+            <!-- Arrows Backend -> DB / Output -->
+            <line x1="594" y1="120" x2="668" y2="95" stroke="#007a87" stroke-width="2" marker-end="url(#arrow)"/>
+            <line x1="594" y1="180" x2="668" y2="180" stroke="#007a87" stroke-width="2" marker-end="url(#arrow)"/>
+            <line x1="594" y1="265" x2="668" y2="265" stroke="#007a87" stroke-width="2" marker-end="url(#arrow)"/>
+
+            <!-- Column 3: DB & Printers -->
+            <rect x="674" y="25" width="320" height="120" rx="12" fill="#eff6ff" stroke="#93c5fd" stroke-width="1.5"/>
+            <text x="834" y="50" text-anchor="middle" fill="#1e40af" font-size="13.5" font-weight="700">SQLite: db/AdaAccD.db (POS Read-Only)</text>
+            <text x="834" y="72" text-anchor="middle" fill="#334155" font-size="12">TCNMPdt / TCNMPdtBar / TCNMPdtPackSize</text>
+            <text x="834" y="90" text-anchor="middle" fill="#334155" font-size="12">TCNTPdtPrice4PDT / TCNTPdtPmtHD / PmtDT / PmtCG</text>
+            <text x="834" y="108" text-anchor="middle" fill="#334155" font-size="12">TCNMBranch / TCNMComp / TCNMAgency_L / TCNMImgPdt</text>
+
+            <rect x="674" y="155" width="320" height="72" rx="12" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1.5"/>
+            <text x="834" y="178" text-anchor="middle" fill="#065f46" font-size="13.5" font-weight="700">AdaBarprint Tables (Read / Write)</text>
+            <text x="834" y="198" text-anchor="middle" fill="#334155" font-size="12">TCNMLabelSize · TCNMLabelTmpl · TCNMPreprint</text>
+            <text x="834" y="214" text-anchor="middle" fill="#334155" font-size="12">TCNMPaperSize · TCNMLabelPrinter · TCNTLabelJob*</text>
+
+            <rect x="674" y="237" width="320" height="78" rx="12" fill="#fffbeb" stroke="#fcd34d" stroke-width="1.5"/>
+            <text x="834" y="260" text-anchor="middle" fill="#92400e" font-size="13.5" font-weight="700">Printer Output Targets</text>
+            <text x="834" y="280" text-anchor="middle" fill="#334155" font-size="12">• Windows Spooler GDI (แยกถาดปกติ / โปรโมชัน / PDF)</text>
+            <text x="834" y="298" text-anchor="middle" fill="#334155" font-size="12">• Raw TCP Port 9100 (Thermal Roll: EZPL/ZPL/TSPL)</text>
+          </svg>
+        </div>
+      </section>
+
+      <!-- 3. Code Modules -->
+      <section class="card" id="sum-modules">
+        <h2><span class="tag num">3</span> โครงสร้างไฟล์และโมดูลหลัก</h2>
+        <table>
+          <thead>
+            <tr>
+              <th style="width:310px;">เส้นทางไฟล์</th>
+              <th>บทบาทและความรับผิดชอบหลัก</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td><code>frontend/pages/AdaBarprintPage.tsx</code></td><td>หน้าหลักจัดการคิวพิมพ์ (กรองเงื่อนไข, สแกน, Import CSV, ตารางแบ่งหน้า 20/50/100 ด้วย <code>rowKey</code> เฉพาะแถว, Lazy Offscreen Capture, Split Print Dispatch)</td></tr>
+            <tr><td><code>frontend/components/LabelDesigner.tsx</code></td><td>Visual Label &amp; Pre-Print Studio: วาง 16 ฟิลด์/รูปทรง/ไอคอน, ลากขอบปรับขนาดป้ายอิสระ, นำเข้า PDF Pre-Print + ตรวจ Grid, Preview ปรับ Margin/Gap และจัดกึ่งกลางแผ่น</td></tr>
+            <tr><td><code>frontend/components/LabelPreview.tsx</code></td><td>เอนจินวาดป้าย <code>LabelPreview</code> + <code>CustomDesignRenderer</code> + <code>JsBarcode</code> SVG ทั้งแบบมาตรฐานและแบบออกแบบเอง (รองรับโหมด <code>guide / cell-guide / sheet-overlay / ink</code>)</td></tr>
+            <tr><td><code>frontend/components/SettingsPanel.tsx</code></td><td>หน้าตั้งค่าระบบ 5 แท็บ (ขนาดป้าย, คลัง Pre-Print, เครื่องพิมพ์/ถาด, LAN Printers, ค่าเริ่มต้นระบบ)</td></tr>
+            <tr><td><code>frontend/components/PreviewMediaToolbar.tsx</code><br/><code>frontend/lib/previewMedia.ts</code></td><td>ตัวสลับสื่อ Preview (ตามค่าแบบป้าย, Roll Thermal, A3/A4/A5/A6/B5/Letter/Legal, ป้ายเดี่ยว 1:1, กำหนดเอง) พร้อมกรอบเทียบกระดาษ A4/B5</td></tr>
+            <tr><td><code>frontend/lib/preprintImport.ts</code></td><td>ตัวอ่าน PDF/รูปด้วย <code>pdfjs-dist</code> (+ WASM/ICC/CMap), ตรวจจับขนาดกระดาษและคำนวณ Grid อัตโนมัติ, ตัดภาพช่องแรกเข้า Canvas</td></tr>
+            <tr><td><code>frontend/types/design.ts</code></td><td>TypeScript types, Starter layouts, <code>PAPER_SIZE_PRESETS</code> และ <code>mergePaperSizeOptions</code></td></tr>
+            <tr><td><code>src-tauri/src/lib.rs</code></td><td>กำหนด Axum Router 40 routes, จัดการ Pool SQLite และสร้างหน้าต่าง Tauri Desktop</td></tr>
+            <tr><td><code>src-tauri/src/db.rs</code></td><td>สร้างตารางระบบ AdaBarprint ทั้งหมดใน SQLite, รัน migration เพิ่มคอลัมน์, และ seed ข้อมูลตั้งต้น (ขนาดกระดาษ, ป้ายมาตรฐาน 32 แบบ, ฟิลด์ 16 รายการ, sys options)</td></tr>
+            <tr><td><code>src-tauri/src/routes.rs</code></td><td>API Handlers: ค้นหาสินค้า/ราคา/โปรโมชัน, บันทึกแบบป้าย/Pre-Print, จัดการ Job พิมพ์, และ PowerShell GDI-DEVMODE 1:1 mm Windows Direct Print</td></tr>
+            <tr><td><code>src-tauri/src/print_drivers/mod.rs</code></td><td>Generator คำสั่งภาษาเครื่องพิมพ์ Thermal (Godex EZPL, Zebra ZPL, TSC TSPL, Honeywell DP, Argox PPLZ, Bixolon BXL) และส่ง TCP Port 9100</td></tr>
+            <tr><td><code>scripts/sync-pdfjs-assets.mjs</code></td><td>ซิงก์ไฟล์ <code>wasm</code>, <code>iccs</code>, <code>cmaps</code>, <code>standard_fonts</code> จาก <code>node_modules/pdfjs-dist</code> ไป <code>public/pdfjs/</code> อัตโนมัติก่อนรัน dev/build</td></tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- 4. Database Tables -->
+      <section class="card" id="sum-db">
+        <h2><span class="tag num">4</span> รายละเอียดตารางฐานข้อมูลที่ระบบใช้งานทั้งหมด (SQLite: <code>db/AdaAccD.db</code>)</h2>
+        <div class="callout amber">
+          <strong>โครงสร้างฐานข้อมูล:</strong> ระบบเชื่อมต่อไฟล์ <code>db/AdaAccD.db</code> ไฟล์เดียวที่รวมทั้งตาราง POS Master (646 ตารางในฐาน POS — <strong>AdaBarprint อ่านอย่างเดียว 25 ตาราง</strong>) และตารางที่ AdaBarprint สร้างและบริหารจัดการเอง (<strong>อ่าน/เขียน 15 ตาราง</strong>)
+        </div>
+
+        <h3 id="sum-db-pos">4.1 กลุ่มตาราง POS Master &amp; Transaction <span class="tag ro">Read-Only — 25 ตาราง</span></h3>
+        <table>
+          <thead>
+            <tr>
+              <th style="width:175px;">ชื่อตาราง</th>
+              <th style="width:210px;">ความหมาย / ข้อมูลหลัก</th>
+              <th style="width:270px;">คอลัมน์สำคัญที่ระบบเรียกใช้</th>
+              <th>จุดที่ใช้งานในระบบ</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>TCNMPdt</code></td>
+              <td>ข้อมูลหลักสินค้า (Master Product)</td>
+              <td><code>FTPdtCode</code>, <code>FTPgpChain</code>, <code>FTPtyCode</code>, <code>FTPbnCode</code>, <code>FTPmoCode</code>, <code>FTPdtStaActive</code></td>
+              <td><code>GET /api/products</code>, <code>POST /api/print/build-line</code></td>
+            </tr>
+            <tr>
+              <td><code>TCNMPdt_L</code></td>
+              <td>ชื่อสินค้าหลายภาษา (<code>FNLngID=1</code>)</td>
+              <td><code>FTPdtCode</code>, <code>FNLngID</code>, <code>FTPdtName</code>, <code>FTPdtNameOth</code></td>
+              <td>แสดงชื่อไทย/อังกฤษ บนตารางพิมพ์และป้ายราคา</td>
+            </tr>
+            <tr>
+              <td><code>TCNMPdtBar</code></td>
+              <td>บาร์โค้ดและสถานะใช้งานของสินค้า</td>
+              <td><code>FTPdtCode</code>, <code>FTBarCode</code>, <code>FTPunCode</code>, <code>FTBarStaUse</code></td>
+              <td>สแกนบาร์โค้ด, นำเข้า CSV, จับคู่สินค้า</td>
+            </tr>
+            <tr>
+              <td><code>TCNMPdtPackSize</code></td>
+              <td>ขนาดบรรจุ หน่วย และราคาขายพื้นฐาน</td>
+              <td><code>FTPdtCode</code>, <code>FTPunCode</code>, <code>FCPdtPriceRET</code>, <code>FCPdtPriceWHS</code>, <code>FTPdtUnitDim</code></td>
+              <td>ราคาปลีก/ส่งสำรอง และฟิลด์ขนาด/ปริมาณสินค้า</td>
+            </tr>
+            <tr>
+              <td><code>TCNMPdtUnit_L</code></td>
+              <td>ชื่อหน่วยนับ / หน่วยขายสินค้า</td>
+              <td><code>FTPunCode</code>, <code>FNLngID</code>, <code>FTPunName</code></td>
+              <td>ฟิลด์ <code>tag.selling_unit</code> และคำนวณราคาต่อหน่วย</td>
+            </tr>
+            <tr>
+              <td><code>TCNMPdtBrand_L</code></td>
+              <td>ชื่อยี่ห้อสินค้า (Brand)</td>
+              <td><code>FTPbnCode</code>, <code>FNLngID</code>, <code>FTPbnName</code></td>
+              <td>ตัวกรองเพิ่มเติม (ยี่ห้อ) และฟิลด์ <code>product.brand</code></td>
+            </tr>
+            <tr>
+              <td><code>TCNMPdtGrp_L</code></td>
+              <td>กลุ่ม / หมวดหมู่สินค้า</td>
+              <td><code>FTPgpChain</code>, <code>FNLngID</code>, <code>FTPgpName</code></td>
+              <td>ตัวกรองเพิ่มเติม (หมวดสินค้า) และ <code>product.category</code></td>
+            </tr>
+            <tr>
+              <td><code>TCNMPdtModel_L</code></td>
+              <td>รุ่นสินค้า (Model)</td>
+              <td><code>FTPmoCode</code>, <code>FNLngID</code>, <code>FTPmoName</code></td>
+              <td>ตัวกรองเพิ่มเติม (รุ่น) ใน <code>GET /api/filters/master</code></td>
+            </tr>
+            <tr>
+              <td><code>TCNMPdtType_L</code></td>
+              <td>ประเภทสินค้า (Product Type)</td>
+              <td><code>FTPtyCode</code>, <code>FNLngID</code>, <code>FTPtyName</code></td>
+              <td>ตัวกรองเพิ่มเติม (ประเภท) ใน <code>GET /api/filters/master</code></td>
+            </tr>
+            <tr>
+              <td><code>TCNMImgPdt</code></td>
+              <td>รูปภาพสินค้า (Path/URL/Color Tag)</td>
+              <td><code>FTImgRefID</code>, <code>FTImgTable</code>, <code>FTImgObj</code>, <code>FNImgSeq</code></td>
+              <td>แสดงรูปภาพสินค้าตัวอย่างบน Canvas และ <code>product.image</code></td>
+            </tr>
+            <tr>
+              <td><code>TCNTPdtPrice4PDT</code></td>
+              <td>ตารางใบปรับราคาขายจริงตามวันที่และกลุ่มราคา</td>
+              <td><code>FTPdtCode</code>, <code>FTPunCode</code>, <code>FTPghDocNo</code>, <code>FTPghDocType</code>, <code>FTPplCode</code>, <code>FTAgnCode</code>, <code>FDPghDStart/Stop</code>, <code>FCPgdPriceRet</code></td>
+              <td>คำนวณ <code>setPrice</code> ล่าสุด และกรองเลขที่/วันที่เอกสารราคา</td>
+            </tr>
+            <tr>
+              <td><code>TCNMPdtPriList_L</code></td>
+              <td>ชื่อกลุ่มราคา (Price Group)</td>
+              <td><code>FTPplCode</code>, <code>FNLngID</code>, <code>FTPplName</code></td>
+              <td>ตัวกรอง <em>กลุ่มราคา</em> ในหน้าพิมพ์และ <code>/api/filters/master</code></td>
+            </tr>
+            <tr>
+              <td><code>TCNMAgency_L</code></td>
+              <td>ชื่อตัวแทนขาย / กลุ่มสาขา (Agency)</td>
+              <td><code>FTAgnCode</code>, <code>FNLngID</code>, <code>FTAgnName</code></td>
+              <td>ตัวกรอง <em>ตัวแทน (Agency)</em></td>
+            </tr>
+            <tr>
+              <td><code>TCNMBranch</code> &amp;<br/><code>TCNMBranch_L</code></td>
+              <td>ข้อมูลสาขา ชื่อสาขา และกลุ่มราคาประจำสาขา</td>
+              <td><code>FTBchCode</code>, <code>FTPplCode</code>, <code>FTBchStaActive</code>, <code>FTBchName</code></td>
+              <td><code>GET /api/branches</code> และฟิลด์ <code>store.branch</code></td>
+            </tr>
+            <tr>
+              <td><code>TCNMComp</code>,<br/><code>TCNMComp_L</code>,<br/><code>TCNMShop_L</code></td>
+              <td>ข้อมูลบริษัทและชื่อร้านค้าหลัก</td>
+              <td><code>FTCmpCode</code>, <code>FTBchcode</code>, <code>FTCmpName</code>, <code>FTCmpShop</code>, <code>FTShpName</code></td>
+              <td>แสดงข้อมูลร้าน/บริษัทบนหัวป้าย <code>store.name</code> ใน <code>build_line</code></td>
+            </tr>
+            <tr>
+              <td><code>TCNTPdtPmtHD</code>,<br/><code>TCNTPdtPmtHD_L</code>,<br/><code>TCNTPdtPmtDT</code>,<br/><code>TCNTPdtPmtCG</code></td>
+              <td>เอกสารโปรโมชัน POS (หัวเอกสาร, ชื่อโปรฯ, รายการสินค้าที่ร่วม, เงื่อนไขส่วนลด)</td>
+              <td><code>FTBchCode</code>, <code>FTPmhDocNo</code>, <code>FDPmhDStart/Stop</code>, <code>FTPmhStaApv</code>, <code>FTPmhStaClosed</code>, <code>FTPmhName</code>, <code>FTPmdBarCode</code>, <code>FTPmdRefCode</code>, <code>FTPgtStaGetType</code>, <code>FCPgtGetvalue</code></td>
+              <td>ตรวจสอบสินค้าเข้าโปรโมชัน ณ วันที่มีผล (`isPromo`), แยกกลุ่มราคาปกติ/โปรฯ, และกรอง Promotion</td>
+            </tr>
+            <tr>
+              <td><code>TCNMPrinter</code>,<br/><code>TCNMPrinter_L</code>,<br/><code>TCNMUser</code></td>
+              <td>รายการเครื่องพิมพ์และรหัสผู้ใช้ใน POS</td>
+              <td><code>FTPrnCode</code>, <code>FTPrnDriver</code>, <code>FTPrnName</code>, <code>FTUsrCode</code></td>
+              <td><code>GET /api/printers</code> และดึงชื่อผู้ใช้ระบบเริ่มต้น</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3 id="sum-db-barprint">4.2 กลุ่มตารางระบบ AdaBarprint <span class="tag rw">Read / Write — 15 ตาราง (จัดการใน <code>db.rs</code>)</span></h3>
+        <table>
+          <thead>
+            <tr>
+              <th style="width:175px;">ชื่อตาราง</th>
+              <th style="width:205px;">หน้าที่ในระบบ</th>
+              <th style="width:280px;">คอลัมน์สำคัญ</th>
+              <th>API / การทำงานหลัก</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>TCNMPrinterServer</code></td>
+              <td>กำหนดชื่อเครื่อง Print Server (ค่าเริ่มต้น <code>LOCAL</code>)</td>
+              <td><code>FTPsvCode</code> (PK), <code>FTPsvName</code>, <code>FTPsvStaUse</code></td>
+              <td>ผูกคีย์แม่ให้กับ <code>TCNMLabelPrinter</code></td>
+            </tr>
+            <tr>
+              <td><code>TCNSSysOption</code></td>
+              <td>ค่าตั้งต้นระบบ (สาขา, ป้าย, เครื่องพิมพ์, DPI, Print Server)</td>
+              <td><code>FTSopCode</code> (PK), <code>FTSopApp</code>, <code>FTSopName</code>, <code>FTSopValue</code>, <code>FNSopSeq</code></td>
+              <td><code>GET /api/config/all</code>, <code>POST /api/config/options</code></td>
+            </tr>
+            <tr>
+              <td><code>TCNMPaperSize</code></td>
+              <td>ตารางขนาดกระดาษ (12 Preset + กำหนดเอง)</td>
+              <td><code>FTPpsCode</code> (PK), <code>FTPpsName</code>, <code>FCPpsWidth</code>, <code>FCPpsHeight</code>, <code>FTPpsWinKind</code>, <code>FTPpsStaCustom</code></td>
+              <td><code>GET /api/paper-sizes</code>, <code>/save</code>, <code>/delete</code> (<code>A4, A4_L, A5, A5_L, A6, A3, B5_JIS, B5_ISO, LETTER, LEGAL, ROLL, CUSTOM</code>)</td>
+            </tr>
+            <tr>
+              <td><code>TCNMPreprint</code></td>
+              <td>คลังฟอร์ม Pre-Print PDF / รูปที่บันทึกไว้</td>
+              <td><code>FTPprCode</code> (PK), <code>FTPprName</code>, <code>FTPprFileName</code>, <code>FTPpsCode</code>, <code>FCPprWidth/Height</code>, <code>FNPprCol/Row</code>, <code>FCPprLabelW/H</code>, <code>FCPprMagTop/Bottom/Left/Right</code>, <code>FTPprSheetImg</code>, <code>FTPprCellImg</code>, <code>FTPprCropJson</code></td>
+              <td><code>GET /api/preprints</code>, <code>/save</code>, <code>/delete</code> และอัปเดตอัตโนมัติตอนบันทึกแบบ Pre-Print</td>
+            </tr>
+            <tr>
+              <td><code>TCNMLabelField</code></td>
+              <td>Master ฟิลด์ข้อมูล 16 ฟิลด์ใน Design Studio</td>
+              <td><code>FTLbfCode</code> (PK), <code>FTLbfName</code>, <code>FTLbfType</code>, <code>FTLbfSample</code>, <code>FCLbfDefW/H</code>, <code>FNLbfDefFont</code>, <code>FTLbfStaAdv</code></td>
+              <td><code>GET /api/label-fields</code> (แถบซ้าย Design Studio)</td>
+            </tr>
+            <tr>
+              <td><code>TCNMLabelSize</code></td>
+              <td>ขนาดป้าย ระยะขอบ และการจัดหน้า (32+ รูปแบบ)</td>
+              <td><code>FTLbsCode</code> (PK), <code>FTLbsGroup</code> (1=แผ่น, 2=ม้วน), <code>FTLbsName</code>, <code>FCLbsWidth/Height</code>, <code>FNLbsCol/Row</code>, <code>FCLbsMagTop/Bottom/Left/Right</code>, <code>FCLbsGapH/V</code>, <code>FTLbsPaperSize</code>, <code>FCPpr/OffsetX/Y</code>, <code>FTLbsTmplNor/Pmt</code>, <code>FTPprCode</code></td>
+              <td><code>GET /api/label-sizes</code>, <code>/save</code>, <code>/toggle</code>, <code>/delete</code></td>
+            </tr>
+            <tr>
+              <td><code>TCNMLabelTmpl</code></td>
+              <td>บันทึกแม่แบบที่ออกแบบใน Design Studio (JSON)</td>
+              <td><code>FTLtmCode</code> (PK), <code>FTLbsCode</code>, <code>FTLtmPriType</code> ('1'/'2'), <code>FTLtmLayout</code> (JSON), <code>FTLtmMode</code> ('full'/'preprint'), <code>FTPprCode</code></td>
+              <td><code>GET /api/templates</code>, <code>/save</code>, <code>/save-as</code>, <code>/delete-custom</code>, <code>/reset</code></td>
+            </tr>
+            <tr>
+              <td><code>TCNMLabelPrinter</code></td>
+              <td>จับคู่เครื่องพิมพ์และถาดแยกปกติ/โปรฯ ตามรหัสป้าย</td>
+              <td><code>FTLbsCode + FTPsvCode + FTLbpPriType</code> (PK), <code>FTLbpPrinter</code>, <code>FTLbpTray</code>, <code>FTLbpProtocol</code></td>
+              <td><code>GET /api/label-printers</code>, <code>POST /api/label-printers</code></td>
+            </tr>
+            <tr>
+              <td><code>TCNTLabelJob</code></td>
+              <td>หัวเอกสารงานพิมพ์ (Print Job History Header)</td>
+              <td><code>FTLjbJobID</code> (PK), <code>FTLjbBchCode</code>, <code>FTLjbSource</code>, <code>FTLjbPriType</code>, <code>FTLjbLbsOvr</code>, <code>FTLjbStatus</code>, <code>FDCreateOn</code></td>
+              <td><code>POST /api/print/create-job</code>, <code>GET /api/history</code></td>
+            </tr>
+            <tr>
+              <td><code>TCNTLabelJobDt</code></td>
+              <td>รายละเอียดสินค้าและราคาทุกบรรทัดใน Job พิมพ์</td>
+              <td><code>FTLjbJobID + FNLjdSeq</code> (PK), <code>FTLjdBarCode</code>, <code>FTLjdPdtCode</code>, <code>FCLjdSetPrice</code>, <code>FCLjdSalePrice</code>, <code>FNLjdLabQty</code>, <code>FNLjdBarSeq</code>, <code>FNLjdPage</code>, <code>FTLjdPriTyp</code></td>
+              <td><code>POST /api/print/create-job</code>, <code>GET /api/history/:jobId</code></td>
+            </tr>
+            <tr>
+              <td><code>TCNTLabelLog</code></td>
+              <td>บันทึกผลส่งพิมพ์จริงแยกคิวปกติ / โปรโมชัน &amp; Error</td>
+              <td><code>FTLlgLogID</code> (PK), <code>FTLjbJobID</code>, <code>FTLlgLbsCode</code>, <code>FTLlgPriTyp</code>, <code>FTLlgPrinter</code>, <code>FNLlgQtyLabel</code>, <code>FNLlgQtyPage</code>, <code>FTLlgStatus</code>, <code>FTLlgErrMsg</code>, <code>FTLlgFileRef</code></td>
+              <td><code>POST /api/print/create-job</code>, <code>/windows-direct</code>, <code>/send</code></td>
+            </tr>
+            <tr>
+              <td><code>TCNMPdtLabel</code>,<br/><code>TCNMPdtPri</code>,<br/><code>TCNMPmtHD</code>,<br/><code>TCNMPmtDT</code></td>
+              <td>ตารางสำรองระดับ Application (Default Label Mapping, Fallback Mock Price &amp; Promo)</td>
+              <td><code>FTPdtCode</code>, <code>FTBarCode</code>, <code>FTLbsCode</code>, <code>FCPpcPrice</code>, <code>FTPmhDocNo</code>, <code>FCPmdPricePmt</code></td>
+              <td>ใช้ fallback ใน <code>post_build_line</code> / <code>get_products</code> / <code>post_seed</code> เมื่อไม่มีข้อมูลใน POS หลัก</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- 5. API Endpoints -->
+      <section class="card" id="sum-api">
+        <h2><span class="tag num">5</span> สรุป REST API Endpoints ทั้งหมด (<code>src-tauri/src/lib.rs</code>)</h2>
+        <table>
+          <thead>
+            <tr>
+              <th style="width:155px;">กลุ่มการทำงาน</th>
+              <th style="width:270px;">Method &amp; Endpoint</th>
+              <th>หน้าที่</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>ข้อมูลสินค้า &amp; ตัวกรอง</strong></td>
+              <td>
+                <span class="tag api">GET</span> <code>/api/branches</code><br/>
+                <span class="tag api">GET</span> <code>/api/filters/master</code><br/>
+                <span class="tag api">GET</span> <code>/api/products</code><br/>
+                <span class="tag api">GET</span> <code>/api/promotions</code><br/>
+                <span class="tag api">GET</span> <code>/api/image-proxy</code>
+              </td>
+              <td>ดึงสาขา, ข้อมูลกรอง (กลุ่ม/ยี่ห้อ/หมวด/รุ่น/กลุ่มราคา/ตัวแทน), ค้นหา/กรองรายการสินค้าพร้อมบาร์โค้ดและราคา, ดูโปรโมชัน, และ Proxy ภาพสินค้าภายนอกแก้ปัญหา CORS ตอน Capture PNG</td>
+            </tr>
+            <tr>
+              <td><strong>ขนาดกระดาษ, ข้อมูลเริ่มต้น &amp; Pre-Print</strong></td>
+              <td>
+                <span class="tag api">GET/POST</span> <code>/api/seed</code><br/>
+                <span class="tag api">GET</span> <code>/api/paper-sizes</code> + <code>/save</code>, <code>/delete</code><br/>
+                <span class="tag api">GET</span> <code>/api/preprints</code> + <code>/save</code>, <code>/delete</code><br/>
+                <span class="tag api">GET</span> <code>/api/label-fields</code>
+              </td>
+              <td>ซิงก์/ตรวจสอบข้อมูล Seed เริ่มต้น, จัดการขนาดกระดาษมาตรฐาน/กำหนดเอง (12+ แบบ), จัดการคลังฟอร์ม Pre-Print ที่บันทึกไว้, และดึงรายการฟิลด์ข้อมูลสำหรับหน้า Design Studio</td>
+            </tr>
+            <tr>
+              <td><strong>ขนาดป้าย &amp; แม่แบบ</strong></td>
+              <td>
+                <span class="tag api">GET</span> <code>/api/label-sizes</code> + <code>/save</code>, <code>/toggle</code>, <code>/delete</code><br/>
+                <span class="tag api">GET</span> <code>/api/templates</code> + <code>/save</code>, <code>/save-as</code>, <code>/delete-custom</code>, <code>/reset</code>
+              </td>
+              <td>จัดการขนาดป้าย, Margin/Gap/Offset, เปิด-ปิดใช้งานแบบป้าย, และบันทึก Layout Design แยกราคาปกติ (`1`) / โปรโมชัน (`2`)</td>
+            </tr>
+            <tr>
+              <td><strong>เครื่องพิมพ์ &amp; ตั้งค่า</strong></td>
+              <td>
+                <span class="tag api">GET</span> <code>/api/printers/windows</code><br/>
+                <span class="tag api">GET</span> <code>/api/printers</code> (POST)<br/>
+                <span class="tag api">GET</span> <code>/api/lan-printers</code> + <code>/save</code>, <code>/delete</code><br/>
+                <span class="tag api">GET</span> <code>/api/label-printers</code> (POST)<br/>
+                <span class="tag api">GET</span> <code>/api/config/all</code> · <span class="tag api">POST</span> <code>/api/config/options</code>
+              </td>
+              <td>สแกน Windows Printer และถาดที่ติดตั้งจริงผ่าน PowerShell, จัดการ LAN Printers, จับคู่เครื่องพิมพ์+ถาดแยกปกติ/โปรฯ ตามป้าย, และบันทึกค่าเริ่มต้นระบบ</td>
+            </tr>
+            <tr>
+              <td><strong>คำนวณราคา &amp; สั่งพิมพ์</strong></td>
+              <td>
+                <span class="tag api">POST</span> <code>/api/print/build-line</code><br/>
+                <span class="tag api">POST</span> <code>/api/print/create-job</code><br/>
+                <span class="tag api">POST</span> <code>/api/print/windows-direct</code><br/>
+                <span class="tag api">POST</span> <code>/api/print/send</code><br/>
+                <span class="tag api">POST</span> <code>/api/print/check</code><br/>
+                <span class="tag api">GET/POST</span> <code>/api/print/ezpl</code><br/>
+                <span class="tag api">POST</span> <code>/api/godex/print</code> · <code>/api/godex/status</code><br/>
+                <span class="tag api">POST</span> <code>/api/import</code><br/>
+                <span class="tag api">GET</span> <code>/api/history</code> · <code>/api/history/:jobId</code>
+              </td>
+              <td>คำนวณราคาขายและโปรโมชันรายสินค้า (รองรับระบุ <code>pdtCode</code> เมื่อบาร์โค้ดซ้ำข้ามสินค้า), สร้าง Job พิมพ์, พิมพ์ Windows Direct 1:1 mm GDI-DEVMODE, พิมพ์ LAN Raw TCP Port 9100 (EZPL/ZPL/TSPL ฯลฯ), ตรวจสถานะเครื่อง, และดูประวัติการพิมพ์ย้อนหลัง</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- 6. Print Drivers -->
+      <section class="card" id="sum-drivers">
+        <h2><span class="tag num">6</span> ไดร์เวอร์เครื่องพิมพ์และกลไกสเกล 1:1 mm</h2>
+        <div class="grid-2">
+          <div class="box">
+            <strong>1. Windows Direct Print (<code>post_windows_direct_print</code>)</strong>
+            <ul style="margin:6px 0 0;padding-left:18px;font-size:13.5px;">
+              <li>จับภาพหน้ากระดาษ/ม้วนจาก Frontend ด้วย SVG-to-Canvas ความละเอียด 2x (<code>192 DPI</code>)</li>
+              <li>ป้องกัน Race Condition ด้วย <code>WINDOWS_PRINT_LOCK</code> Mutex</li>
+              <li>รัน PowerShell <code>PrintDocument</code> ตั้งค่า <code>PaperSource</code> (ถาด) และ <code>PaperSize</code> แบบ GDI-DEVMODE ต่อ Job (ไม่รบกวนค่า Spooler กลาง)</li>
+              <li><strong>สเกลแม่นยำ 1:1 mm:</strong> ตั้ง <code>e.Graphics.PageUnit = Millimeter</code> วาดขนาด <code>paperWidthMm × paperHeightMm</code> เต็มแผ่น (<code>x=0, y=0</code>) เพื่อไม่ให้แถวล่างบนฟอร์ม Pre-Print เยื้องสะสม</li>
+              <li>รองรับส่งพิมพ์ออกเครื่อง PDF เสมือน (บันทึกไฟล์อัตโนมัติลงโฟลเดอร์ <code>exports/</code>)</li>
+            </ul>
+          </div>
+          <div class="box">
+            <strong>2. Thermal Roll &amp; LAN Drivers (<code>print_drivers/mod.rs</code>)</strong>
+            <ul style="margin:6px 0 0;padding-left:18px;font-size:13.5px;">
+              <li>ส่งคำสั่งตรงผ่าน <code>TcpStream</code> พอร์ต <code>9100</code> พร้อมรองรับ 203 / 300 DPI, Speed, Darkness:</li>
+              <li><code>GODEX</code> → <strong>EZPL</strong> (สั่งตามลำดับมาตรฐาน <code>^W</code> → <code>^Q{height},{gap}</code> → <code>^H</code> → <code>^S</code> → <code>^P</code> → <code>^L ... E</code> เพื่อป้องกันสติ๊กเกอร์ไหลเพี้ยนระยะแถวถัดไป)</li>
+              <li><code>ZEBRA</code> → <strong>ZPL II</strong> (<code>^XA ^PW ^LL ... ^XZ</code>)</li>
+              <li><code>TSC</code> → <strong>TSPL</strong> (<code>SIZE / GAP / DIRECTION / CLS ... PRINT</code>)</li>
+              <li><code>HONEYWELL</code> → <strong>Fingerprint/DP</strong> · <code>ARGOX</code> → <strong>PPLZ</strong> · <code>BIXOLON</code> → <strong>BXL</strong></li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- 7. Preprint Samples -->
+      <section class="card" id="sum-samples">
+        <h2><span class="tag num">7</span> ชุดไฟล์ตัวอย่าง Pre-Print (<code>format/Preprint-Samples/</code>)</h2>
+        <p>ไฟล์ PDF ตัวอย่างพร้อมกรอบและระยะขอบมาตรฐาน สำหรับนำไปทดสอบนำเข้าในหน้า Design Studio หรือทดสอบพิมพ์ทับจริง:</p>
+        <table>
+          <thead>
+            <tr>
+              <th>โฟลเดอร์</th>
+              <th>ขนาดกระดาษ</th>
+              <th>ขนาดดวง × จัดเรียง</th>
+              <th>ไฟล์ตัวอย่างภายใน</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td><code>50x38_A4_28up</code></td><td>A4 (210×297 mm)</td><td>50 × 38 mm · 4×7 (28 ดวง)</td><td><code>Preprint-SizeA4-50x38-Normal-28up.pdf</code>, <code>...-Promo-28up.pdf</code></td></tr>
+            <tr><td><code>100x38_A4_14up</code></td><td>A4 (210×297 mm)</td><td>100 × 38 mm · 2×7 (14 ดวง)</td><td><code>Preprint-SizeA4-100x38-Normal-14up.pdf</code>, <code>...-Promo-14up.pdf</code></td></tr>
+            <tr><td><code>100x65_A7_8up</code></td><td>A4 (210×297 mm)</td><td>100 × 65 mm · 2×4 (8 ดวง)</td><td><code>Preprint-SizeA4-100x65-Appliance-Normal-8up.pdf</code>, <code>...-Promo-8up.pdf</code></td></tr>
+            <tr><td><code>100x142_A6_4up</code></td><td>A4 (210×297 mm)</td><td>100 × 142 mm · 2×2 (4 ดวง)</td><td><code>Preprint-SizeA4-100x142-A6-Promo-4up.pdf</code></td></tr>
+            <tr><td><code>200x95_1of3A4_3up</code></td><td>A4 (210×297 mm)</td><td>200 × 95 mm · 1×3 (3 ดวง)</td><td><code>Preprint-SizeA4-200x95-Appliance-Normal-3up.pdf</code>, <code>...-Appliance-Promo-3up.pdf</code>, <code>...-Promo-3up.pdf</code></td></tr>
+            <tr><td><code>200x142_A5_2up</code></td><td>A4 (210×297 mm)</td><td>200 × 142 mm · 1×2 (2 ดวง)</td><td><code>Preprint-SizeA4-200x142-A5-Promo-2up.pdf</code></td></tr>
+            <tr><td><code>84x60_B5_8up</code></td><td>B5 JIS (182×257 mm)</td><td>84 × 60 mm · 2×4 (8 ดวง)</td><td><code>Preprint-SizeB5-84x60-Promo-8up.pdf</code></td></tr>
+          </tbody>
+        </table>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
