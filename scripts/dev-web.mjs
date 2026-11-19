@@ -1,6 +1,9 @@
 import net from "node:net";
 import { spawn } from "node:child_process";
 import process from "node:process";
+import { syncPdfjsAssets } from "./sync-pdfjs-assets.mjs";
+
+syncPdfjsAssets();
 
 const isWin = process.platform === "win32";
 const children = [];

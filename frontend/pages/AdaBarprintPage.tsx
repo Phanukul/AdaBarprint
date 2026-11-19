@@ -38,6 +38,15 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { LabelPreview } from '@/components/LabelPreview';
 import { LabelDesigner, type SaveAsPayload, type SheetConfigMeta } from '@/components/LabelDesigner';
 import {
+  PreviewMediaToolbar,
+  PreviewReferenceFrameWrapper,
+} from '@/components/PreviewMediaToolbar';
+import {
+  computeEffectivePreviewLayout,
+  getDefaultPreviewMediaConfig,
+  type PreviewMediaConfig,
+} from '@/lib/previewMedia';
+import {
   SettingsPanel,
   type ConfigLabelSizeRow,
   type PrinterServerRow,
@@ -112,6 +121,7 @@ interface ScanTmpRow {
 }
 
 interface PrintQueueRow {
+  rowKey: string;
   pdtCode: string;
   pdtName: string;
   barCode: string;
@@ -124,6 +134,12 @@ interface PrintQueueRow {
   ctx: Record<string, any>;
   promoName?: string;
   statusText: string;
+}
+
+let queueRowSeq = 0;
+function nextQueueRowKey(pdtCode: string, barCode: string, priType: string): string {
+  queueRowSeq += 1;
+  return `${pdtCode || ''}|${barCode || ''}|${priType || '1'}|${queueRowSeq}`;
 }
 
 interface WindowsPrinterInfo {
@@ -176,8 +192,8 @@ async function capturePagesToPngBase64(
   const container = document.getElementById(containerId);
   if (!container) return [];
   const sheetEls = Array.from(container.querySelectorAll<HTMLElement>('[data-capture-sheet="1"]'));
-  const wPx = Math.max(200, Math.round((paperWidthMm / 25.4) * 96));
-  const hPx = Math.max(200, Math.round((paperHeightMm / 25.4) * 96));
+  const wPx = Math.max(40, Math.round((paperWidthMm / 25.4) * 96));
+  const hPx = Math.max(40, Math.round((paperHeightMm / 25.4) * 96));
   const results: string[] = [];
   for (const el of sheetEls) {
     const clone = el.cloneNode(true) as HTMLElement;
@@ -478,7 +494,13 @@ export default function AdaBarprintPage() {
   // Right Main Print Table
   const [mainSearch, setMainSearch] = useState('');
   const [mainRows, setMainRows] = useState<PrintQueueRow[]>([]);
+  const [mainPage, setMainPage] = useState(1);
+  const [mainPageSize, setMainPageSize] = useState(20);
   const [movingData, setMovingData] = useState(false);
+
+  // Lazy mount flags so hidden print/capture barcode SVGs do not lag editing/deleting
+  const [captureDomMounted, setCaptureDomMounted] = useState(false);
+  const [browserPrintMounted, setBrowserPrintMounted] = useState(false);
 
   // Modal: Scan Product (dcmPrintBarEventGetPdtInTmp)
   const [scanModalOpen, setScanModalOpen] = useState(false);
@@ -508,6 +530,9 @@ export default function AdaBarprintPage() {
   const [savingOffset, setSavingOffset] = useState(false);
   const [advancedFiltersOpen, setAdvancedFiltersOpen] = useState(false);
   const [sheetPreviewScale, setSheetPreviewScale] = useState<number>(0.45);
+  const [previewMedia, setPreviewMedia] = useState<PreviewMediaConfig>(() =>
+    getDefaultPreviewMediaConfig({})
+  );
 
   // Modal: Import Excel / CSV (Version 5)
   const [importModalOpen, setImportModalOpen] = useState(false);
@@ -750,6 +775,7 @@ export default function AdaBarprintPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             barcode: item.barCode,
+            pdtCode: item.pdtCode || undefined,
             qty: item.qty,
             bchCode,
             priType: '1',
@@ -769,12 +795,14 @@ export default function AdaBarprintPage() {
           fail.push({ pdtCode: item.pdtCode, barCode: item.barCode, pdtName: item.pdtName, reason: 'ไม่มีโปรโมชันในช่วงวันที่เลือก' });
           continue;
         }
+        const priType: '1' | '2' = isPromo ? '2' : '1';
         pass.push({
+          rowKey: nextQueueRowKey(data.pdtCode, data.barcode, priType),
           pdtCode: data.pdtCode,
           pdtName: data.pdtName,
           barCode: data.barcode,
           price: data.setPrice ?? 0,
-          priType: isPromo ? '2' : '1',
+          priType,
           qty: item.qty,
           selected: true,
           lbsCode: data.lbsCode,
@@ -840,12 +868,14 @@ export default function AdaBarprintPage() {
           fail.push({ pdtCode: data.pdtCode, barCode: bar, pdtName: data.pdtName, reason: 'ไม่มีโปรโมชันในช่วงวันที่เลือก' });
           continue;
         }
+        const priType: '1' | '2' = isPromo ? '2' : '1';
         pass.push({
+          rowKey: nextQueueRowKey(data.pdtCode, data.barcode, priType),
           pdtCode: data.pdtCode,
           pdtName: data.pdtName,
           barCode: data.barcode,
           price: data.setPrice ?? 0,
-          priType: isPromo ? '2' : '1',
+          priType,
           qty,
           selected: true,
           lbsCode: data.lbsCode,
@@ -876,7 +906,9 @@ export default function AdaBarprintPage() {
     setMainRows(prev => {
       const merged = [...prev];
       for (const item of previewPass) {
-        const idx = merged.findIndex(m => m.barCode === item.barCode && m.priType === item.priType);
+        const idx = merged.findIndex(
+          m => m.pdtCode === item.pdtCode && m.barCode === item.barCode && m.priType === item.priType
+        );
         if (idx >= 0) {
           merged[idx] = { ...merged[idx], qty: merged[idx].qty + item.qty };
         } else {
@@ -921,43 +953,58 @@ export default function AdaBarprintPage() {
       const list: ProductItem[] = data.products || [];
       const bchCode = resolveDefaultBranch();
 
+      const targets = list.slice(0, 100);
+      const qtyVal = Math.max(1, defaultQty);
       const built: PrintQueueRow[] = [];
-      for (const p of list.slice(0, 100)) {
-        const bar = p.bars?.[0]?.FTPdbBarCode || p.FTPdtCode;
-        const bRes = await fetch('/api/print/build-line', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            barcode: bar,
-            qty: Math.max(1, defaultQty),
-            bchCode,
-            priType: '1',
-            verify: sheetPriceType !== 'Normal',
-            overrideLbs: selectedLabelCode,
-            effectiveDate: useEffectiveDate && effectiveDate ? effectiveDate : undefined,
-            priceGroup: priceGroupCode || undefined,
-          }),
-        });
-        if (!bRes.ok) continue;
-        const line = await bRes.json();
-        const isPromo = Boolean(line.isPromo);
-        if (sheetPriceType === 'Promotion' && !isPromo) continue;
-        built.push({
-          pdtCode: line.pdtCode,
-          pdtName: line.pdtName,
-          barCode: line.barcode,
-          price: line.setPrice ?? 0,
-          priType: isPromo ? '2' : '1',
-          qty: Math.max(1, defaultQty),
-          selected: true,
-          lbsCode: line.lbsCode,
-          tmplCode: line.tmplCode,
-          ctx: line.ctx,
-          promoName: line.promo?.name,
-          statusText: 'พร้อมพิมพ์',
-        });
+      const CONCURRENCY = 10;
+      for (let i = 0; i < targets.length; i += CONCURRENCY) {
+        const chunk = targets.slice(i, i + CONCURRENCY);
+        const results = await Promise.all(
+          chunk.map(async (p) => {
+            const bar = p.bars?.[0]?.FTPdbBarCode || p.FTPdtCode;
+            const bRes = await fetch('/api/print/build-line', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                barcode: bar,
+                pdtCode: p.FTPdtCode,
+                qty: qtyVal,
+                bchCode,
+                priType: '1',
+                verify: sheetPriceType !== 'Normal',
+                overrideLbs: selectedLabelCode,
+                effectiveDate: useEffectiveDate && effectiveDate ? effectiveDate : undefined,
+                priceGroup: priceGroupCode || undefined,
+              }),
+            });
+            if (!bRes.ok) return null;
+            const line = await bRes.json();
+            const isPromo = Boolean(line.isPromo);
+            if (sheetPriceType === 'Promotion' && !isPromo) return null;
+            const priType: '1' | '2' = isPromo ? '2' : '1';
+            return {
+              rowKey: nextQueueRowKey(line.pdtCode, line.barcode, priType),
+              pdtCode: line.pdtCode,
+              pdtName: line.pdtName,
+              barCode: line.barcode,
+              price: line.setPrice ?? 0,
+              priType,
+              qty: qtyVal,
+              selected: true,
+              lbsCode: line.lbsCode,
+              tmplCode: line.tmplCode,
+              ctx: line.ctx,
+              promoName: line.promo?.name,
+              statusText: 'พร้อมพิมพ์',
+            } as PrintQueueRow;
+          })
+        );
+        for (const row of results) {
+          if (row) built.push(row);
+        }
       }
       setMainRows(built);
+      setMainPage(1);
       toast.success(
         list.length > 100
           ? `แสดงข้อมูลสินค้า ${built.length} รายการ (จำกัดสูงสุด 100 รายการแรก)`
@@ -1006,6 +1053,18 @@ export default function AdaBarprintPage() {
         r.barCode.toLowerCase().includes(q)
     );
   }, [mainRows, mainSearch]);
+
+  const mainTotalPages = Math.max(1, Math.ceil(filteredMainRows.length / mainPageSize));
+  const safeMainPage = Math.min(mainPage, mainTotalPages);
+  const pagedMainRows = useMemo(() => {
+    const start = (safeMainPage - 1) * mainPageSize;
+    return filteredMainRows.slice(start, start + mainPageSize);
+  }, [filteredMainRows, safeMainPage, mainPageSize]);
+
+  const selectedMainCount = useMemo(
+    () => mainRows.reduce((acc, r) => acc + (r.selected ? 1 : 0), 0),
+    [mainRows]
+  );
 
   const normalRows = useMemo(() => mainRows.filter(r => r.selected && r.priType === '1'), [mainRows]);
   const promoRows = useMemo(() => mainRows.filter(r => r.selected && r.priType === '2'), [mainRows]);
@@ -1173,6 +1232,11 @@ export default function AdaBarprintPage() {
           });
         }
 
+        setCaptureDomMounted(true);
+        await new Promise<void>(resolve =>
+          requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 180)))
+        );
+
         const messages: string[] = [];
         for (let idx = 0; idx < dispatches.length; idx++) {
           const d = dispatches[idx];
@@ -1221,25 +1285,41 @@ export default function AdaBarprintPage() {
             printerIp: printer.ip,
             printerPort: printer.port,
             brand: printer.brand,
-            lines: selected.map(r => ({ ...r, barcode: r.barCode, selected: true })),
+            lines: selected.map(r => ({ ...r, barcode: r.barCode, lbsCode: selectedLabelCode || r.lbsCode, selected: true })),
             options: { dpi: printer.dpi, speed: printer.speed, darkness: printer.darkness },
           }),
         });
         const data = await res.json();
         toast.success(data.message || `ส่งพิมพ์ ${selected.length} รายการสำเร็จ`);
       } else {
-        toast.success(`บันทึกงานพิมพ์ ${selected.length} รายการแล้ว (เปิดหน้าต่างพิมพ์ A4)`);
+        setBrowserPrintMounted(true);
+        toast.success(`บันทึกงานพิมพ์ ${selected.length} รายการแล้ว (เปิดหน้าต่างพิมพ์ ${a4Layout.paperLabel})`);
         setSendPrintOpen(false);
-        setTimeout(() => window.print(), 350);
+        setTimeout(() => {
+          window.print();
+          setTimeout(() => setBrowserPrintMounted(false), 1000);
+        }, 350);
         return;
       }
       setSendPrintOpen(false);
     } catch (err: any) {
       toast.error(err?.message || 'ส่งคำสั่งพิมพ์ไม่สำเร็จ');
     } finally {
+      setCaptureDomMounted(false);
       setPrinting(false);
     }
   };
+
+  useEffect(() => {
+    const onBeforePrint = () => setBrowserPrintMounted(true);
+    const onAfterPrint = () => setBrowserPrintMounted(false);
+    window.addEventListener('beforeprint', onBeforePrint);
+    window.addEventListener('afterprint', onAfterPrint);
+    return () => {
+      window.removeEventListener('beforeprint', onBeforePrint);
+      window.removeEventListener('afterprint', onAfterPrint);
+    };
+  }, []);
 
   const handleExportCsv = () => {
     const selected = mainRows.filter(r => r.selected);
@@ -1287,8 +1367,41 @@ export default function AdaBarprintPage() {
     return () => window.removeEventListener('keydown', onKeyDown);
   });
 
+  const selectedLabelSizeObj = useMemo(
+    () => labelSizes.find((s) => s.FTLbsCode === selectedLabelCode),
+    [labelSizes, selectedLabelCode]
+  );
+
+  useEffect(() => {
+    const ls = selectedLabelSizeObj;
+    const rawPs = (ls?.FTLbsPaperSize || paperSizes[0]?.FTPpsCode || 'A4') as PaperSizeCode;
+    const dbPaper = paperSizes.find((p) => p.FTPpsCode === rawPs);
+    const paperPreset = PAPER_SIZE_PRESETS[rawPs] || PAPER_SIZE_PRESETS.A4;
+    const savedPaperSize: PaperSizeCode =
+      dbPaper?.FTPpsCode || (rawPs in PAPER_SIZE_PRESETS ? rawPs : 'A4');
+    const savedW = ls?.FCLbsPaperWidth || dbPaper?.FCPpsWidth || paperPreset.widthMm;
+    const savedH = ls?.FCLbsPaperHeight || dbPaper?.FCPpsHeight || paperPreset.heightMm;
+    setPreviewMedia(
+      getDefaultPreviewMediaConfig({
+        savedPaperSize,
+        savedPaperWidthMm: savedW,
+        savedPaperHeightMm: savedH,
+        lbsGroup: ls?.FTLbsGroup,
+        gapVMm: ls?.FCLbsGapV ?? 2,
+      })
+    );
+  }, [
+    selectedLabelCode,
+    selectedLabelSizeObj?.FTLbsPaperSize,
+    selectedLabelSizeObj?.FCLbsPaperWidth,
+    selectedLabelSizeObj?.FCLbsPaperHeight,
+    selectedLabelSizeObj?.FTLbsGroup,
+    selectedLabelSizeObj?.FCLbsGapV,
+    paperSizes,
+  ]);
+
   const a4Layout = useMemo(() => {
-    const ls = labelSizes.find(s => s.FTLbsCode === selectedLabelCode);
+    const ls = selectedLabelSizeObj;
     const widthMm = ls?.FCLbsWidth || 100;
     const heightMm = ls?.FCLbsHeight || 38;
     const magTopMm = ls?.FCLbsMagTop ?? 3;
@@ -1300,18 +1413,46 @@ export default function AdaBarprintPage() {
     const rawPs = (ls?.FTLbsPaperSize || paperSizes[0]?.FTPpsCode || 'A4') as PaperSizeCode;
     const dbPaper = paperSizes.find((p) => p.FTPpsCode === rawPs);
     const paperPreset = PAPER_SIZE_PRESETS[rawPs] || PAPER_SIZE_PRESETS.A4;
-    const paperSize: PaperSizeCode = dbPaper?.FTPpsCode || (rawPs in PAPER_SIZE_PRESETS ? rawPs : 'A4');
-    const paperWidthMm = ls?.FCLbsPaperWidth || dbPaper?.FCPpsWidth || paperPreset.widthMm;
-    const paperHeightMm = ls?.FCLbsPaperHeight || dbPaper?.FCPpsHeight || paperPreset.heightMm;
+    const savedPaperSize: PaperSizeCode =
+      dbPaper?.FTPpsCode || (rawPs in PAPER_SIZE_PRESETS ? rawPs : 'A4');
+    const savedPaperWidthMm = ls?.FCLbsPaperWidth || dbPaper?.FCPpsWidth || paperPreset.widthMm;
+    const savedPaperHeightMm = ls?.FCLbsPaperHeight || dbPaper?.FCPpsHeight || paperPreset.heightMm;
     const offsetX = ls?.FCLbsOffsetX ?? 0;
     const offsetY = ls?.FCLbsOffsetY ?? 0;
-    const calcCols = Math.max(1, Math.floor((paperWidthMm - magLeftMm - magRightMm + gapHMm) / (widthMm + gapHMm)));
-    const calcRows = Math.max(1, Math.floor((paperHeightMm - magTopMm - magBottomMm + gapVMm) / (heightMm + gapVMm)));
-    const cols = ls?.FNLbsCol || calcCols;
-    const rows = ls?.FNLbsRow || calcRows;
-    const perPage = Math.max(1, ls?.FNLbsQtyPageNor || (cols * rows));
+    const calcCols = Math.max(
+      1,
+      Math.floor((savedPaperWidthMm - magLeftMm - magRightMm + gapHMm) / (widthMm + gapHMm))
+    );
+    const calcRows = Math.max(
+      1,
+      Math.floor((savedPaperHeightMm - magTopMm - magBottomMm + gapVMm) / (heightMm + gapVMm))
+    );
+    const savedCols = ls?.FNLbsCol || calcCols;
+    const savedRows = ls?.FNLbsRow || calcRows;
+
+    const eff = computeEffectivePreviewLayout(
+      {
+        lbsGroup: ls?.FTLbsGroup,
+        labelWidthMm: widthMm,
+        labelHeightMm: heightMm,
+        savedPaperSize,
+        savedPaperWidthMm,
+        savedPaperHeightMm,
+        savedCols,
+        savedRows,
+        magTopMm,
+        magLeftMm,
+        magBottomMm,
+        magRightMm,
+        gapHMm,
+        gapVMm,
+      },
+      previewMedia
+    );
+
+    const perPage = eff.perPage;
     const paginate = (items: PrintQueueRow[]) => {
-      const exp = items.flatMap(r =>
+      const exp = items.flatMap((r) =>
         Array.from({ length: r.qty || 1 }, () => ({
           barcode: r.barCode,
           priType: r.priType,
@@ -1324,25 +1465,30 @@ export default function AdaBarprintPage() {
       }
       return { exp, pg };
     };
-    const all = paginate(mainRows.filter(r => r.selected));
-    const nor = paginate(mainRows.filter(r => r.selected && r.priType === '1'));
-    const pmt = paginate(mainRows.filter(r => r.selected && r.priType === '2'));
+    const all = paginate(mainRows.filter((r) => r.selected));
+    const nor = paginate(mainRows.filter((r) => r.selected && r.priType === '1'));
+    const pmt = paginate(mainRows.filter((r) => r.selected && r.priType === '2'));
     return {
+      lbsGroup: ls?.FTLbsGroup,
+      savedPaperSize,
+      isRoll: eff.isRoll,
+      isSingle: eff.isSingle,
+      paperLabel: eff.paperLabel,
       widthMm,
       heightMm,
-      magTopMm,
-      magLeftMm,
-      magBottomMm,
-      magRightMm,
-      gapHMm,
-      gapVMm,
-      paperSize,
-      paperWidthMm,
-      paperHeightMm,
+      magTopMm: eff.magTopMm,
+      magLeftMm: eff.magLeftMm,
+      magBottomMm: eff.magBottomMm,
+      magRightMm: eff.magRightMm,
+      gapHMm: eff.gapHMm,
+      gapVMm: eff.gapVMm,
+      paperSize: eff.paperSize,
+      paperWidthMm: eff.paperWidthMm,
+      paperHeightMm: eff.paperHeightMm,
       offsetX,
       offsetY,
-      cols,
-      rows,
+      cols: eff.cols,
+      rows: eff.rows,
       perPage,
       pages: all.pg,
       totalLabels: all.exp.length,
@@ -1351,7 +1497,7 @@ export default function AdaBarprintPage() {
       promoPages: pmt.pg,
       promoLabelsCount: pmt.exp.length,
     };
-  }, [labelSizes, selectedLabelCode, mainRows]);
+  }, [selectedLabelSizeObj, paperSizes, previewMedia, mainRows]);
 
   useEffect(() => {
     setPrintOffsetX(a4Layout.offsetX);
@@ -1592,23 +1738,102 @@ export default function AdaBarprintPage() {
   const renderPreviewSheets = (
     sheetPages: Array<Array<{ barcode: string; priType: string; ctx: Record<string, any> }>>,
     keyPrefix: string
-  ) =>
-    sheetPages.map((pageItems, pageIdx) => {
-      const sheetFactor = sheetPreviewScale;
+  ) => {
+    const sheetFactor = sheetPreviewScale;
+    if (a4Layout.isRoll) {
+      const totalLabelsInRoll = sheetPages.reduce((acc, p) => acc + p.length, 0);
+      const totalRollLenMm = Number(
+        (
+          4 +
+          sheetPages.length * a4Layout.heightMm +
+          Math.max(0, sheetPages.length - 1) * a4Layout.gapVMm
+        ).toFixed(1)
+      );
+      const rollBox = (
+        <div
+          className="mx-auto bg-slate-100 shadow-md border-x-2 border-slate-500 border-y border-dashed border-slate-400"
+          style={{
+            width: `${a4Layout.paperWidthMm * sheetFactor}mm`,
+            paddingTop: `${2 * sheetFactor}mm`,
+            paddingBottom: `${2 * sheetFactor}mm`,
+            paddingLeft: `${a4Layout.magLeftMm * sheetFactor}mm`,
+            paddingRight: `${a4Layout.magRightMm * sheetFactor}mm`,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: `${a4Layout.gapVMm * sheetFactor}mm`,
+            boxSizing: 'border-box',
+          }}
+        >
+          {sheetPages.map((rowItems, rowIdx) => (
+            <div
+              key={`${keyPrefix}-roll-row-${rowIdx}`}
+              style={{
+                display: 'grid',
+                gridTemplateColumns: `repeat(${a4Layout.cols}, ${a4Layout.widthMm * sheetFactor}mm)`,
+                columnGap: `${a4Layout.gapHMm * sheetFactor}mm`,
+                transform:
+                  printOffsetX !== 0 || printOffsetY !== 0
+                    ? `translate(${printOffsetX * sheetFactor}mm, ${printOffsetY * sheetFactor}mm)`
+                    : undefined,
+              }}
+            >
+              {rowItems.map((line, idx) => (
+                <div
+                  key={`${keyPrefix}-rl-${line.barcode}-${rowIdx}-${idx}`}
+                  className="bg-white ring-1 ring-slate-300 rounded-[2px] overflow-hidden"
+                  style={{
+                    width: `${a4Layout.widthMm * sheetFactor}mm`,
+                    height: `${a4Layout.heightMm * sheetFactor}mm`,
+                  }}
+                >
+                  <LabelPreview
+                    line={line}
+                    scale={sheetFactor}
+                    labelW={a4Layout.widthMm}
+                    labelH={a4Layout.heightMm}
+                    lbsCode={selectedLabelCode}
+                    customLayout={resolveCustomLayout(selectedLabelCode, line.priType)}
+                    preprintView="ink"
+                  />
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      );
+      return (
+        <div className="space-y-1.5">
+          <div className="text-xs font-medium text-muted-foreground flex flex-wrap items-center justify-between gap-2">
+            <span>
+              ม้วนสติ๊กเกอร์ ({totalLabelsInRoll} ดวง · {sheetPages.length} แถว · กว้างม้วน {a4Layout.paperWidthMm} mm · ยาวรวม ~{totalRollLenMm} mm · Gap {a4Layout.gapVMm} mm)
+            </span>
+          </div>
+          <PreviewReferenceFrameWrapper
+            refFrame={previewMedia.refFrame}
+            sheetWidthMm={a4Layout.paperWidthMm}
+            sheetHeightMm={totalRollLenMm}
+            scale={sheetFactor}
+          >
+            {rollBox}
+          </PreviewReferenceFrameWrapper>
+        </div>
+      );
+    }
+
+    return sheetPages.map((pageItems, pageIdx) => {
       const firstPreprintLayout = pageItems
         .map((it) => resolveCustomLayout(selectedLabelCode, it.priType))
         .find((ly) => ly?.designMode === 'preprint');
       const sheetBgUrl = firstPreprintLayout?.preprint?.sheetBgDataUrl;
       const showSheetGuide =
-        Boolean(firstPreprintLayout) && previewPreprintView === 'guide' && Boolean(sheetBgUrl);
-      const isSmallerThanA4 =
-        a4Layout.paperWidthMm <= 209 &&
-        a4Layout.paperHeightMm <= 297 &&
-        (a4Layout.paperWidthMm < 209 || a4Layout.paperHeightMm < 296);
+        Boolean(firstPreprintLayout) &&
+        !a4Layout.isSingle &&
+        previewPreprintView === 'guide' &&
+        Boolean(sheetBgUrl);
 
       const sheetBox = (
         <div
-          className={`border-2 bg-white shadow-sm relative overflow-hidden ${isSmallerThanA4 ? 'border-[#007a87]' : 'border-gray-300 mx-auto'}`}
+          className={`border-2 bg-white shadow-sm relative overflow-hidden ${previewMedia.refFrame !== 'NONE' ? 'border-[#007a87]' : 'border-gray-300 mx-auto'}`}
           style={{
             width: `${a4Layout.paperWidthMm * sheetFactor}mm`,
             height: `${a4Layout.paperHeightMm * sheetFactor}mm`,
@@ -1663,7 +1888,7 @@ export default function AdaBarprintPage() {
                 customLy?.designMode === 'preprint'
                   ? previewPreprintView === 'ink'
                     ? 'ink'
-                    : sheetBgUrl
+                    : !a4Layout.isSingle && sheetBgUrl
                       ? 'sheet-overlay'
                       : 'cell-guide'
                   : 'ink';
@@ -1681,7 +1906,7 @@ export default function AdaBarprintPage() {
               );
             })}
           </div>
-          {isSmallerThanA4 && (
+          {previewMedia.refFrame !== 'NONE' && (
             <div className="absolute bottom-0.5 right-1 bg-[#007a87]/90 text-white text-[9px] font-mono px-1 rounded pointer-events-none">
               {a4Layout.paperSize}: {a4Layout.paperWidthMm}×{a4Layout.paperHeightMm} mm
             </div>
@@ -1693,32 +1918,21 @@ export default function AdaBarprintPage() {
         <div key={`${keyPrefix}-${pageIdx}`} className="space-y-1.5">
           <div className="text-xs font-medium text-muted-foreground flex flex-wrap items-center justify-between gap-2">
             <span>
-              แผ่นที่ {pageIdx + 1} / {sheetPages.length} ({pageItems.length} ดวง · ขนาดจริง {a4Layout.widthMm}×{a4Layout.heightMm} mm · กระดาษ {a4Layout.paperWidthMm}×{a4Layout.paperHeightMm} mm)
+              {a4Layout.isSingle ? 'ดวงที่' : 'แผ่นที่'} {pageIdx + 1} / {sheetPages.length} ({pageItems.length} ดวง · ขนาดจริง {a4Layout.widthMm}×{a4Layout.heightMm} mm · {a4Layout.isSingle ? 'เดี่ยว 1:1' : `กระดาษ ${a4Layout.paperWidthMm}×${a4Layout.paperHeightMm} mm`})
             </span>
-            {isSmallerThanA4 && (
-              <span className="text-[11px] text-[#00606b]">กรอบประ = พื้นที่ A4 (210×297 mm)</span>
-            )}
           </div>
-          {isSmallerThanA4 ? (
-            <div
-              className="mx-auto relative border-2 border-dashed border-slate-400 bg-slate-100/80 shadow-inner"
-              style={{
-                width: `${210 * sheetFactor}mm`,
-                height: `${297 * sheetFactor}mm`,
-                boxSizing: 'border-box',
-              }}
-            >
-              {sheetBox}
-              <div className="absolute bottom-1 right-1.5 text-[10px] font-mono text-slate-500 bg-white/80 px-1 rounded border border-slate-200 pointer-events-none">
-                A4 (210×297 mm)
-              </div>
-            </div>
-          ) : (
-            sheetBox
-          )}
+          <PreviewReferenceFrameWrapper
+            refFrame={previewMedia.refFrame}
+            sheetWidthMm={a4Layout.paperWidthMm}
+            sheetHeightMm={a4Layout.paperHeightMm}
+            scale={sheetFactor}
+          >
+            {sheetBox}
+          </PreviewReferenceFrameWrapper>
         </div>
       );
     });
+  };
 
   if (loading) {
     return (
@@ -2353,19 +2567,39 @@ export default function AdaBarprintPage() {
             <Card className="border-slate-200 shadow-xs bg-white py-0 gap-0">
               <CardContent className="p-4 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <Label className="text-xs font-semibold text-slate-700">ค้นหาข้อมูลสินค้า ({filteredMainRows.length} รายการ)</Label>
-                  <div className="relative w-full sm:w-72">
-                    <Search className="h-3.5 w-3.5 absolute left-2.5 top-2.5 text-slate-400" />
-                    <Input
-                      placeholder="กรอกคำค้นหา..."
-                      value={mainSearch}
-                      onChange={e => setMainSearch(e.target.value)}
-                      className="pl-8 h-8 text-xs"
-                    />
-                    
-    </div>
-                  
-    </div>
+                  <Label className="text-xs font-semibold text-slate-700">
+                    ค้นหาข้อมูลสินค้า ({filteredMainRows.length} รายการ{selectedMainCount > 0 ? ` · เลือกพิมพ์ ${selectedMainCount}` : ''})
+                  </Label>
+                  <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-8 text-xs text-red-600 border-red-200 hover:bg-red-50"
+                      disabled={selectedMainCount === 0}
+                      onClick={() => {
+                        const removed = selectedMainCount;
+                        setMainRows(prev => prev.filter(r => !r.selected));
+                        toast.info(`ลบ ${removed} รายการที่เลือกออกจากตารางพิมพ์แล้ว`);
+                      }}
+                    >
+                      <Trash2 className="h-3.5 w-3.5 mr-1" />
+                      ลบที่เลือก ({selectedMainCount})
+                    </Button>
+                    <div className="relative flex-1 sm:w-72">
+                      <Search className="h-3.5 w-3.5 absolute left-2.5 top-2.5 text-slate-400" />
+                      <Input
+                        placeholder="กรอกคำค้นหา..."
+                        value={mainSearch}
+                        onChange={e => {
+                          setMainSearch(e.target.value);
+                          setMainPage(1);
+                        }}
+                        className="pl-8 h-8 text-xs"
+                      />
+                    </div>
+                  </div>
+                </div>
 
                 <div className="border rounded overflow-x-auto">
                   <Table>
@@ -2376,7 +2610,10 @@ export default function AdaBarprintPage() {
                             checked={filteredMainRows.length > 0 && filteredMainRows.every(r => r.selected)}
                             onCheckedChange={v => {
                               const on = !!v;
-                              setMainRows(prev => prev.map(r => ({ ...r, selected: on })));
+                              const visibleKeys = new Set(filteredMainRows.map(r => r.rowKey));
+                              setMainRows(prev =>
+                                prev.map(r => (visibleKeys.has(r.rowKey) ? { ...r, selected: on } : r))
+                              );
                             }}
                           />
                         </TableHead>
@@ -2390,24 +2627,22 @@ export default function AdaBarprintPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {filteredMainRows.length === 0 ? (
+                      {pagedMainRows.length === 0 ? (
                         <TableRow>
                           <TableCell colSpan={8} className="text-center py-10 text-xs text-slate-400">
                             ไม่พบข้อมูล — กดปุ่ม <strong>สแกนสินค้า</strong> หรือ <strong>แสดงข้อมูล</strong> ด้านซ้ายเพื่อเพิ่มรายการ
                           </TableCell>
                         </TableRow>
                       ) : (
-                        filteredMainRows.map(row => (
-                          <TableRow key={`${row.barCode}-${row.priType}`}>
+                        pagedMainRows.map(row => (
+                          <TableRow key={row.rowKey}>
                             <TableCell className="text-center">
                               <Checkbox
                                 checked={row.selected}
                                 onCheckedChange={v =>
                                   setMainRows(prev =>
                                     prev.map(r =>
-                                      r.barCode === row.barCode && r.priType === row.priType
-                                        ? { ...r, selected: !!v }
-                                        : r
+                                      r.rowKey === row.rowKey ? { ...r, selected: !!v } : r
                                     )
                                   )
                                 }
@@ -2431,7 +2666,7 @@ export default function AdaBarprintPage() {
                                   const qty = Math.max(1, parseInt(e.target.value) || 1);
                                   setMainRows(prev =>
                                     prev.map(r =>
-                                      r.barCode === row.barCode && r.priType === row.priType ? { ...r, qty } : r
+                                      r.rowKey === row.rowKey ? { ...r, qty } : r
                                     )
                                   );
                                 }}
@@ -2445,7 +2680,7 @@ export default function AdaBarprintPage() {
                                 className="h-7 w-7 text-red-500"
                                 onClick={() =>
                                   setMainRows(prev =>
-                                    prev.filter(r => !(r.barCode === row.barCode && r.priType === row.priType))
+                                    prev.filter(r => r.rowKey !== row.rowKey)
                                   )
                                 }
                               >
@@ -2457,8 +2692,53 @@ export default function AdaBarprintPage() {
                       )}
                     </TableBody>
                   </Table>
-                  
+                </div>
+
+                {filteredMainRows.length > 0 && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600 pt-1">
+                    <span>
+                      แสดง {(safeMainPage - 1) * mainPageSize + 1}–{Math.min(safeMainPage * mainPageSize, filteredMainRows.length)} จากทั้งหมด {filteredMainRows.length} รายการ · หน้า {safeMainPage} / {mainTotalPages}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={mainPageSize}
+                        onChange={e => {
+                          setMainPageSize(Number(e.target.value) || 20);
+                          setMainPage(1);
+                        }}
+                        className="h-7 rounded border border-slate-200 bg-white px-2 text-xs text-slate-700"
+                        aria-label="จำนวนรายการต่อหน้า"
+                      >
+                        <option value={20}>20 แถว/หน้า</option>
+                        <option value={50}>50 แถว/หน้า</option>
+                        <option value={100}>100 แถว/หน้า</option>
+                      </select>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="outline"
+                          className="h-7 w-7"
+                          disabled={safeMainPage <= 1}
+                          onClick={() => setMainPage(p => Math.max(1, p - 1))}
+                        >
+                          <ChevronLeft className="h-3.5 w-3.5" />
+                        </Button>
+                        <span className="px-2 font-medium">{safeMainPage}</span>
+                        <Button
+                          type="button"
+                          size="icon"
+                          variant="outline"
+                          className="h-7 w-7"
+                          disabled={safeMainPage >= mainTotalPages}
+                          onClick={() => setMainPage(p => Math.min(mainTotalPages, p + 1))}
+                        >
+                          <ChevronRight className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </div>
                   </div>
+                )}
               </CardContent>
             </Card>
             
@@ -2795,26 +3075,36 @@ export default function AdaBarprintPage() {
         </DialogContent>
       </Dialog>
 
-      {/* ===== Modal: ส่งพิมพ์แยกแท็บ Preview แผ่นกระดาษ / ราคาปกติ / ราคาโปรโมชัน (odvPRNModalSendPrint) ===== */}
+      {/* ===== Modal: ส่งพิมพ์แยกแท็บ Preview รูปแบบกระดาษ / ม้วน (odvPRNModalSendPrint) ===== */}
       <Dialog open={sendPrintOpen} onOpenChange={setSendPrintOpen}>
-        <DialogContent className="w-[95vw] sm:max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
+        <DialogContent className="w-[95vw] sm:max-w-5xl max-h-[92vh] flex flex-col overflow-hidden">
           <DialogHeader>
             <DialogTitle className="text-base">
-              Preview แผ่นกระดาษ {a4Layout.paperSize === 'B5_JIS' ? 'B5 JIS' : a4Layout.paperSize === 'B5_ISO' ? 'B5 ISO' : a4Layout.paperSize === 'LETTER' ? 'Letter' : a4Layout.paperSize === 'CUSTOM' ? 'กำหนดเอง' : 'A4'} ({previewSheetCount} แผ่น · {a4Layout.totalLabels} ดวง)
+              Preview {a4Layout.isRoll ? 'ม้วน Thermal (Roll)' : a4Layout.isSingle ? 'ป้ายเดี่ยว 1:1' : `แผ่นกระดาษ ${a4Layout.paperLabel}`} ({previewSheetCount} {a4Layout.isRoll ? 'แถวตัด' : a4Layout.isSingle ? 'หน้า' : 'แผ่น'} · {a4Layout.totalLabels} ดวง)
             </DialogTitle>
             <DialogDescription className="text-xs">
-              รูปแบบป้าย: {selectedLabelCode} ({a4Layout.widthMm}×{a4Layout.heightMm} mm บนกระดาษ {a4Layout.paperWidthMm}×{a4Layout.paperHeightMm} mm · จัดเรียง {a4Layout.cols}×{a4Layout.rows} = {a4Layout.perPage} ดวง/แผ่น){hasSplitPreview ? ' · แยกชุดส่งพิมพ์ตามปลายทาง' : ` · เครื่องพิมพ์: ${printers.find(p => p.id === selectedPrinterId)?.name || 'Windows Print'}`}
+              รูปแบบป้าย: {selectedLabelCode} ({a4Layout.widthMm}×{a4Layout.heightMm} mm{' '}
+              {a4Layout.isRoll
+                ? `บนม้วนกว้าง ${a4Layout.paperWidthMm} mm · แถวละ ${a4Layout.cols} ดวง · Gap ${a4Layout.gapVMm} mm`
+                : `บนกระดาษ ${a4Layout.paperWidthMm}×${a4Layout.paperHeightMm} mm · จัดเรียง ${a4Layout.cols}×${a4Layout.rows} = ${a4Layout.perPage} ดวง/แผ่น`}
+              ){hasSplitPreview ? ' · แยกชุดส่งพิมพ์ตามปลายทาง' : ` · เครื่องพิมพ์: ${printers.find(p => p.id === selectedPrinterId)?.name || 'Windows Print'}`}
             </DialogDescription>
           </DialogHeader>
           <Tabs defaultValue="preview" className="flex-1 min-h-0 flex flex-col">
             <TabsList className="shrink-0">
               <TabsTrigger value="preview">
-                Preview แผ่น ({previewSheetCount})
+                Preview {a4Layout.isRoll ? `ม้วน (${a4Layout.totalLabels} ดวง)` : `(${previewSheetCount})`}
               </TabsTrigger>
               <TabsTrigger value="normal">ราคาปกติ ({normalRows.length})</TabsTrigger>
               <TabsTrigger value="promo">ราคาโปรโมชัน ({promoRows.length})</TabsTrigger>
             </TabsList>
             <TabsContent value="preview" className="border rounded p-2 flex-1 min-h-0 overflow-hidden flex flex-col gap-2">
+              <PreviewMediaToolbar
+                config={previewMedia}
+                onChange={setPreviewMedia}
+                savedPaperSize={a4Layout.savedPaperSize}
+                lbsGroup={a4Layout.lbsGroup}
+              />
               {(() => {
                 const anyPreprint =
                   resolveCustomLayout(selectedLabelCode, '1')?.designMode === 'preprint' ||
@@ -2823,7 +3113,7 @@ export default function AdaBarprintPage() {
                 return (
                   <div className="flex flex-wrap items-center justify-between gap-2 bg-amber-50/70 border border-amber-200 rounded px-2.5 py-1.5 shrink-0">
                     <div className="flex flex-wrap items-center gap-2">
-                      {anyPreprint ? (
+                      {anyPreprint && !a4Layout.isRoll && !a4Layout.isSingle ? (
                         <div className="inline-flex rounded border border-amber-300 bg-white p-0.5">
                           <button
                             type="button"
@@ -2849,7 +3139,9 @@ export default function AdaBarprintPage() {
                           </button>
                         </div>
                       ) : (
-                        <span className="text-[11px] text-slate-700 font-medium">ตัวอย่างแผ่นกระดาษจริง</span>
+                        <span className="text-[11px] text-slate-700 font-medium">
+                          {a4Layout.isRoll ? 'ตัวอย่างแถบม้วนสติ๊กเกอร์ (Roll)' : a4Layout.isSingle ? 'ตัวอย่างป้ายเดี่ยว 1:1' : 'ตัวอย่างแผ่นกระดาษจริง'}
+                        </span>
                       )}
 
                       <div className="inline-flex items-center rounded border border-slate-200 bg-white p-0.5 text-[10px]">
@@ -2859,6 +3151,7 @@ export default function AdaBarprintPage() {
                           { label: '65%', value: 0.65 },
                           { label: '85%', value: 0.85 },
                           { label: '100%', value: 1 },
+                          { label: '150%', value: 1.5 },
                         ].map((z) => (
                           <button
                             key={z.label}
@@ -3032,9 +3325,9 @@ export default function AdaBarprintPage() {
                     {activeDriverMapping?.promoTray ? ` · ถาด: ${activeDriverMapping.promoTray}` : ''}
                   </span>
                 )}
-                {labelSizes.find(s => s.FTLbsCode === selectedLabelCode)?.FTLbsGroup === '2' && (
+                {labelSizes.find(s => s.FTLbsCode === selectedLabelCode)?.FTLbsGroup === '2' && !a4Layout.isRoll && !a4Layout.isSingle && (
                   <span className="w-full text-amber-700 font-medium">
-                    ⚠ รูปแบบ {selectedLabelCode} เป็นสติ๊กเกอร์ม้วน (Thermal) — โหมด Windows Driver จะจัดหน้าเป็นแผ่น A4 (หากใช้เครื่องพิมพ์สติ๊กเกอร์ม้วนแนะนำให้ใช้ LAN EZPL/TSPL)
+                    ⚠ รูปแบบ {selectedLabelCode} เป็นสติ๊กเกอร์ม้วน (Thermal) — ตอนนี้กำลัง Preview แบบจัดหน้าเป็นแผ่น {a4Layout.paperLabel} (สามารถสลับด้านบนเป็นโหมด ม้วน Thermal (Roll) เพื่อดู/พิมพ์แบบม้วนได้)
                   </span>
                 )}
               </div>
@@ -3486,151 +3779,158 @@ export default function AdaBarprintPage() {
       </Dialog>
     </div>
 
-    {/* Hidden High-Res Offscreen Capture Sheets for Split Server Direct Printing (Normal vs Promo) */}
-    <div aria-hidden="true" style={{ position: 'fixed', left: '-99999px', top: 0, pointerEvents: 'none' }}>
-      <div id="v5-capture-normal">
-        {a4Layout.normalPages.map((pageItems, pageIdx) => (
-          <div
-            key={`cap-nor-${pageIdx}`}
-            data-capture-sheet="1"
-            style={{
-              width: `${a4Layout.paperWidthMm}mm`,
-              height: `${a4Layout.paperHeightMm}mm`,
-              paddingTop: `${a4Layout.magTopMm}mm`,
-              paddingBottom: `${a4Layout.magBottomMm}mm`,
-              paddingLeft: `${a4Layout.magLeftMm}mm`,
-              paddingRight: `${a4Layout.magRightMm}mm`,
-              background: '#FFFFFF',
-              display: 'grid',
-              gridTemplateColumns: `repeat(${a4Layout.cols}, ${a4Layout.widthMm}mm)`,
-              gridAutoRows: `${a4Layout.heightMm}mm`,
-              columnGap: `${a4Layout.gapHMm}mm`,
-              rowGap: `${a4Layout.gapVMm}mm`,
-              alignContent: 'start',
-              justifyContent: 'start',
-              boxSizing: 'border-box',
-              overflow: 'hidden',
-              transform:
-                printOffsetX !== 0 || printOffsetY !== 0
-                  ? `translate(${printOffsetX}mm, ${printOffsetY}mm)`
-                  : undefined,
-            }}
-          >
-            {pageItems.map((line, idx) => (
-              <LabelPreview
-                key={`cn-${line.barcode}-${pageIdx}-${idx}`}
-                line={line}
-                scale={1}
-                labelW={a4Layout.widthMm}
-                labelH={a4Layout.heightMm}
-                lbsCode={selectedLabelCode}
-                customLayout={resolveCustomLayout(selectedLabelCode, line.priType)}
-                preprintView="ink"
-              />
-            ))}
-          </div>
-        ))}
-      </div>
-      <div id="v5-capture-promo">
-        {a4Layout.promoPages.map((pageItems, pageIdx) => (
-          <div
-            key={`cap-pmt-${pageIdx}`}
-            data-capture-sheet="1"
-            style={{
-              width: `${a4Layout.paperWidthMm}mm`,
-              height: `${a4Layout.paperHeightMm}mm`,
-              paddingTop: `${a4Layout.magTopMm}mm`,
-              paddingBottom: `${a4Layout.magBottomMm}mm`,
-              paddingLeft: `${a4Layout.magLeftMm}mm`,
-              paddingRight: `${a4Layout.magRightMm}mm`,
-              background: '#FFFFFF',
-              display: 'grid',
-              gridTemplateColumns: `repeat(${a4Layout.cols}, ${a4Layout.widthMm}mm)`,
-              gridAutoRows: `${a4Layout.heightMm}mm`,
-              columnGap: `${a4Layout.gapHMm}mm`,
-              rowGap: `${a4Layout.gapVMm}mm`,
-              alignContent: 'start',
-              justifyContent: 'start',
-              boxSizing: 'border-box',
-              overflow: 'hidden',
-              transform:
-                printOffsetX !== 0 || printOffsetY !== 0
-                  ? `translate(${printOffsetX}mm, ${printOffsetY}mm)`
-                  : undefined,
-            }}
-          >
-            {pageItems.map((line, idx) => (
-              <LabelPreview
-                key={`cp-${line.barcode}-${pageIdx}-${idx}`}
-                line={line}
-                scale={1}
-                labelW={a4Layout.widthMm}
-                labelH={a4Layout.heightMm}
-                lbsCode={selectedLabelCode}
-                customLayout={resolveCustomLayout(selectedLabelCode, line.priType)}
-                preprintView="ink"
-              />
-            ))}
-          </div>
-        ))}
-      </div>
-    </div>
-    {/* Sheet Print Area for Windows / Browser Fallback (1:1 mm) */}
-    <style>{`
-      @media print {
-        @page { size: ${a4Layout.paperWidthMm}mm ${a4Layout.paperHeightMm}mm; margin: 0; }
-        * {
-          -webkit-print-color-adjust: exact !important;
-          print-color-adjust: exact !important;
-        }
-        body > *:not(#root), [data-sonner-toaster], [data-radix-portal] {
-          display: none !important;
-        }
-      }
-    `}</style>
-    <div className="hidden print:block p-0 bg-white text-black">
-      {a4Layout.pages.map((pageItems, pIdx) => (
-        <div
-          key={`print-page-${pIdx}`}
-          className="break-after-page"
-          style={{
-            width: `${a4Layout.paperWidthMm}mm`,
-            height: `${a4Layout.paperHeightMm}mm`,
-            paddingTop: `${a4Layout.magTopMm}mm`,
-            paddingBottom: `${a4Layout.magBottomMm}mm`,
-            paddingLeft: `${a4Layout.magLeftMm}mm`,
-            paddingRight: `${a4Layout.magRightMm}mm`,
-            display: 'grid',
-            gridTemplateColumns: `repeat(${a4Layout.cols}, ${a4Layout.widthMm}mm)`,
-            gridAutoRows: `${a4Layout.heightMm}mm`,
-            columnGap: `${a4Layout.gapHMm}mm`,
-            rowGap: `${a4Layout.gapVMm}mm`,
-            alignContent: 'start',
-            justifyContent: 'start',
-            boxSizing: 'border-box',
-            overflow: 'hidden',
-            transform:
-              printOffsetX !== 0 || printOffsetY !== 0
-                ? `translate(${printOffsetX}mm, ${printOffsetY}mm)`
-                : undefined,
-          }}
-        >
-          {pageItems.map((line, idx) => (
-            <div key={`print-${line.barcode}-${pIdx}-${idx}`} className="break-inside-avoid">
-              <LabelPreview
-                line={line}
-                scale={1}
-                labelW={a4Layout.widthMm}
-                labelH={a4Layout.heightMm}
-                lbsCode={selectedLabelCode}
-                customLayout={resolveCustomLayout(selectedLabelCode, line.priType)}
-                preprintView="ink"
-              />
+    {/* Hidden High-Res Offscreen Capture Sheets for Split Server Direct Printing (Lazy-mounted during print) */}
+    {captureDomMounted && (
+      <div aria-hidden="true" style={{ position: 'fixed', left: '-99999px', top: 0, pointerEvents: 'none' }}>
+        <div id="v5-capture-normal">
+          {a4Layout.normalPages.map((pageItems, pageIdx) => (
+            <div
+              key={`cap-nor-${pageIdx}`}
+              data-capture-sheet="1"
+              style={{
+                width: `${a4Layout.paperWidthMm}mm`,
+                height: `${a4Layout.paperHeightMm}mm`,
+                paddingTop: `${a4Layout.magTopMm}mm`,
+                paddingBottom: `${a4Layout.magBottomMm}mm`,
+                paddingLeft: `${a4Layout.magLeftMm}mm`,
+                paddingRight: `${a4Layout.magRightMm}mm`,
+                background: '#FFFFFF',
+                display: 'grid',
+                gridTemplateColumns: `repeat(${a4Layout.cols}, ${a4Layout.widthMm}mm)`,
+                gridAutoRows: `${a4Layout.heightMm}mm`,
+                columnGap: `${a4Layout.gapHMm}mm`,
+                rowGap: `${a4Layout.gapVMm}mm`,
+                alignContent: 'start',
+                justifyContent: 'start',
+                boxSizing: 'border-box',
+                overflow: 'hidden',
+                transform:
+                  printOffsetX !== 0 || printOffsetY !== 0
+                    ? `translate(${printOffsetX}mm, ${printOffsetY}mm)`
+                    : undefined,
+              }}
+            >
+              {pageItems.map((line, idx) => (
+                <LabelPreview
+                  key={`cn-${pageIdx}-${idx}`}
+                  line={line}
+                  scale={1}
+                  labelW={a4Layout.widthMm}
+                  labelH={a4Layout.heightMm}
+                  lbsCode={selectedLabelCode}
+                  customLayout={resolveCustomLayout(selectedLabelCode, line.priType)}
+                  preprintView="ink"
+                />
+              ))}
             </div>
           ))}
         </div>
-      ))}
-    </div>
+        <div id="v5-capture-promo">
+          {a4Layout.promoPages.map((pageItems, pageIdx) => (
+            <div
+              key={`cap-pmt-${pageIdx}`}
+              data-capture-sheet="1"
+              style={{
+                width: `${a4Layout.paperWidthMm}mm`,
+                height: `${a4Layout.paperHeightMm}mm`,
+                paddingTop: `${a4Layout.magTopMm}mm`,
+                paddingBottom: `${a4Layout.magBottomMm}mm`,
+                paddingLeft: `${a4Layout.magLeftMm}mm`,
+                paddingRight: `${a4Layout.magRightMm}mm`,
+                background: '#FFFFFF',
+                display: 'grid',
+                gridTemplateColumns: `repeat(${a4Layout.cols}, ${a4Layout.widthMm}mm)`,
+                gridAutoRows: `${a4Layout.heightMm}mm`,
+                columnGap: `${a4Layout.gapHMm}mm`,
+                rowGap: `${a4Layout.gapVMm}mm`,
+                alignContent: 'start',
+                justifyContent: 'start',
+                boxSizing: 'border-box',
+                overflow: 'hidden',
+                transform:
+                  printOffsetX !== 0 || printOffsetY !== 0
+                    ? `translate(${printOffsetX}mm, ${printOffsetY}mm)`
+                    : undefined,
+              }}
+            >
+              {pageItems.map((line, idx) => (
+                <LabelPreview
+                  key={`cp-${pageIdx}-${idx}`}
+                  line={line}
+                  scale={1}
+                  labelW={a4Layout.widthMm}
+                  labelH={a4Layout.heightMm}
+                  lbsCode={selectedLabelCode}
+                  customLayout={resolveCustomLayout(selectedLabelCode, line.priType)}
+                  preprintView="ink"
+                />
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    )}
+    {/* Sheet Print Area for Windows / Browser Fallback (Lazy-mounted during print, 1:1 mm) */}
+    {browserPrintMounted && (
+      <>
+        <style>{`
+          @media print {
+            @page { size: ${a4Layout.paperWidthMm}mm ${a4Layout.paperHeightMm}mm; margin: 0; }
+            html, body { margin: 0 !important; padding: 0 !important; }
+            * {
+              -webkit-print-color-adjust: exact !important;
+              print-color-adjust: exact !important;
+            }
+            body > *:not(#root), [data-sonner-toaster], [data-radix-portal] {
+              display: none !important;
+            }
+          }
+        `}</style>
+        <div className="hidden print:block p-0 bg-white text-black">
+          {a4Layout.pages.map((pageItems, pIdx) => (
+            <div
+              key={`print-page-${pIdx}`}
+              className="break-after-page"
+              style={{
+                width: `${a4Layout.paperWidthMm}mm`,
+                height: `${a4Layout.paperHeightMm}mm`,
+                paddingTop: `${a4Layout.magTopMm}mm`,
+                paddingBottom: `${a4Layout.magBottomMm}mm`,
+                paddingLeft: `${a4Layout.magLeftMm}mm`,
+                paddingRight: `${a4Layout.magRightMm}mm`,
+                display: 'grid',
+                gridTemplateColumns: `repeat(${a4Layout.cols}, ${a4Layout.widthMm}mm)`,
+                gridAutoRows: `${a4Layout.heightMm}mm`,
+                columnGap: `${a4Layout.gapHMm}mm`,
+                rowGap: `${a4Layout.gapVMm}mm`,
+                alignContent: 'start',
+                justifyContent: 'start',
+                boxSizing: 'border-box',
+                overflow: 'hidden',
+                transform:
+                  printOffsetX !== 0 || printOffsetY !== 0
+                    ? `translate(${printOffsetX}mm, ${printOffsetY}mm)`
+                    : undefined,
+              }}
+            >
+              {pageItems.map((line, idx) => (
+                <div key={`print-${pIdx}-${idx}`} className="break-inside-avoid">
+                  <LabelPreview
+                    line={line}
+                    scale={1}
+                    labelW={a4Layout.widthMm}
+                    labelH={a4Layout.heightMm}
+                    lbsCode={selectedLabelCode}
+                    customLayout={resolveCustomLayout(selectedLabelCode, line.priType)}
+                    preprintView="ink"
+                  />
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      </>
+    )}
     </>
   );
 }

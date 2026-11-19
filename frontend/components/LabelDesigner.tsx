@@ -69,6 +69,7 @@ import {
   DESIGN_COLOR_SWATCHES,
   DESIGN_DATA_FIELDS,
   DESIGN_ICON_LIST,
+  mergePaperSizeOptions,
   PAPER_SIZE_PRESETS,
   roundMm,
   uidDesign,
@@ -85,9 +86,22 @@ import {
 import {
   computeFirstCellCropBox,
   cropSheetCellToDataUrl,
+  detectPaperCodeFromFilename,
+  detectPaperPresetFromDimensions,
+  inferPreprintGridFromFile,
   parsePreprintFile,
   type ParsedPreprintResult,
 } from '@/lib/preprintImport';
+import {
+  PreviewMediaToolbar,
+  PreviewReferenceFrameWrapper,
+} from '@/components/PreviewMediaToolbar';
+import {
+  computeEffectivePreviewLayout,
+  getDefaultPreviewMediaConfig,
+  getPaperSizeDisplayName,
+  type PreviewMediaConfig,
+} from '@/lib/previewMedia';
 
 const PX_PER_MM = 3.779527559;
 
@@ -213,7 +227,7 @@ async function compressImageFileToDataUrl(file: File, maxDim = 600): Promise<str
 type HandleDir = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 
 interface DragSession {
-  mode: 'move' | 'resize';
+  mode: 'move' | 'resize' | 'resize-board';
   handle?: HandleDir;
   elId: string;
   startClientX: number;
@@ -378,6 +392,15 @@ export function LabelDesigner({
   const [sampleProductCode, setSampleProductCode] = useState<string>('__SAMPLE__');
   const [a4PreviewOpen, setA4PreviewOpen] = useState(false);
   const [a4Scale, setA4Scale] = useState<number>(0.5);
+  const [previewMedia, setPreviewMedia] = useState<PreviewMediaConfig>(() =>
+    getDefaultPreviewMediaConfig({
+      savedPaperSize: currentSize.FTLbsPaperSize,
+      savedPaperWidthMm: currentSize.FCLbsPaperWidth ?? undefined,
+      savedPaperHeightMm: currentSize.FCLbsPaperHeight ?? undefined,
+      lbsGroup: currentSize.FTLbsGroup,
+      gapVMm: currentSize.FCLbsGapV ?? 2,
+    })
+  );
   const [saveAsOpen, setSaveAsOpen] = useState(false);
   const [saveAsBlank, setSaveAsBlank] = useState(false);
   const [overwriteConfirmOpen, setOverwriteConfirmOpen] = useState(false);
@@ -414,6 +437,17 @@ export function LabelDesigner({
   const [impAutoFit, setImpAutoFit] = useState(false);
   const [snapGuideX, setSnapGuideX] = useState<number | null>(null);
   const [snapGuideY, setSnapGuideY] = useState<number | null>(null);
+  const [boardResizing, setBoardResizing] = useState(false);
+  const [boardWInput, setBoardWInput] = useState(String(doc.width));
+  const [boardHInput, setBoardHInput] = useState(String(doc.height));
+
+  useEffect(() => {
+    setBoardWInput(String(doc.width));
+  }, [doc.width]);
+
+  useEffect(() => {
+    setBoardHInput(String(doc.height));
+  }, [doc.height]);
 
   const uploadImgInputRef = useRef<HTMLInputElement>(null);
   const replaceImgInputRef = useRef<HTMLInputElement>(null);
@@ -625,6 +659,83 @@ export function LabelDesigner({
     };
   };
 
+  const startBoardResize = (e: React.PointerEvent, handle: 'e' | 's' | 'se') => {
+    e.stopPropagation();
+    const cur = docRef.current;
+    dragSnapRef.current = cur;
+    dragChangedRef.current = false;
+    setBoardResizing(true);
+    dragRef.current = {
+      mode: 'resize-board',
+      handle,
+      elId: '__board__',
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      origX: 0,
+      origY: 0,
+      origW: cur.width,
+      origH: cur.height,
+      pxPerMm,
+    };
+  };
+
+  const resizeBoardTo = (nextW: number, nextH: number, scaleElements = false) => {
+    const clampedW = roundMm(Math.max(10, Math.min(420, nextW || doc.width)), 0.1);
+    const clampedH = roundMm(Math.max(10, Math.min(420, nextH || doc.height)), 0.1);
+    if (clampedW === doc.width && clampedH === doc.height) return;
+    const scaleX = clampedW / Math.max(1, doc.width);
+    const scaleY = clampedH / Math.max(1, doc.height);
+    const fontScale = Math.min(scaleX, scaleY);
+    const nextElements = scaleElements
+      ? doc.elements.map((el) => ({
+          ...el,
+          x: roundMm(el.x * scaleX, 0.1),
+          y: roundMm(el.y * scaleY, 0.1),
+          width: roundMm(Math.max(2, el.width * scaleX), 0.1),
+          height: roundMm(Math.max(0.5, el.height * scaleY), 0.1),
+          fontSize: el.fontSize
+            ? roundMm(Math.max(4, Math.min(96, el.fontSize * fontScale)), 0.5)
+            : el.fontSize,
+        }))
+      : doc.elements;
+    commitDoc({
+      ...doc,
+      width: clampedW,
+      height: clampedH,
+      elements: nextElements,
+    });
+  };
+
+  const fitElementsToBoard = () => {
+    const pad = Math.min(2, roundMm(doc.width * 0.08, 0.5));
+    const maxW = Math.max(4, doc.width - pad * 2);
+    const maxH = Math.max(4, doc.height - pad * 2);
+    const nextElements = doc.elements.map((el) => {
+      const nextWidth = Math.min(el.width, el.x === 0 && el.width >= doc.width ? doc.width : maxW);
+      const nextHeight = Math.min(el.height, maxH);
+      const nextX =
+        el.x === 0 && nextWidth >= doc.width - 0.5
+          ? 0
+          : roundMm(Math.max(pad, Math.min(doc.width - nextWidth - pad, el.x)), 0.5);
+      const nextY = roundMm(Math.max(0.5, Math.min(doc.height - nextHeight - 0.5, el.y)), 0.5);
+      const widthRatio = el.width > 0 ? nextWidth / el.width : 1;
+      const nextFont =
+        el.fontSize && widthRatio < 0.95
+          ? roundMm(Math.max(4, el.fontSize * widthRatio), 0.5)
+          : el.fontSize;
+      return {
+        ...el,
+        x: nextX,
+        y: nextY,
+        width: roundMm(Math.max(2, nextWidth), 0.1),
+        height: roundMm(Math.max(0.5, nextHeight), 0.1),
+        fontSize: nextFont,
+      };
+    });
+    commitDoc({ ...doc, elements: nextElements });
+    toast.success('จัดขนาดและตำแหน่งองค์ประกอบให้พอดีกรอบป้ายแล้ว');
+  };
+
   useEffect(() => {
     const onMove = (e: PointerEvent) => {
       const d = dragRef.current;
@@ -701,6 +812,20 @@ export function LabelDesigner({
           }));
           setDirty(true);
         }
+      } else if (d.mode === 'resize-board' && d.handle) {
+        let w = d.origW;
+        let h = d.origH;
+        if (d.handle.includes('e')) {
+          w = Math.max(10, Math.min(420, roundMm(d.origW + dxMm, step)));
+        }
+        if (d.handle.includes('s')) {
+          h = Math.max(10, Math.min(420, roundMm(d.origH + dyMm, step)));
+        }
+        if (w !== d.origW || h !== d.origH) {
+          dragChangedRef.current = true;
+          setDoc((prev) => ({ ...prev, width: w, height: h }));
+          setDirty(true);
+        }
       }
     };
 
@@ -716,6 +841,7 @@ export function LabelDesigner({
         dragChangedRef.current = false;
         setSnapGuideX(null);
         setSnapGuideY(null);
+        setBoardResizing(false);
       }
     };
 
@@ -867,9 +993,11 @@ export function LabelDesigner({
     return { main: main.length > 0 ? main : DESIGN_DATA_FIELDS, adv };
   }, [labelFields]);
 
+  const allPaperSizes = React.useMemo(() => mergePaperSizeOptions(paperSizes), [paperSizes]);
+
   const findPaperPreset = (code?: string | null) => {
     const c = (code || 'A4').trim();
-    const dbP = paperSizes.find((p) => p.FTPpsCode === c);
+    const dbP = allPaperSizes.find((p) => p.FTPpsCode === c);
     if (dbP) {
       return {
         code: dbP.FTPpsCode,
@@ -896,15 +1024,32 @@ export function LabelDesigner({
         paperSize: doc.preprint.paperSize,
         paperWidthMm: doc.preprint.paperWidthMm,
         paperHeightMm: doc.preprint.paperHeightMm,
+        cols: savedMetrics.cols,
+        rows: savedMetrics.rows,
+        magTop: savedMetrics.magTop,
+        magLeft: savedMetrics.magLeft,
+        magBottom: savedMetrics.magBottom,
+        magRight: savedMetrics.magRight,
+        gapH: savedMetrics.gapH,
+        gapV: savedMetrics.gapV,
         widthMm: doc.width,
         heightMm: doc.height,
       };
     }
-    const psInfo = findPaperPreset(currentSize.FTLbsPaperSize);
     return {
-      paperSize: psInfo.code,
-      paperWidthMm: currentSize.FCLbsPaperWidth ?? psInfo.widthMm,
-      paperHeightMm: currentSize.FCLbsPaperHeight ?? psInfo.heightMm,
+      paperSize: savedMetrics.paperSize,
+      paperWidthMm: savedMetrics.paperWidthMm,
+      paperHeightMm: savedMetrics.paperHeightMm,
+      cols: savedMetrics.cols,
+      rows: savedMetrics.rows,
+      magTop: savedMetrics.magTop,
+      magLeft: savedMetrics.magLeft,
+      magBottom: savedMetrics.magBottom,
+      magRight: savedMetrics.magRight,
+      gapH: savedMetrics.gapH,
+      gapV: savedMetrics.gapV,
+      widthMm: doc.width,
+      heightMm: doc.height,
     };
   };
 
@@ -950,7 +1095,7 @@ export function LabelDesigner({
     const meta = resolvePaperMeta();
     const maxW = meta.paperWidthMm || 210;
     const maxH = meta.paperHeightMm || 297;
-    const wMm = Math.max(15, Math.min(maxW, Number(saveAsWidth) || doc.width));
+    const wMm = Math.max(10, Math.min(maxW, Number(saveAsWidth) || doc.width));
     const hMm = Math.max(10, Math.min(maxH, Number(saveAsHeight) || doc.height));
     const targetLayout: LabelDesignLayout = saveAsBlank
       ? {
@@ -1145,31 +1290,66 @@ export function LabelDesigner({
       setImpParsed(parsed);
       setImpPageNum(1);
       const firstPage = parsed.pages[0];
-      if (/b5/i.test(file.name) && firstPage?.detectedPaperSize !== 'B5_ISO') {
-        const b5 = findPaperPreset('B5_JIS');
-        setImpPaperSize(b5.code);
-        setImpPaperW(b5.widthMm);
-        setImpPaperH(b5.heightMm);
-        toast.info(`ตรวจพบฟอร์มขนาด B5 — เลือกขนาดกระดาษเป็น ${b5.label} ให้เบื้องต้น`);
-      } else if (firstPage?.detectedPaperSize && firstPage.detectedPaperSize !== 'CUSTOM') {
-        const detected = findPaperPreset(firstPage.detectedPaperSize);
-        setImpPaperSize(detected.code);
-        setImpPaperW(detected.widthMm);
-        setImpPaperH(detected.heightMm);
-        if (firstPage.mmWidth && firstPage.mmHeight) {
-          toast.info(`ตรวจพบขนาดหน้า PDF จริง (${firstPage.mmWidth}×${firstPage.mmHeight} mm) → ${detected.label}`);
+
+      let nextPaperCode = impPaperSize;
+      let nextPaperW = impPaperW;
+      let nextPaperH = impPaperH;
+
+      if (firstPage?.mmWidth && firstPage?.mmHeight) {
+        const detectedCode = detectPaperPresetFromDimensions(
+          firstPage.mmWidth,
+          firstPage.mmHeight,
+          allPaperSizes
+        );
+        if (detectedCode !== 'CUSTOM') {
+          const detected = findPaperPreset(detectedCode);
+          nextPaperCode = detected.code;
+          nextPaperW = detected.widthMm;
+          nextPaperH = detected.heightMm;
+          toast.info(`ตรวจพบขนาดหน้า PDF (${firstPage.mmWidth}×${firstPage.mmHeight} mm) → ${detected.label}`);
+        } else {
+          nextPaperCode = 'CUSTOM';
+          nextPaperW = firstPage.mmWidth;
+          nextPaperH = firstPage.mmHeight;
+          toast.info(`ตรวจพบขนาดหน้า PDF แบบกำหนดเอง (${firstPage.mmWidth}×${firstPage.mmHeight} mm)`);
         }
-      } else if (firstPage?.detectedPaperSize === 'CUSTOM' && firstPage.mmWidth && firstPage.mmHeight) {
-        setImpPaperSize('CUSTOM');
-        setImpPaperW(firstPage.mmWidth);
-        setImpPaperH(firstPage.mmHeight);
-        toast.info(`ตรวจพบขนาดหน้า PDF แบบกำหนดเอง (${firstPage.mmWidth}×${firstPage.mmHeight} mm)`);
-      } else if (/a4/i.test(file.name)) {
-        const a4 = findPaperPreset('A4');
-        setImpPaperSize(a4.code);
-        setImpPaperW(a4.widthMm);
-        setImpPaperH(a4.heightMm);
+      } else {
+        const hintCode = detectPaperCodeFromFilename(file.name);
+        if (hintCode) {
+          const detected = findPaperPreset(hintCode);
+          nextPaperCode = detected.code;
+          nextPaperW = detected.widthMm;
+          nextPaperH = detected.heightMm;
+          toast.info(`ตรวจพบขนาดจากชื่อไฟล์ → ${detected.label}`);
+        }
       }
+
+      setImpPaperSize(nextPaperCode);
+      setImpPaperW(nextPaperW);
+      setImpPaperH(nextPaperH);
+
+      const grid = inferPreprintGridFromFile({
+        fileName: file.name,
+        paperWidthMm: nextPaperW,
+        paperHeightMm: nextPaperH,
+      });
+      if (grid) {
+        setImpAutoFit(false);
+        setImpCols(grid.cols);
+        setImpRows(grid.rows);
+        setImpLabelW(grid.labelW);
+        setImpLabelH(grid.labelH);
+        setImpMagTop(grid.magTop);
+        setImpMagBottom(grid.magBottom);
+        setImpMagLeft(grid.magLeft);
+        setImpMagRight(grid.magRight);
+        setImpGapH(grid.gapH);
+        setImpGapV(grid.gapV);
+        toast.info(
+          `ปรับตารางอัตโนมัติ: ${grid.cols}×${grid.rows} ช่อง (${grid.labelW}×${grid.labelH} mm · ขอบ ${grid.magTop}/${grid.magLeft} mm)`
+        );
+      }
+
       toast.success(`โหลดไฟล์ ${parsed.fileName} สำเร็จ (${parsed.pages.length} หน้า)`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'ไม่สามารถอ่านไฟล์ PDF/รูป Pre-Print ได้');
@@ -1372,21 +1552,54 @@ export function LabelDesigner({
     }
   };
 
-  // Sheet comparison layout calculation (supports A4, B5, or custom sheet sizes & draft imports)
-  const a4Metrics = useMemo(() => {
-    const psRaw = sheetConfigDraft?.paperSize || doc.preprint?.paperSize || currentSize.FTLbsPaperSize || 'A4';
-    const ps = (psRaw in PAPER_SIZE_PRESETS ? psRaw : 'A4') as PaperSizeCode;
-    const preset = PAPER_SIZE_PRESETS[ps];
+  // Sheet/Roll layout calculation (supports dynamic preview media override + saved A4/B5/Letter/Roll/Custom)
+  const savedPaperSizeRaw = sheetConfigDraft?.paperSize || doc.preprint?.paperSize || currentSize.FTLbsPaperSize || 'A4';
+  const savedPaperSize = (
+    savedPaperSizeRaw in PAPER_SIZE_PRESETS || allPaperSizes.some((p) => p.FTPpsCode === savedPaperSizeRaw)
+      ? savedPaperSizeRaw
+      : 'A4'
+  ) as PaperSizeCode;
+
+  useEffect(() => {
+    setPreviewMedia(
+      getDefaultPreviewMediaConfig({
+        savedPaperSize,
+        savedPaperWidthMm: sheetConfigDraft?.paperWidthMm || doc.preprint?.paperWidthMm || currentSize.FCLbsPaperWidth || undefined,
+        savedPaperHeightMm: sheetConfigDraft?.paperHeightMm || doc.preprint?.paperHeightMm || currentSize.FCLbsPaperHeight || undefined,
+        lbsGroup: currentSize.FTLbsGroup,
+        gapVMm: sheetConfigDraft?.gapV ?? currentSize.FCLbsGapV ?? 2,
+      })
+    );
+  }, [
+    effectiveLbsCode,
+    savedPaperSize,
+    currentSize.FTLbsGroup,
+    currentSize.FCLbsPaperWidth,
+    currentSize.FCLbsPaperHeight,
+    currentSize.FCLbsGapV,
+    sheetConfigDraft?.paperWidthMm,
+    sheetConfigDraft?.paperHeightMm,
+    doc.preprint?.paperWidthMm,
+    doc.preprint?.paperHeightMm,
+  ]);
+
+  const savedMetrics = useMemo(() => {
+    const preset = PAPER_SIZE_PRESETS[savedPaperSize];
+    const dbP = allPaperSizes.find((p) => p.FTPpsCode === savedPaperSize);
     const paperWidthMm =
       sheetConfigDraft?.paperWidthMm ||
       doc.preprint?.paperWidthMm ||
       currentSize.FCLbsPaperWidth ||
-      preset.widthMm;
+      dbP?.FCPpsWidth ||
+      preset?.widthMm ||
+      210;
     const paperHeightMm =
       sheetConfigDraft?.paperHeightMm ||
       doc.preprint?.paperHeightMm ||
       currentSize.FCLbsPaperHeight ||
-      preset.heightMm;
+      dbP?.FCPpsHeight ||
+      preset?.heightMm ||
+      297;
     const magTop = sheetConfigDraft?.magTop ?? currentSize.FCLbsMagTop ?? 3;
     const magLeft = sheetConfigDraft?.magLeft ?? currentSize.FCLbsMagLeft ?? 3;
     const magBottom = sheetConfigDraft?.magBottom ?? currentSize.FCLbsMagBottom ?? magTop;
@@ -1397,18 +1610,18 @@ export function LabelDesigner({
     const usableH = Math.max(10, paperHeightMm - magTop - magBottom);
     const calcCols = Math.max(1, Math.floor((usableW + gapH) / (doc.width + gapH)));
     const calcRows = Math.max(1, Math.floor((usableH + gapV) / (doc.height + gapV)));
-    const cols = sheetConfigDraft?.cols || currentSize.FNLbsCol || calcCols;
-    const rows = sheetConfigDraft?.rows || currentSize.FNLbsRow || calcRows;
-    const totalPerSheet = cols * rows;
-    const areaPct = Math.min(100, ((doc.width * doc.height * totalPerSheet) / (paperWidthMm * paperHeightMm)) * 100);
+    const dimsChanged =
+      Math.abs(doc.width - (currentSize.FCLbsWidth || doc.width)) > 0.2 ||
+      Math.abs(doc.height - (currentSize.FCLbsHeight || doc.height)) > 0.2;
+    const cols = sheetConfigDraft?.cols || (!dimsChanged && currentSize.FNLbsCol ? currentSize.FNLbsCol : calcCols);
+    const rows = sheetConfigDraft?.rows || (!dimsChanged && currentSize.FNLbsRow ? currentSize.FNLbsRow : calcRows);
     return {
-      paperSize: ps,
+      paperSize: savedPaperSize,
       paperWidthMm,
       paperHeightMm,
       cols,
       rows,
-      totalPerSheet,
-      areaPct,
+      totalPerSheet: cols * rows,
       magTop,
       magLeft,
       magBottom,
@@ -1419,11 +1632,13 @@ export function LabelDesigner({
   }, [
     doc.width,
     doc.height,
-    doc.preprint?.paperSize,
+    savedPaperSize,
+    allPaperSizes,
+    currentSize.FCLbsWidth,
+    currentSize.FCLbsHeight,
     doc.preprint?.paperWidthMm,
     doc.preprint?.paperHeightMm,
     sheetConfigDraft,
-    currentSize.FTLbsPaperSize,
     currentSize.FCLbsPaperWidth,
     currentSize.FCLbsPaperHeight,
     currentSize.FNLbsCol,
@@ -1435,6 +1650,84 @@ export function LabelDesigner({
     currentSize.FCLbsGapH,
     currentSize.FCLbsGapV,
   ]);
+
+  const a4Metrics = useMemo(
+    () =>
+      computeEffectivePreviewLayout(
+        {
+          lbsGroup: currentSize.FTLbsGroup,
+          labelWidthMm: doc.width,
+          labelHeightMm: doc.height,
+          savedPaperSize: savedMetrics.paperSize,
+          savedPaperWidthMm: savedMetrics.paperWidthMm,
+          savedPaperHeightMm: savedMetrics.paperHeightMm,
+          savedCols: savedMetrics.cols,
+          savedRows: savedMetrics.rows,
+          magTopMm: savedMetrics.magTop,
+          magLeftMm: savedMetrics.magLeft,
+          magBottomMm: savedMetrics.magBottom,
+          magRightMm: savedMetrics.magRight,
+          gapHMm: savedMetrics.gapH,
+          gapVMm: savedMetrics.gapV,
+        },
+        previewMedia
+      ),
+    [doc.width, doc.height, currentSize.FTLbsGroup, savedMetrics, previewMedia]
+  );
+
+  const updateSheetSpacingDraft = (patch: Partial<SheetConfigMeta>) => {
+    const pw = a4Metrics.paperWidthMm;
+    const ph = a4Metrics.paperHeightMm;
+    const magTop = patch.magTop ?? a4Metrics.magTopMm;
+    const magBottom = patch.magBottom ?? a4Metrics.magBottomMm;
+    const magLeft = patch.magLeft ?? a4Metrics.magLeftMm;
+    const magRight = patch.magRight ?? a4Metrics.magRightMm;
+    const gapH = patch.gapH ?? a4Metrics.gapHMm;
+    const gapV = patch.gapV ?? a4Metrics.gapVMm;
+    const usableW = Math.max(doc.width, pw - magLeft - magRight);
+    const usableH = Math.max(doc.height, ph - magTop - magBottom);
+    const cols = Math.max(1, Math.floor((usableW + gapH + 0.05) / (doc.width + gapH)));
+    const rows = Math.max(1, Math.floor((usableH + gapV + 0.05) / (doc.height + gapV)));
+    setSheetConfigDraft({
+      paperSize: a4Metrics.paperSize,
+      paperWidthMm: pw,
+      paperHeightMm: ph,
+      cols,
+      rows,
+      magTop,
+      magBottom,
+      magLeft,
+      magRight,
+      gapH,
+      gapV,
+      widthMm: doc.width,
+      heightMm: doc.height,
+    });
+    if (previewMedia.mode !== 'AUTO') {
+      setPreviewMedia((prev) => ({ ...prev, mode: 'AUTO' }));
+    }
+    setDirty(true);
+  };
+
+  const centerGridOnSheet = () => {
+    const pw = a4Metrics.paperWidthMm;
+    const ph = a4Metrics.paperHeightMm;
+    const gapH = a4Metrics.gapHMm;
+    const gapV = a4Metrics.gapVMm;
+    const c = Math.max(1, a4Metrics.cols);
+    const r = Math.max(1, a4Metrics.rows);
+    const gridW = c * doc.width + Math.max(0, c - 1) * gapH;
+    const gridH = r * doc.height + Math.max(0, r - 1) * gapV;
+    const ml = Math.max(0, roundMm((pw - gridW) / 2, 0.1));
+    const mt = Math.max(0, roundMm((ph - gridH) / 2, 0.1));
+    updateSheetSpacingDraft({
+      magLeft: ml,
+      magRight: ml,
+      magTop: mt,
+      magBottom: mt,
+    });
+    toast.success(`จัดกึ่งกลางแผ่นแล้ว (ขอบซ้าย/ขวา ${ml} mm · ขอบบน/ล่าง ${mt} mm)`);
+  };
 
   const hasSavedCustom = Boolean(customLayouts[layoutKey]);
 
@@ -1571,7 +1864,7 @@ export function LabelDesigner({
             </div>
 
             <Badge variant="secondary" className="text-[11px] font-mono px-2.5 py-0.5">
-              {doc.width}×{doc.height} mm · {a4Metrics.cols}×{a4Metrics.rows} ({a4Metrics.totalPerSheet} ดวง/{a4Metrics.paperSize === 'B5_JIS' ? 'B5' : a4Metrics.paperSize === 'B5_ISO' ? 'B5 ISO' : a4Metrics.paperSize === 'LETTER' ? 'Letter' : a4Metrics.paperSize === 'CUSTOM' ? 'กำหนดเอง' : 'A4'})
+              {doc.width}×{doc.height} mm · {savedMetrics.cols}×{savedMetrics.rows} ({savedMetrics.totalPerSheet} ดวง/{getPaperSizeDisplayName(savedMetrics.paperSize, savedMetrics.paperWidthMm, savedMetrics.paperHeightMm)})
             </Badge>
 
             {isCustomCreatedFormat && (
@@ -2314,10 +2607,39 @@ export function LabelDesigner({
             style={{
               width: `${doc.width * zoom}mm`,
               height: `${doc.height * zoom}mm`,
-              outline: doc.designMode === 'preprint' ? '1.5px dashed #d97706' : undefined,
+              outline: boardResizing
+                ? '2px solid #007a87'
+                : doc.designMode === 'preprint'
+                  ? '1.5px dashed #d97706'
+                  : undefined,
             }}
             onPointerDown={(e) => e.stopPropagation()}
           >
+            {/* Board Resize Handles (e, s, se) — ลากปรับขนาดป้ายได้อิสระ */}
+            <div
+              onPointerDown={(e) => startBoardResize(e, 'e')}
+              title="ลากขอบขวาเพื่อปรับความกว้างป้าย (กด Alt เพื่อขยับละเอียด 0.1 mm)"
+              className="group absolute top-0 bottom-0 -right-2 w-3 cursor-ew-resize z-40 flex items-center justify-center"
+            >
+              <div className="w-1 h-8 rounded-full bg-slate-400/70 group-hover:bg-[#007a87] transition-colors" />
+            </div>
+            <div
+              onPointerDown={(e) => startBoardResize(e, 's')}
+              title="ลากขอบล่างเพื่อปรับความสูงป้าย (กด Alt เพื่อขยับละเอียด 0.1 mm)"
+              className="group absolute left-0 right-0 -bottom-2 h-3 cursor-ns-resize z-40 flex items-center justify-center"
+            >
+              <div className="h-1 w-8 rounded-full bg-slate-400/70 group-hover:bg-[#007a87] transition-colors" />
+            </div>
+            <div
+              onPointerDown={(e) => startBoardResize(e, 'se')}
+              title="ลากมุมขวาล่างเพื่อปรับขนาดป้าย กว้าง × สูง"
+              className="absolute -right-2 -bottom-2 w-4 h-4 rounded-sm bg-white border-2 border-[#007a87] shadow-xs cursor-nwse-resize z-50 hover:scale-110 transition-transform"
+            />
+            {boardResizing && (
+              <div className="absolute -bottom-8 right-0 bg-[#007a87] text-white text-[11px] px-2 py-0.5 rounded font-mono whitespace-nowrap pointer-events-none shadow-md z-50">
+                {doc.width.toFixed(1)} × {doc.height.toFixed(1)} mm
+              </div>
+            )}
             {/* Actual Live Render underneath */}
             <CustomDesignRenderer
               layout={doc}
@@ -2445,6 +2767,95 @@ export function LabelDesigner({
                   Pre-Print
                 </Badge>
               )}
+            </div>
+
+            {/* Label Artboard Dimensions Editor (always editable + draggable on canvas) */}
+            <div className="rounded-md bg-slate-50 border border-slate-200 p-2 space-y-2">
+              <div className="grid grid-cols-12 gap-1.5 items-end">
+                <div className="col-span-4 space-y-0.5">
+                  <Label className="text-[10px] text-slate-600">กว้าง (mm)</Label>
+                  <Input
+                    type="number"
+                    step={0.5}
+                    min={10}
+                    max={420}
+                    value={boardWInput}
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      setBoardWInput(raw);
+                      const val = parseFloat(raw);
+                      if (Number.isFinite(val) && val >= 10 && val <= 420) {
+                        resizeBoardTo(val, doc.height);
+                      }
+                    }}
+                    onBlur={() => {
+                      const val = parseFloat(boardWInput);
+                      if (Number.isFinite(val)) {
+                        resizeBoardTo(val, doc.height);
+                        setBoardWInput(String(roundMm(Math.max(10, Math.min(420, val)), 0.1)));
+                      } else {
+                        setBoardWInput(String(doc.width));
+                      }
+                    }}
+                    className="h-7 text-xs font-mono bg-white px-1.5"
+                  />
+                </div>
+                <div className="col-span-4 space-y-0.5">
+                  <Label className="text-[10px] text-slate-600">สูง (mm)</Label>
+                  <Input
+                    type="number"
+                    step={0.5}
+                    min={10}
+                    max={420}
+                    value={boardHInput}
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      setBoardHInput(raw);
+                      const val = parseFloat(raw);
+                      if (Number.isFinite(val) && val >= 10 && val <= 420) {
+                        resizeBoardTo(doc.width, val);
+                      }
+                    }}
+                    onBlur={() => {
+                      const val = parseFloat(boardHInput);
+                      if (Number.isFinite(val)) {
+                        resizeBoardTo(doc.width, val);
+                        setBoardHInput(String(roundMm(Math.max(10, Math.min(420, val)), 0.1)));
+                      } else {
+                        setBoardHInput(String(doc.height));
+                      }
+                    }}
+                    className="h-7 text-xs font-mono bg-white px-1.5"
+                  />
+                </div>
+                <div className="col-span-4">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-7 w-full text-[11px] px-1.5 bg-white"
+                    onClick={() => resizeBoardTo(doc.height, doc.width, false)}
+                    title="สลับกว้าง × สูง (แนวตั้ง ↔ แนวนอน)"
+                  >
+                    สลับแนว
+                  </Button>
+                </div>
+              </div>
+              <div className="flex items-center justify-between gap-1.5">
+                <span className="text-[10px] text-slate-500">ลากขอบขวา/ล่างของป้ายเพื่อยืด-หดได้อิสระ</span>
+                {doc.elements.length > 0 && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-6 text-[10px] px-2 bg-white border-[#007a87]/40 text-[#007a87] hover:bg-teal-50 shrink-0"
+                    onClick={fitElementsToBoard}
+                    title="ปรับตำแหน่งและขนาดข้อความที่ล้นให้พอดีกรอบป้าย"
+                  >
+                    จัดพอดีกรอบ
+                  </Button>
+                )}
+              </div>
             </div>
 
             {doc.designMode === 'preprint' ? (
@@ -3091,34 +3502,130 @@ export function LabelDesigner({
         </div>
       </div>
 
-      {/* Modal: Preview เทียบขนาดบนกระดาษจริง (A4 / B5 / Custom) */}
+      {/* Modal: Preview รูปแบบจัดวาง (เลือกขนาดกระดาษ / ม้วน Thermal ได้อิสระ) */}
       <Dialog open={a4PreviewOpen} onOpenChange={setA4PreviewOpen}>
         <DialogContent className="w-[96vw] max-w-[96vw] sm:max-w-[96vw] h-[94vh] flex flex-col">
           <DialogHeader>
             <DialogTitle className="text-base flex items-center gap-2">
               <FileSpreadsheet className="h-4 w-4 text-[#007a87]" />
-              Preview เทียบขนาดบนกระดาษ {PAPER_SIZE_PRESETS[a4Metrics.paperSize]?.label || `${a4Metrics.paperWidthMm} × ${a4Metrics.paperHeightMm} mm`}
+              Preview รูปแบบจัดวาง — {a4Metrics.paperLabel}
             </DialogTitle>
             <DialogDescription className="text-xs">
               รูปแบบ <strong>{doc.lbsCode}</strong> ({priType === '2' ? 'ราคาโปรโมชัน' : 'ราคาปกติ'}) — ขนาดป้าย{' '}
               <strong>
                 {doc.width} × {doc.height} mm
               </strong>{' '}
-              วางได้ <strong>{a4Metrics.cols} คอลัมน์ × {a4Metrics.rows} แถว = {a4Metrics.totalPerSheet} ดวง/แผ่น</strong> (ใช้พื้นที่{' '}
-              {a4Metrics.areaPct.toFixed(1)}% ของแผ่น)
+              {a4Metrics.isRoll ? (
+                <>
+                  จัดวางบนม้วนกว้าง <strong>{a4Metrics.paperWidthMm} mm</strong> (แถวละ{' '}
+                  <strong>{a4Metrics.cols} ดวง</strong> · Gap {a4Metrics.gapVMm} mm)
+                </>
+              ) : a4Metrics.isSingle ? (
+                <>แสดงป้ายเดี่ยว 1:1 ขนาดจริง</>
+              ) : (
+                <>
+                  วางได้ <strong>{a4Metrics.cols} คอลัมน์ × {a4Metrics.rows} แถว = {a4Metrics.perPage} ดวง/แผ่น</strong> (ใช้พื้นที่{' '}
+                  {a4Metrics.areaPct.toFixed(1)}% ของแผ่น)
+                </>
+              )}
             </DialogDescription>
           </DialogHeader>
+
+          <PreviewMediaToolbar
+            config={previewMedia}
+            onChange={setPreviewMedia}
+            savedPaperSize={savedMetrics.paperSize}
+            lbsGroup={currentSize.FTLbsGroup}
+          />
+
+          {!a4Metrics.isRoll && !a4Metrics.isSingle && (
+            <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-50/90 border border-slate-200 rounded-md px-2.5 py-1.5 text-[11px]">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium text-slate-700">ขอบและช่องว่าง (mm):</span>
+                <label className="inline-flex items-center gap-1 text-slate-600">
+                  <span>ขอบบน:</span>
+                  <Input
+                    type="number"
+                    step={0.5}
+                    min={0}
+                    max={80}
+                    value={a4Metrics.magTopMm}
+                    onChange={(e) => {
+                      const v = Math.max(0, parseFloat(e.target.value) || 0);
+                      updateSheetSpacingDraft({ magTop: v, magBottom: v });
+                    }}
+                    className="h-6 w-14 text-[11px] font-mono bg-white px-1.5"
+                  />
+                </label>
+                <label className="inline-flex items-center gap-1 text-slate-600">
+                  <span>ขอบซ้าย:</span>
+                  <Input
+                    type="number"
+                    step={0.5}
+                    min={0}
+                    max={80}
+                    value={a4Metrics.magLeftMm}
+                    onChange={(e) => {
+                      const v = Math.max(0, parseFloat(e.target.value) || 0);
+                      updateSheetSpacingDraft({ magLeft: v, magRight: v });
+                    }}
+                    className="h-6 w-14 text-[11px] font-mono bg-white px-1.5"
+                  />
+                </label>
+                <label className="inline-flex items-center gap-1 text-slate-600">
+                  <span>ช่องว่าง H:</span>
+                  <Input
+                    type="number"
+                    step={0.5}
+                    min={0}
+                    max={30}
+                    value={a4Metrics.gapHMm}
+                    onChange={(e) =>
+                      updateSheetSpacingDraft({ gapH: Math.max(0, parseFloat(e.target.value) || 0) })
+                    }
+                    className="h-6 w-14 text-[11px] font-mono bg-white px-1.5"
+                  />
+                </label>
+                <label className="inline-flex items-center gap-1 text-slate-600">
+                  <span>ช่องว่าง V:</span>
+                  <Input
+                    type="number"
+                    step={0.5}
+                    min={0}
+                    max={30}
+                    value={a4Metrics.gapVMm}
+                    onChange={(e) =>
+                      updateSheetSpacingDraft({ gapV: Math.max(0, parseFloat(e.target.value) || 0) })
+                    }
+                    className="h-6 w-14 text-[11px] font-mono bg-white px-1.5"
+                  />
+                </label>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-6 text-[11px] px-2.5 bg-white border-[#007a87] text-[#007a87] hover:bg-teal-50"
+                onClick={centerGridOnSheet}
+                title="คำนวณขอบซ้าย/ขวา และ บน/ล่าง ให้อยู่กึ่งกลางกระดาษพอดี"
+              >
+                จัดกึ่งกลางแผ่น
+              </Button>
+            </div>
+          )}
 
           <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-100">
             <div className="flex flex-wrap items-center gap-2 text-xs">
               <Badge variant="outline">
-                กระดาษ: {a4Metrics.paperWidthMm} × {a4Metrics.paperHeightMm} mm
+                {a4Metrics.isRoll
+                  ? `หน้ากว้างม้วน: ${a4Metrics.paperWidthMm} mm`
+                  : `กระดาษ: ${a4Metrics.paperWidthMm} × ${a4Metrics.paperHeightMm} mm`}
               </Badge>
               <Badge variant="outline">1 ดวง: {doc.width} × {doc.height} mm</Badge>
               <Badge className="bg-[#007a87] text-white">
-                {a4Metrics.totalPerSheet} ดวง / แผ่น
+                {a4Metrics.isRoll ? `${a4Metrics.cols} ดวง / แถวม้วน` : `${a4Metrics.perPage} ดวง / แผ่น`}
               </Badge>
-              {doc.designMode === 'preprint' && (
+              {doc.designMode === 'preprint' && !a4Metrics.isRoll && !a4Metrics.isSingle && (
                 <div className="inline-flex rounded-md border border-slate-200 bg-slate-100 p-0.5 ml-1">
                   <button
                     type="button"
@@ -3147,7 +3654,7 @@ export function LabelDesigner({
             </div>
             <div className="flex items-center gap-1.5">
               <span className="text-xs text-slate-500">มาตราส่วน:</span>
-              {[0.5, 0.68, 0.85, 1].map((s) => (
+              {[0.5, 0.68, 0.85, 1, 1.5].map((s) => (
                 <Button
                   key={s}
                   size="sm"
@@ -3163,29 +3670,62 @@ export function LabelDesigner({
 
           <div className="flex-1 min-h-0 overflow-auto bg-slate-200 rounded-lg p-6 flex justify-center items-start">
             {(() => {
-              const isSmallerThanA4 =
-                a4Metrics.paperWidthMm <= 209 &&
-                a4Metrics.paperHeightMm <= 297 &&
-                (a4Metrics.paperWidthMm < 209 || a4Metrics.paperHeightMm < 296);
-              const paperLabelText =
-                PAPER_SIZE_PRESETS[a4Metrics.paperSize]?.label ||
-                `${a4Metrics.paperWidthMm} × ${a4Metrics.paperHeightMm} mm`;
+              const sampleRollRows = 4;
+              const rollTotalH = Number(
+                (4 + sampleRollRows * doc.height + (sampleRollRows - 1) * a4Metrics.gapVMm).toFixed(1)
+              );
+              const renderBoxH = a4Metrics.isRoll ? rollTotalH : a4Metrics.paperHeightMm;
 
-              const actualSheetBox = (
+              const actualSheetBox = a4Metrics.isRoll ? (
+                <div
+                  className="bg-slate-100 shadow-xl border-x-2 border-slate-500 border-y border-dashed border-slate-400 relative"
+                  style={{
+                    width: `${a4Metrics.paperWidthMm * a4Scale}mm`,
+                    paddingTop: `${2 * a4Scale}mm`,
+                    paddingBottom: `${2 * a4Scale}mm`,
+                    paddingLeft: `${a4Metrics.magLeftMm * a4Scale}mm`,
+                    paddingRight: `${a4Metrics.magRightMm * a4Scale}mm`,
+                    display: 'grid',
+                    gridTemplateColumns: `repeat(${a4Metrics.cols}, ${doc.width * a4Scale}mm)`,
+                    columnGap: `${a4Metrics.gapHMm * a4Scale}mm`,
+                    rowGap: `${a4Metrics.gapVMm * a4Scale}mm`,
+                    justifyContent: 'start',
+                    boxSizing: 'border-box',
+                  }}
+                >
+                  {Array.from({ length: a4Metrics.cols * sampleRollRows }).map((_, idx) => (
+                    <div
+                      key={`roll-cmp-${idx}`}
+                      className="bg-white ring-1 ring-slate-300/90 rounded-[2px] overflow-hidden"
+                      style={{
+                        width: `${doc.width * a4Scale}mm`,
+                        height: `${doc.height * a4Scale}mm`,
+                      }}
+                    >
+                      <CustomDesignRenderer
+                        layout={doc}
+                        line={sampleLine}
+                        scale={a4Scale}
+                        preprintView="ink"
+                      />
+                    </div>
+                  ))}
+                </div>
+              ) : (
                 <div
                   className="bg-white shadow-xl border-2 border-[#007a87] relative overflow-hidden"
                   style={{
                     width: `${a4Metrics.paperWidthMm * a4Scale}mm`,
                     height: `${a4Metrics.paperHeightMm * a4Scale}mm`,
-                    paddingTop: `${a4Metrics.magTop * a4Scale}mm`,
-                    paddingBottom: `${a4Metrics.magBottom * a4Scale}mm`,
-                    paddingLeft: `${a4Metrics.magLeft * a4Scale}mm`,
-                    paddingRight: `${a4Metrics.magRight * a4Scale}mm`,
+                    paddingTop: `${a4Metrics.magTopMm * a4Scale}mm`,
+                    paddingBottom: `${a4Metrics.magBottomMm * a4Scale}mm`,
+                    paddingLeft: `${a4Metrics.magLeftMm * a4Scale}mm`,
+                    paddingRight: `${a4Metrics.magRightMm * a4Scale}mm`,
                     display: 'grid',
                     gridTemplateColumns: `repeat(${a4Metrics.cols}, ${doc.width * a4Scale}mm)`,
                     gridAutoRows: `${doc.height * a4Scale}mm`,
-                    columnGap: `${a4Metrics.gapH * a4Scale}mm`,
-                    rowGap: `${a4Metrics.gapV * a4Scale}mm`,
+                    columnGap: `${a4Metrics.gapHMm * a4Scale}mm`,
+                    rowGap: `${a4Metrics.gapVMm * a4Scale}mm`,
                     alignContent: 'start',
                     justifyContent: 'start',
                     boxSizing: 'border-box',
@@ -3193,6 +3733,7 @@ export function LabelDesigner({
                 >
                   {doc.designMode === 'preprint' &&
                     sheetPreviewMode === 'guide' &&
+                    !a4Metrics.isSingle &&
                     doc.preprint?.sheetBgDataUrl && (
                       <img
                         src={doc.preprint.sheetBgDataUrl}
@@ -3212,7 +3753,7 @@ export function LabelDesigner({
                         }}
                       />
                     )}
-                  {Array.from({ length: a4Metrics.totalPerSheet }).map((_, idx) => (
+                  {Array.from({ length: a4Metrics.perPage }).map((_, idx) => (
                     <CustomDesignRenderer
                       key={`a4-cmp-${idx}`}
                       layout={doc}
@@ -3222,14 +3763,14 @@ export function LabelDesigner({
                         doc.designMode === 'preprint'
                           ? sheetPreviewMode === 'ink'
                             ? 'ink'
-                            : doc.preprint?.sheetBgDataUrl
+                            : !a4Metrics.isSingle && doc.preprint?.sheetBgDataUrl
                               ? 'sheet-overlay'
                               : 'cell-guide'
                           : 'ink'
                       }
                     />
                   ))}
-                  {isSmallerThanA4 && (
+                  {previewMedia.refFrame !== 'NONE' && (
                     <div className="absolute bottom-1 right-1 bg-[#007a87]/90 text-white text-[10px] font-mono px-1.5 py-0.5 rounded pointer-events-none">
                       {a4Metrics.paperSize}: {a4Metrics.paperWidthMm}×{a4Metrics.paperHeightMm} mm
                     </div>
@@ -3241,32 +3782,20 @@ export function LabelDesigner({
                 <div className="space-y-1.5">
                   <div className="text-[11px] font-mono text-slate-600 flex flex-wrap justify-between gap-2 px-1">
                     <span>
-                      ← กว้างแผ่น = {a4Metrics.paperWidthMm} mm · สูง = {a4Metrics.paperHeightMm} mm →
+                      {a4Metrics.isRoll
+                        ? `← ม้วนสติ๊กเกอร์กว้าง = ${a4Metrics.paperWidthMm} mm (แสดงตัวอย่าง ${sampleRollRows} แถว · Gap = ${a4Metrics.gapVMm} mm) →`
+                        : `← กว้าง = ${a4Metrics.paperWidthMm} mm · สูง = ${a4Metrics.paperHeightMm} mm →`}
                     </span>
-                    {isSmallerThanA4 && (
-                      <span className="text-[#00606b] font-sans font-medium">
-                        กรอบเส้นประด้านหลัง = A4 มาตรฐาน (210 × 297 mm) เพื่อเทียบสัดส่วนจริงของ {paperLabelText}
-                      </span>
-                    )}
                   </div>
 
-                  {isSmallerThanA4 ? (
-                    <div
-                      className="relative border-2 border-dashed border-slate-400 bg-slate-100/80 shadow-inner"
-                      style={{
-                        width: `${210 * a4Scale}mm`,
-                        height: `${297 * a4Scale}mm`,
-                        boxSizing: 'border-box',
-                      }}
-                    >
-                      {actualSheetBox}
-                      <div className="absolute bottom-1.5 right-2 text-[11px] font-mono text-slate-500 bg-white/80 px-1.5 py-0.5 rounded border border-slate-200 pointer-events-none">
-                        A4 (210 × 297 mm)
-                      </div>
-                    </div>
-                  ) : (
-                    actualSheetBox
-                  )}
+                  <PreviewReferenceFrameWrapper
+                    refFrame={previewMedia.refFrame}
+                    sheetWidthMm={a4Metrics.paperWidthMm}
+                    sheetHeightMm={renderBoxH}
+                    scale={a4Scale}
+                  >
+                    {actualSheetBox}
+                  </PreviewReferenceFrameWrapper>
                 </div>
               );
             })()}
@@ -3692,17 +4221,7 @@ export function LabelDesigner({
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {(paperSizes.length > 0
-                        ? paperSizes
-                        : Object.entries(PAPER_SIZE_PRESETS).map(([k, v]) => ({
-                            FTPpsCode: k,
-                            FTPpsName: v.label,
-                            FCPpsWidth: v.widthMm,
-                            FCPpsHeight: v.heightMm,
-                            FTPpsStaCustom: k === 'CUSTOM' ? '1' : '2',
-                            FTPpsStaUse: '1',
-                          }))
-                      ).map((p) => (
+                      {allPaperSizes.map((p) => (
                         <SelectItem key={p.FTPpsCode} value={p.FTPpsCode}>
                           {p.FTPpsName}
                         </SelectItem>
@@ -3734,18 +4253,66 @@ export function LabelDesigner({
                     className="h-8 text-xs font-mono"
                   />
                 </div>
+                <div className="col-span-12 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                  <span className="text-slate-500">
+                    ทิศทางแผ่น: <strong>{impPaperW > impPaperH ? 'แนวนอน (Landscape)' : 'แนวตั้ง (Portrait)'}</strong> · {impPaperW}×{impPaperH} mm
+                  </span>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-6 text-[11px] px-2 bg-white"
+                    onClick={() => {
+                      const nextW = impPaperH;
+                      const nextH = impPaperW;
+                      const matched = detectPaperPresetFromDimensions(nextW, nextH, allPaperSizes);
+                      setImpPaperSize(matched);
+                      setImpPaperW(nextW);
+                      setImpPaperH(nextH);
+                    }}
+                  >
+                    สลับแนวตั้ง ↔ แนวนอน
+                  </Button>
+                </div>
+                {(Math.abs(impLabelW - doc.width) > 0.5 || Math.abs(impLabelH - doc.height) > 0.5) && (
+                  <div className="col-span-12 rounded border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-900">
+                    ขนาดดวงที่ตั้งไว้ (<strong>{impLabelW}×{impLabelH} mm</strong>) ต่างจากแบบป้ายที่เปิดอยู่ ({doc.width}×{doc.height} mm) — หลังกดนำเข้าแนะนำให้กด <strong>บันทึกเป็นแบบใหม่</strong> เพื่อไม่ให้ทับขนาดเดิม
+                  </div>
+                )}
                 {(() => {
                   const chosenPage = impParsed?.pages.find((p) => p.pageNumber === impPageNum) || impParsed?.pages[0];
                   if (!chosenPage || impScope !== 'sheet') return null;
                   const chosenRatio = impPaperW / Math.max(1, impPaperH);
                   const diffPct = Math.abs(chosenRatio - chosenPage.aspectRatio) / Math.max(0.01, chosenPage.aspectRatio);
-                  if (diffPct <= 0.05) return null;
+                  const sizeMismatch =
+                    Boolean(chosenPage.mmWidth && chosenPage.mmHeight) &&
+                    (Math.abs(impPaperW - (chosenPage.mmWidth || 0)) > 3 ||
+                      Math.abs(impPaperH - (chosenPage.mmHeight || 0)) > 3);
+                  if (diffPct <= 0.05 && !sizeMismatch) return null;
                   return (
-                    <div className="col-span-12 rounded border border-red-200 bg-red-50 px-2.5 py-1.5 text-[11px] text-red-800 flex items-center justify-between gap-2">
+                    <div className="col-span-12 rounded border border-red-200 bg-red-50 px-2.5 py-1.5 text-[11px] text-red-800 flex flex-wrap items-center justify-between gap-2">
                       <span>
-                        สัดส่วนกระดาษที่เลือก ({impPaperW}×{impPaperH} mm) ไม่ตรงกับสัดส่วนของไฟล์ที่อัปโหลด
-                        {chosenPage.mmWidth && chosenPage.mmHeight ? ` (${chosenPage.mmWidth}×${chosenPage.mmHeight} mm)` : ''} — ภาพอาจยืดหรือขนาดคลาดเคลื่อน
+                        ขนาดกระดาษที่เลือก (<strong>{impPaperW}×{impPaperH} mm</strong>) ไม่ตรงกับหน้า PDF จริง
+                        {chosenPage.mmWidth && chosenPage.mmHeight ? ` (${chosenPage.mmWidth}×${chosenPage.mmHeight} mm)` : ''} — อาจทำให้กรอบทาบไม่ตรงจริง
                       </span>
+                      {chosenPage.mmWidth && chosenPage.mmHeight && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-6 text-[10px] px-2 bg-white border-red-300 text-red-800 hover:bg-red-100 shrink-0"
+                          onClick={() => {
+                            const w = chosenPage.mmWidth || 210;
+                            const h = chosenPage.mmHeight || 297;
+                            const matched = detectPaperPresetFromDimensions(w, h, allPaperSizes);
+                            setImpPaperSize(matched);
+                            setImpPaperW(w);
+                            setImpPaperH(h);
+                          }}
+                        >
+                          ใช้ขนาดจริง ({chosenPage.mmWidth}×{chosenPage.mmHeight})
+                        </Button>
+                      )}
                     </div>
                   );
                 })()}

@@ -54,11 +54,13 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import type { PrinterBrand, PrinterConfig } from '@/types/printer';
 import {
+  mergePaperSizeOptions,
   PAPER_SIZE_PRESETS,
   type PaperSizeCode,
   type PaperSizeRecord,
   type PreprintRecord,
 } from '@/types/design';
+import { getPaperSizeDisplayName } from '@/lib/previewMedia';
 
 export interface ConfigLabelSizeRow {
   FTLbsCode: string;
@@ -535,8 +537,8 @@ export function SettingsPanel({
           staUse: sizeForm.staUse,
           isNew: sizeForm.isNew,
           paperSize: sizeForm.paperSize,
-          paperWidthMm: Math.max(30, Number(sizeForm.paperWidthMm) || 210),
-          paperHeightMm: Math.max(30, Number(sizeForm.paperHeightMm) || 297),
+          paperWidthMm: Math.max(10, Number(sizeForm.paperWidthMm) || 210),
+          paperHeightMm: Math.max(10, Number(sizeForm.paperHeightMm) || 297),
           offsetX: Number(sizeForm.offsetX) || 0,
           offsetY: Number(sizeForm.offsetY) || 0,
         }),
@@ -1019,9 +1021,11 @@ export function SettingsPanel({
                           <TableCell className="text-xs">{s.FTLbsName}</TableCell>
                           <TableCell className="text-xs text-center">
                             <Badge variant="outline" className="text-[10px]">
-                              {s.FTLbsGroup === '2'
+                              {s.FTLbsGroup === '2' && (!s.FTLbsPaperSize || s.FTLbsPaperSize === 'ROLL')
                                 ? 'ม้วน Thermal'
-                                : `แผ่น ${s.FTLbsPaperSize === 'B5_JIS' ? 'B5 JIS' : s.FTLbsPaperSize === 'B5_ISO' ? 'B5 ISO' : s.FTLbsPaperSize === 'LETTER' ? 'Letter' : s.FTLbsPaperSize === 'CUSTOM' ? 'กำหนดเอง' : 'A4'}`}
+                                : s.FTLbsGroup === '2'
+                                  ? `ม้วน (${getPaperSizeDisplayName(s.FTLbsPaperSize, s.FCLbsPaperWidth ?? undefined, s.FCLbsPaperHeight ?? undefined)})`
+                                  : `แผ่น ${getPaperSizeDisplayName(s.FTLbsPaperSize, s.FCLbsPaperWidth ?? undefined, s.FCLbsPaperHeight ?? undefined)}`}
                             </Badge>
                           </TableCell>
                           <TableCell className="text-xs text-center font-mono">
@@ -1840,17 +1844,7 @@ export function SettingsPanel({
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            {(paperSizes.length > 0
-                              ? paperSizes
-                              : Object.entries(PAPER_SIZE_PRESETS).map(([k, v]) => ({
-                                  FTPpsCode: k,
-                                  FTPpsName: v.label,
-                                  FCPpsWidth: v.widthMm,
-                                  FCPpsHeight: v.heightMm,
-                                  FTPpsStaCustom: k === 'CUSTOM' ? '1' : '2',
-                                  FTPpsStaUse: '1',
-                                }))
-                            ).map((p) => (
+                            {mergePaperSizeOptions(paperSizes).map((p) => (
                               <SelectItem key={p.FTPpsCode} value={p.FTPpsCode}>
                                 {p.FTPpsName}
                               </SelectItem>
@@ -1863,8 +1857,8 @@ export function SettingsPanel({
                         <Input
                           type="number"
                           step={0.5}
-                          min={30}
-                          disabled={sizeForm.paperSize !== 'CUSTOM'}
+                          min={10}
+                          disabled={sizeForm.paperSize !== 'CUSTOM' && sizeForm.paperSize !== 'ROLL'}
                           value={sizeForm.paperWidthMm}
                           onChange={(e) =>
                             setSizeForm({ ...sizeForm, paperWidthMm: parseFloat(e.target.value) || 210 })
@@ -1873,12 +1867,12 @@ export function SettingsPanel({
                         />
                       </div>
                       <div className="space-y-1">
-                        <Label className="text-[11px] font-medium">สูงแผ่น (mm)</Label>
+                        <Label className="text-[11px] font-medium">สูงแผ่น / แถว (mm)</Label>
                         <Input
                           type="number"
                           step={0.5}
-                          min={30}
-                          disabled={sizeForm.paperSize !== 'CUSTOM'}
+                          min={10}
+                          disabled={sizeForm.paperSize !== 'CUSTOM' && sizeForm.paperSize !== 'ROLL'}
                           value={sizeForm.paperHeightMm}
                           onChange={(e) =>
                             setSizeForm({ ...sizeForm, paperHeightMm: parseFloat(e.target.value) || 297 })
@@ -2084,7 +2078,7 @@ export function SettingsPanel({
                         : 'bg-slate-50 border-slate-200 text-slate-600'
                     }`}
                   >
-                    พื้นที่รวมบน {sizeForm.paperSize === 'B5_JIS' ? 'B5 JIS' : sizeForm.paperSize === 'B5_ISO' ? 'B5 ISO' : sizeForm.paperSize === 'LETTER' ? 'Letter' : sizeForm.paperSize === 'CUSTOM' ? 'กระดาษ' : 'A4'}:{' '}
+                    พื้นที่รวมบน {getPaperSizeDisplayName(sizeForm.paperSize, sizeForm.paperWidthMm, sizeForm.paperHeightMm)}:{' '}
                     <strong>{usedW.toFixed(1)} / {pw} mm</strong> (กว้าง) ×{' '}
                     <strong>{usedH.toFixed(1)} / {ph} mm</strong> (สูง)
                     {overflow && ' — เกินขอบกระดาษ แนะนำปรับ Margin/Gap หรือกด "คำนวณกริด"'}

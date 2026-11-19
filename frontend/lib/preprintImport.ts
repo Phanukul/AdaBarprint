@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import { PAPER_SIZE_PRESETS, type PaperSizeRecord } from '@/types/design';
 
 if (typeof window !== 'undefined' && pdfjsLib.GlobalWorkerOptions) {
   pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
@@ -14,7 +15,7 @@ export interface ParsedPreprintPage {
   aspectRatio: number;
   mmWidth?: number;
   mmHeight?: number;
-  detectedPaperSize?: 'A4' | 'B5_JIS' | 'B5_ISO' | 'LETTER' | 'CUSTOM';
+  detectedPaperSize?: string;
 }
 
 export interface ParsedPreprintResult {
@@ -24,26 +25,134 @@ export interface ParsedPreprintResult {
   pages: ParsedPreprintPage[];
 }
 
-function detectPdfPaperPreset(
+export interface InferredPreprintGrid {
+  labelW: number;
+  labelH: number;
+  cols: number;
+  rows: number;
+  magTop: number;
+  magBottom: number;
+  magLeft: number;
+  magRight: number;
+  gapH: number;
+  gapV: number;
+}
+
+export function detectPaperPresetFromDimensions(
   mmWidth: number,
-  mmHeight: number
-): 'A4' | 'B5_JIS' | 'B5_ISO' | 'LETTER' | 'CUSTOM' {
-  const presets: Array<{
-    code: 'A4' | 'B5_JIS' | 'B5_ISO' | 'LETTER';
-    w: number;
-    h: number;
-  }> = [
-    { code: 'A4', w: 210, h: 297 },
-    { code: 'B5_JIS', w: 182, h: 257 },
-    { code: 'B5_ISO', w: 176, h: 250 },
-    { code: 'LETTER', w: 215.9, h: 279.4 },
-  ];
-  for (const p of presets) {
-    const matchDirect = Math.abs(mmWidth - p.w) <= 3 && Math.abs(mmHeight - p.h) <= 3;
-    const matchRotated = Math.abs(mmWidth - p.h) <= 3 && Math.abs(mmHeight - p.w) <= 3;
-    if (matchDirect || matchRotated) return p.code;
+  mmHeight: number,
+  dbPaperSizes: PaperSizeRecord[] = []
+): string {
+  const candidates: Array<{ code: string; w: number; h: number }> = [];
+  for (const p of dbPaperSizes) {
+    if (p.FTPpsStaCustom !== '1' && p.FTPpsCode !== 'ROLL' && p.FTPpsCode !== 'CUSTOM') {
+      candidates.push({ code: p.FTPpsCode, w: p.FCPpsWidth, h: p.FCPpsHeight });
+    }
+  }
+  for (const [code, preset] of Object.entries(PAPER_SIZE_PRESETS)) {
+    if (!preset.isCustom && !candidates.some((c) => c.code === code)) {
+      candidates.push({ code, w: preset.widthMm, h: preset.heightMm });
+    }
+  }
+
+  for (const c of candidates) {
+    if (Math.abs(mmWidth - c.w) <= 3 && Math.abs(mmHeight - c.h) <= 3) {
+      return c.code;
+    }
   }
   return 'CUSTOM';
+}
+
+export function detectPaperCodeFromFilename(fileName: string): string | null {
+  const name = fileName || '';
+  const sizeTag = name.match(/size[-_\s]?(a3|a4|a5|a6|b5|letter|legal|f4)/i)?.[1]?.toLowerCase();
+  const token =
+    sizeTag ||
+    name.match(/\b(a3|a4|a5|a6|b5|letter|legal|f4)\b/i)?.[1]?.toLowerCase();
+  switch (token) {
+    case 'a3':
+      return 'A3';
+    case 'a4':
+      return 'A4';
+    case 'a5':
+      return 'A5';
+    case 'a6':
+      return 'A6';
+    case 'b5':
+      return 'B5_JIS';
+    case 'letter':
+      return 'LETTER';
+    case 'legal':
+    case 'f4':
+      return 'LEGAL';
+    default:
+      return null;
+  }
+}
+
+export function inferPreprintGridFromFile(params: {
+  fileName: string;
+  paperWidthMm: number;
+  paperHeightMm: number;
+}): InferredPreprintGrid | null {
+  const { fileName, paperWidthMm, paperHeightMm } = params;
+  if (!fileName || paperWidthMm < 20 || paperHeightMm < 20) return null;
+
+  const dimMatches = Array.from(fileName.matchAll(/(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)/gi));
+  let labelW = 0;
+  let labelH = 0;
+  for (const m of dimMatches) {
+    const w = parseFloat(m[1]);
+    const h = parseFloat(m[2]);
+    if (!(w >= 10 && h >= 10)) continue;
+    // ข้ามถ้าตรงกับขนาดแผ่นกระดาษ
+    if (Math.abs(w - paperWidthMm) <= 2 && Math.abs(h - paperHeightMm) <= 2) continue;
+    if (w <= paperWidthMm + 1 && h <= paperHeightMm + 1) {
+      labelW = w;
+      labelH = h;
+      break;
+    }
+  }
+  if (!labelW || !labelH) return null;
+
+  const upMatch = fileName.match(/(?:^|[-_\s])(\d+)\s*up\b/i);
+  const upHint = upMatch ? parseInt(upMatch[1], 10) : 0;
+
+  const maxCols = Math.max(1, Math.floor((paperWidthMm + 0.2) / labelW));
+  const maxRows = Math.max(1, Math.floor((paperHeightMm + 0.2) / labelH));
+
+  let cols = maxCols;
+  let rows = maxRows;
+  if (upHint > 0) {
+    for (let c = 1; c <= maxCols; c++) {
+      if (upHint % c === 0) {
+        const r = upHint / c;
+        if (r >= 1 && r <= maxRows) {
+          cols = c;
+          rows = r;
+          break;
+        }
+      }
+    }
+  }
+
+  const magLeft = Math.max(0, Number(((paperWidthMm - cols * labelW) / 2).toFixed(1)));
+  const magRight = magLeft;
+  const magTop = Math.max(0, Number(((paperHeightMm - rows * labelH) / 2).toFixed(1)));
+  const magBottom = magTop;
+
+  return {
+    labelW,
+    labelH,
+    cols,
+    rows,
+    magTop,
+    magBottom,
+    magLeft,
+    magRight,
+    gapH: 0,
+    gapV: 0,
+  };
 }
 
 export interface CropBoxPct {
@@ -141,8 +250,19 @@ export async function parsePreprintFile(file: File, maxPdfPages = 6): Promise<Pa
     };
   }
 
+  const baseOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+  const pdfAssetUrl = (sub: string) =>
+    baseOrigin ? `${baseOrigin}/pdfjs/${sub}/` : `/pdfjs/${sub}/`;
+
   const buf = await file.arrayBuffer();
-  const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(buf) });
+  const loadingTask = pdfjsLib.getDocument({
+    data: new Uint8Array(buf),
+    wasmUrl: pdfAssetUrl('wasm'),
+    iccUrl: pdfAssetUrl('iccs'),
+    cMapUrl: pdfAssetUrl('cmaps'),
+    cMapPacked: true,
+    standardFontDataUrl: pdfAssetUrl('standard_fonts'),
+  });
   const pdf = await loadingTask.promise;
   const pageCount = Math.min(pdf.numPages, maxPdfPages);
   const pages: ParsedPreprintPage[] = [];
@@ -152,7 +272,7 @@ export async function parsePreprintFile(file: File, maxPdfPages = 6): Promise<Pa
     const baseVp = page.getViewport({ scale: 1 });
     const mmWidth = Number(((baseVp.width * 25.4) / 72).toFixed(1));
     const mmHeight = Number(((baseVp.height * 25.4) / 72).toFixed(1));
-    const detectedPaperSize = detectPdfPaperPreset(mmWidth, mmHeight);
+    const detectedPaperSize = detectPaperPresetFromDimensions(mmWidth, mmHeight);
     const desiredWidth = 1480;
     const renderScale = Math.max(0.4, Math.min(3.5, desiredWidth / Math.max(1, baseVp.width)));
     const vp = page.getViewport({ scale: renderScale });

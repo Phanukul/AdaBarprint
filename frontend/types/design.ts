@@ -122,14 +122,44 @@ export interface CompanyInfoRecord {
 
 export const PAPER_SIZE_PRESETS: Record<
   string,
-  { label: string; widthMm: number; heightMm: number }
+  { label: string; widthMm: number; heightMm: number; isCustom?: boolean }
 > = {
   A4: { label: 'A4 (210 × 297 mm)', widthMm: 210, heightMm: 297 },
+  A4_L: { label: 'A4 แนวนอน (297 × 210 mm)', widthMm: 297, heightMm: 210 },
+  A5: { label: 'A5 (148 × 210 mm)', widthMm: 148, heightMm: 210 },
+  A5_L: { label: 'A5 แนวนอน (210 × 148 mm)', widthMm: 210, heightMm: 148 },
+  A6: { label: 'A6 (105 × 148 mm)', widthMm: 105, heightMm: 148 },
+  A3: { label: 'A3 (297 × 420 mm)', widthMm: 297, heightMm: 420 },
   B5_JIS: { label: 'B5 JIS (182 × 257 mm)', widthMm: 182, heightMm: 257 },
   B5_ISO: { label: 'B5 ISO (176 × 250 mm)', widthMm: 176, heightMm: 250 },
   LETTER: { label: 'Letter (215.9 × 279.4 mm)', widthMm: 215.9, heightMm: 279.4 },
-  CUSTOM: { label: 'กำหนดเอง (mm)', widthMm: 210, heightMm: 297 },
+  LEGAL: { label: 'Legal / F4 (215.9 × 355.6 mm)', widthMm: 215.9, heightMm: 355.6 },
+  ROLL: { label: 'ม้วน Thermal (Roll)', widthMm: 50, heightMm: 38, isCustom: true },
+  CUSTOM: { label: 'กำหนดเอง (mm)', widthMm: 210, heightMm: 297, isCustom: true },
 };
+
+/** รวมขนาดกระดาษจากฐานข้อมูลกับ Preset มาตรฐานให้แสดงครบทุกขนาด (ไม่ซ้ำ) */
+export function mergePaperSizeOptions(dbPaperSizes: PaperSizeRecord[]): PaperSizeRecord[] {
+  const byCode = new Map<string, PaperSizeRecord>();
+  for (const p of dbPaperSizes) {
+    byCode.set(p.FTPpsCode, p);
+  }
+  const merged: PaperSizeRecord[] = [...dbPaperSizes];
+  Object.entries(PAPER_SIZE_PRESETS).forEach(([code, preset], idx) => {
+    if (!byCode.has(code)) {
+      merged.push({
+        FTPpsCode: code,
+        FTPpsName: preset.label,
+        FCPpsWidth: preset.widthMm,
+        FCPpsHeight: preset.heightMm,
+        FTPpsStaCustom: preset.isCustom ? '1' : '2',
+        FNPpsSeq: 50 + idx,
+        FTPpsStaUse: '1',
+      });
+    }
+  });
+  return merged;
+}
 
 export interface PreprintGuideConfig {
   preprintCode?: string;

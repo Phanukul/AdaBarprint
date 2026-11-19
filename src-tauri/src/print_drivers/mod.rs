@@ -184,11 +184,10 @@ fn generate_ezpl_label(ctx: &Value, elements: &[TemplateElement], opts: &DriverO
     let mut lines = vec![
         "^@".to_string(),
         format!("~R{}", opts.dpi),
-        format!("^Q{},{}", opts.label_width_mm.round() as i64, opts.label_height_mm.round() as i64),
+        format!("^Q{},{}", opts.label_height_mm.round() as i64, opts.gap_mm.round() as i64),
         format!("^W{}", opts.label_width_mm.round() as i64),
-        format!("^H{}", opts.speed),
-        format!("^D{}", opts.darkness),
-        format!("^S{}", opts.gap_mm.round() as i64),
+        format!("^H{}", opts.darkness.min(19)),
+        format!("^S{}", opts.speed.clamp(1, 7)),
         "^ON".to_string(),
         format!("^P{}", opts.copies),
     ];
@@ -481,8 +480,8 @@ pub fn generate_test_pattern(brand: PrinterBrand, dpi: u32, width_mm: f64, heigh
     let h_dots = mm_to_dots(height_mm, dpi);
     match brand {
         PrinterBrand::Godex => format!(
-            "^@\r\n~R{}\r\n^Q{},{}\r\n^W{}\r\n^H2\r\n^D10\r\n^S2\r\n^ON\r\n^P1\r\n^FO20,20^A3,N,32,18^FDAdaPos 6.0 PrintBar TEST^FS\r\n^FO20,70^BC200,80,,Y,N^FD885000100001^FS\r\nE",
-            dpi, width_mm.round() as i64, height_mm.round() as i64, width_mm.round() as i64
+            "^@\r\n~R{}\r\n^Q{},2\r\n^W{}\r\n^H10\r\n^S2\r\n^ON\r\n^P1\r\n^FO20,20^A3,N,32,18^FDAdaPos 6.0 PrintBar TEST^FS\r\n^FO20,70^BC200,80,,Y,N^FD885000100001^FS\r\nE",
+            dpi, height_mm.round() as i64, width_mm.round() as i64
         ),
         PrinterBrand::Zebra | PrinterBrand::Argox => format!(
             "^XA\r\n^PW{}\r\n^LL{}\r\n^FO20,20^A0N,30,25^FDAdaPos 6.0 PrintBar TEST^FS\r\n^FO20,70^BY2^BEN,80,Y,N^FD8850001000014^FS\r\n^XZ",

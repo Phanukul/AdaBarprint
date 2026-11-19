@@ -3,10 +3,10 @@
   "version": "0.2.1",
   "private": true,
   "scripts": {
-    "dev": "vite",
+    "dev": "node scripts/sync-pdfjs-assets.mjs && vite",
     "dev:api": "cargo run --manifest-path src-tauri/Cargo.toml --bin web_server",
     "dev:web": "node scripts/dev-web.mjs",
-    "build": "vite build",
+    "build": "node scripts/sync-pdfjs-assets.mjs && vite build",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build --no-bundle",

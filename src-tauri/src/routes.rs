@@ -1848,8 +1848,8 @@ pub async fn post_windows_direct_print(
         let page_images = body.page_images.unwrap_or_default();
         let (paper_size, def_pw, def_ph, paper_win_kind) =
             lookup_paper_size(&st.pool, body.paper_size.as_deref()).await;
-        let paper_width_mm = body.paper_width_mm.filter(|v| *v >= 30.0).unwrap_or(def_pw);
-        let paper_height_mm = body.paper_height_mm.filter(|v| *v >= 30.0).unwrap_or(def_ph);
+        let paper_width_mm = body.paper_width_mm.filter(|v| *v >= 10.0).unwrap_or(def_pw);
+        let paper_height_mm = body.paper_height_mm.filter(|v| *v >= 10.0).unwrap_or(def_ph);
 
         let job_uid = uuid::Uuid::new_v4().to_string();
         let tmp_dir = std::env::temp_dir().join(format!("adabarprint_{}", job_uid));
@@ -1904,9 +1904,11 @@ if (-not $doc.PrinterSettings.IsValid) {
 $doc.PrintController = New-Object System.Drawing.Printing.StandardPrintController
 $doc.OriginAtMargins = $false
 
-# ตั้งค่าขนาดกระดาษต่อ Job (A4 / B5 JIS / B5 ISO / Custom)
+# ตั้งค่าขนาดกระดาษต่อ Job (A4 / B5 JIS / B5 ISO / Letter / Custom / Roll)
 $targetPaper = $null
 $wantPaper = $(if ($cfg.paperSize) { [string]$cfg.paperSize } else { 'A4' })
+$pwMm = $(if ($cfg.paperWidthMm) { [double]$cfg.paperWidthMm } else { 210.0 })
+$phMm = $(if ($cfg.paperHeightMm) { [double]$cfg.paperHeightMm } else { 297.0 })
 if ($wantPaper -eq 'B5_JIS' -or $wantPaper -eq 'B5') {
   $targetPaper = $doc.PrinterSettings.PaperSizes | Where-Object { $_.PaperName -match '\bB5\b' -and $_.PaperName -match 'JIS' } | Select-Object -First 1
   if (-not $targetPaper) {
@@ -1917,9 +1919,9 @@ if ($wantPaper -eq 'B5_JIS' -or $wantPaper -eq 'B5') {
   if (-not $targetPaper) {
     $targetPaper = $doc.PrinterSettings.PaperSizes | Where-Object { $_.Kind -eq [System.Drawing.Printing.PaperKind]::B5 -or $_.PaperName -match '\bB5\b' } | Select-Object -First 1
   }
+} elseif ($wantPaper -eq 'LETTER') {
+  $targetPaper = $doc.PrinterSettings.PaperSizes | Where-Object { $_.Kind -eq [System.Drawing.Printing.PaperKind]::Letter -or $_.PaperName -match '^\s*Letter\b' } | Select-Object -First 1
 } elseif ($wantPaper -eq 'CUSTOM') {
-  $pwMm = $(if ($cfg.paperWidthMm) { [double]$cfg.paperWidthMm } else { 210.0 })
-  $phMm = $(if ($cfg.paperHeightMm) { [double]$cfg.paperHeightMm } else { 297.0 })
   $targetPaper = New-Object System.Drawing.Printing.PaperSize('AdaCustom', [int][Math]::Round($pwMm / 0.254), [int][Math]::Round($phMm / 0.254))
 }
 if (-not $targetPaper -and $wantPaper -eq 'A4') {
@@ -1929,8 +1931,6 @@ if (-not $targetPaper -and $wantPaper -eq 'A4') {
   }
 }
 if (-not $targetPaper) {
-  $pwMm = $(if ($cfg.paperWidthMm) { [double]$cfg.paperWidthMm } else { 210.0 })
-  $phMm = $(if ($cfg.paperHeightMm) { [double]$cfg.paperHeightMm } else { 297.0 })
   $targetPaper = New-Object System.Drawing.Printing.PaperSize($wantPaper, [int][Math]::Round($pwMm / 0.254), [int][Math]::Round($phMm / 0.254))
 }
 if ($targetPaper) {
@@ -2015,15 +2015,13 @@ $doc.add_PrintPage({
     $bounds = $e.PageBounds
     $g.DrawImage($img, [float]0, [float]0, [float]$bounds.Width, [float]$bounds.Height)
   } else {
-    $safePad = 6.25
-    $availW = [Math]::Max(100.0, [double]$vcb.Width - ($safePad * 2.0))
-    $availH = [Math]::Max(100.0, [double]$vcb.Height - ($safePad * 2.0))
-    $ratio = [Math]::Min($availW / [double]$img.Width, $availH / [double]$img.Height)
-    $dw = [double]$img.Width * $ratio
-    $dh = [double]$img.Height * $ratio
-    $dx = [double]$vcb.X + (([double]$vcb.Width - $dw) / 2.0)
-    $dy = [double]$vcb.Y + (([double]$vcb.Height - $dh) / 2.0)
-    $g.DrawImage($img, [float]$dx, [float]$dy, [float]$dw, [float]$dh)
+    # พิมพ์สเกลจริง 1:1 mm จากขอบกระดาษกายภาพ (ชดเชย HardMarginX/Y แทนการย่อเข้า PrintableArea)
+    $g.PageUnit = [System.Drawing.GraphicsUnit]::Display
+    $targetW = [float]($pwMm / 0.254)
+    $targetH = [float]($phMm / 0.254)
+    $dx = [float](-$hmX)
+    $dy = [float](-$hmY)
+    $g.DrawImage($img, $dx, $dy, $targetW, $targetH)
   }
 
   $img.Dispose()
@@ -2725,6 +2723,7 @@ pub async fn get_history_job(
 #[serde(rename_all = "camelCase")]
 pub struct BuildLineBody {
     pub barcode: String,
+    pub pdt_code: Option<String>,
     pub qty: Option<i64>,
     pub bch_code: String,
     pub pri_type: String,
@@ -2770,6 +2769,12 @@ pub async fn post_build_line(
             FCPdtPriceWHS: Option<f64>,
         }
 
+        let pdt_filter: Option<&str> = body
+            .pdt_code
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
+
         let bar_pdt = sqlx::query_as::<_, AccdBarPdt>(
             r#"
             SELECT b.FTPdtCode, b.FTBarCode, b.FTPunCode,
@@ -2788,11 +2793,15 @@ pub async fn post_build_line(
             LEFT JOIN TCNMPdtBrand_L bl ON bl.FTPbnCode = p.FTPbnCode AND bl.FNLngID = 1
             LEFT JOIN TCNMPdtGrp_L gl ON gl.FTPgpChain = p.FTPgpChain AND gl.FNLngID = 1
             LEFT JOIN TCNMPdtPackSize ps ON ps.FTPdtCode = b.FTPdtCode AND ps.FTPunCode = b.FTPunCode
-            WHERE b.FTBarCode = ? AND COALESCE(b.FTBarStaUse, '1') = '1'
+            WHERE b.FTBarCode = ?
+              AND (? IS NULL OR b.FTPdtCode = ?)
+              AND COALESCE(b.FTBarStaUse, '1') = '1'
             LIMIT 1
             "#,
         )
         .bind(&body.barcode)
+        .bind(pdt_filter)
+        .bind(pdt_filter)
         .fetch_optional(accd)
         .await
         .unwrap_or(None);
@@ -3334,7 +3343,7 @@ pub async fn post_print_send(
                 dpi,
                 label_width_mm: group_lbs.FCLbsWidth,
                 label_height_mm: group_lbs.FCLbsHeight,
-                gap_mm: 2.0,
+                gap_mm: group_lbs.FCLbsGapV.unwrap_or(2.0).max(0.0),
                 speed,
                 darkness,
                 copies: 1,
@@ -3740,8 +3749,8 @@ pub async fn post_save_paper_size(
     if code.is_empty() || name.is_empty() {
         return err_json(StatusCode::BAD_REQUEST, "กรุณาระบุรหัสและชื่อขนาดกระดาษ");
     }
-    if body.width_mm < 30.0 || body.height_mm < 30.0 {
-        return err_json(StatusCode::BAD_REQUEST, "ขนาดกระดาษต้องไม่น้อยกว่า 30 mm");
+    if body.width_mm < 10.0 || body.height_mm < 10.0 {
+        return err_json(StatusCode::BAD_REQUEST, "ขนาดกระดาษต้องไม่น้อยกว่า 10 mm");
     }
     let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let wk = body.win_kind.unwrap_or_else(|| code.clone());

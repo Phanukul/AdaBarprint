@@ -60,8 +60,9 @@ server.log
 backend-rust/target/
 target/
 
-# Vite build output
+# Vite build & synced pdfjs runtime assets
 /dist/
+/public/pdfjs/
 
 # Legacy tool logs
 tool-results/

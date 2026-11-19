@@ -687,10 +687,17 @@ pub async fn seed_defaults(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     // Seed Paper Sizes master (idempotent)
     let paper_sizes = [
         ("A4", "A4 (210 × 297 mm)", 210.0, 297.0, "A4", "2", 1_i64),
-        ("B5_JIS", "B5 JIS (182 × 257 mm)", 182.0, 257.0, "B5_JIS", "2", 2),
-        ("B5_ISO", "B5 ISO (176 × 250 mm)", 176.0, 250.0, "B5_ISO", "2", 3),
-        ("LETTER", "Letter (215.9 × 279.4 mm)", 215.9, 279.4, "LETTER", "2", 4),
-        ("CUSTOM", "กำหนดเอง (mm)", 210.0, 297.0, "CUSTOM", "1", 9),
+        ("A4_L", "A4 แนวนอน (297 × 210 mm)", 297.0, 210.0, "A4", "2", 2),
+        ("A5", "A5 (148 × 210 mm)", 148.0, 210.0, "A5", "2", 3),
+        ("A5_L", "A5 แนวนอน (210 × 148 mm)", 210.0, 148.0, "A5", "2", 4),
+        ("A6", "A6 (105 × 148 mm)", 105.0, 148.0, "A6", "2", 5),
+        ("A3", "A3 (297 × 420 mm)", 297.0, 420.0, "A3", "2", 6),
+        ("B5_JIS", "B5 JIS (182 × 257 mm)", 182.0, 257.0, "B5_JIS", "2", 7),
+        ("B5_ISO", "B5 ISO (176 × 250 mm)", 176.0, 250.0, "B5_ISO", "2", 8),
+        ("LETTER", "Letter (215.9 × 279.4 mm)", 215.9, 279.4, "LETTER", "2", 9),
+        ("LEGAL", "Legal / F4 (215.9 × 355.6 mm)", 215.9, 355.6, "LEGAL", "2", 10),
+        ("ROLL", "ม้วนสติ๊กเกอร์ (Thermal Roll)", 50.0, 38.0, "CUSTOM", "1", 15),
+        ("CUSTOM", "กำหนดเอง (mm)", 210.0, 297.0, "CUSTOM", "1", 99),
     ];
     for (code, name, w, h, wk, sta_cus, seq) in paper_sizes {
         sqlx::query(
