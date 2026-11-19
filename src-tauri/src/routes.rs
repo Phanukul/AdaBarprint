@@ -6,7 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use chrono::{NaiveDate, NaiveTime, Utc};
+use chrono::{Local, NaiveDate, NaiveTime, Utc};
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -238,7 +238,7 @@ async fn upsert_preprint_from_layout(
     let crop_json = pp_obj
         .get("cropBox")
         .and_then(|v| serde_json::to_string(v).ok());
-    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     let _ = sqlx::query(
         r#"
@@ -688,7 +688,7 @@ pub async fn post_save_template(
     .await;
 
     let layout_str = serde_json::to_string(&layout_val).unwrap_or_else(|_| "{}".to_string());
-    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     let res = sqlx::query(
         r#"
@@ -955,7 +955,7 @@ pub async fn post_save_as_template(
     .await;
 
     let layout_str = serde_json::to_string(&layout_val).unwrap_or_else(|_| "{}".to_string());
-    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     let tmpl_nor = if pri_type == "1" { Some(tmpl_code.as_str()) } else { None };
     let tmpl_pmt = if pri_type == "2" { Some(tmpl_code.as_str()) } else { None };
@@ -1194,7 +1194,7 @@ pub async fn post_reset_template(
         lbs_code,
         if pri_type == "2" { "PMT" } else { "NOR" }
     );
-    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     if let Err(e) = sqlx::query("DELETE FROM TCNMLabelTmpl WHERE FTLtmCode = ?")
         .bind(&tmpl_code)
@@ -1437,7 +1437,7 @@ pub async fn post_label_printers(
         return err_json(StatusCode::BAD_REQUEST, "lbsCode is required");
     }
     let server_code = body.server_code.unwrap_or_else(|| "LOCAL".to_string());
-    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     let pairs = [
         (
@@ -1612,7 +1612,7 @@ pub async fn post_save_label_size(
     let paper_h = body.paper_height_mm.filter(|v| *v >= 30.0).unwrap_or(def_ph);
     let offset_x = body.offset_x.unwrap_or(0.0).clamp(-30.0, 30.0);
     let offset_y = body.offset_y.unwrap_or(0.0).clamp(-30.0, 30.0);
-    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     if existing.is_some() {
         if let Err(e) = sqlx::query(
@@ -1727,7 +1727,7 @@ pub async fn post_toggle_label_size(
         return err_json(StatusCode::BAD_REQUEST, "lbsCode is required");
     }
     let sta = if body.sta_use.trim() == "1" { "1" } else { "2" };
-    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     if let Err(e) = sqlx::query(
         "UPDATE TCNMLabelSize SET FTLbsStaUse = ?, FDLastUpdOn = ?, FTLastUpdBy = 'USER_CONFIG' WHERE FTLbsCode = ?",
@@ -1763,7 +1763,7 @@ pub async fn post_save_config_options(
     State(st): State<AppState>,
     Json(body): Json<SaveConfigOptionsBody>,
 ) -> Response {
-    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     for item in body.options {
         let code = item.code.trim();
         if code.is_empty() {
@@ -2331,7 +2331,7 @@ pub async fn get_products(
     Query(q): Query<ProductsQuery>,
 ) -> Response {
     let keyword = q.keyword.unwrap_or_default().trim().to_string();
-    let limit = q.limit.unwrap_or(200).clamp(1, 500);
+    let limit = q.limit.unwrap_or(200).clamp(1, 5000);
     let pdt_from = q.pdt_from.unwrap_or_default().trim().to_string();
     let pdt_to = q.pdt_to.unwrap_or_default().trim().to_string();
     let grp_from = q.grp_from.unwrap_or_default().trim().to_string();
@@ -2484,13 +2484,17 @@ pub async fn get_products(
         }
 
         if price_type.eq_ignore_ascii_case("Promotion") {
-            qb.push(" AND EXISTS (SELECT 1 FROM TCNTPdtPmtDT dtp JOIN TCNTPdtPmtHD hdp ON dtp.FTPmhDocNo = hdp.FTPmhDocNo AND dtp.FTBchCode = hdp.FTBchCode WHERE (dtp.FTPmdBarCode = b.FTBarCode OR dtp.FTPmdRefCode = b.FTPdtCode OR dtp.FTPmdBarCode = '*') AND COALESCE(hdp.FTPmhStaApv, '1') = '1' AND COALESCE(hdp.FTPmhStaClosed, '2') != '1'");
+            qb.push(" AND (EXISTS (SELECT 1 FROM TCNTPdtPmtDT dtp JOIN TCNTPdtPmtHD hdp ON dtp.FTPmhDocNo = hdp.FTPmhDocNo AND dtp.FTBchCode = hdp.FTBchCode WHERE (dtp.FTPmdBarCode = b.FTBarCode OR dtp.FTPmdRefCode = b.FTPdtCode OR dtp.FTPmdBarCode = '*') AND COALESCE(hdp.FTPmhStaApv, '1') = '1' AND COALESCE(hdp.FTPmhStaClosed, '2') != '1'");
             push_range_filter(&mut qb, "hdp.FTBchCode", &bch_from, &bch_to);
             qb.push(" AND (COALESCE(hdp.FDPmhDStart, '') = '' OR substr(hdp.FDPmhDStart, 1, 10) <= ")
                 .push_bind(&eff_cmp)
                 .push(") AND (COALESCE(hdp.FDPmhDStop, '') = '' OR substr(hdp.FDPmhDStop, 1, 10) >= ")
                 .push_bind(&eff_cmp)
-                .push("))");
+                .push(")) OR EXISTS (SELECT 1 FROM TCNTPmtGrpDT gd6 JOIN TCNTPmtHD hd6 ON gd6.FTAgnCode = hd6.FTAgnCode AND gd6.FTPmhDocNo = hd6.FTPmhDocNo WHERE (gd6.FTPmdRefCode = b.FTBarCode OR gd6.FTPmdRefCode = b.FTPdtCode OR gd6.FTPmdRefCode = '*') AND COALESCE(hd6.FTPmhStaActive, '1') = '1' AND (COALESCE(hd6.FDPmhDStart, '') = '' OR substr(hd6.FDPmhDStart, 1, 10) <= ")
+                .push_bind(&eff_cmp)
+                .push(") AND (COALESCE(hd6.FDPmhDStop, '') = '' OR substr(hd6.FDPmhDStop, 1, 10) >= ")
+                .push_bind(&eff_cmp)
+                .push(")))");
         }
 
         qb.push(" GROUP BY b.FTPdtCode, b.FTBarCode ORDER BY b.FTPdtCode ASC, b.FTBarCode ASC LIMIT ")
@@ -3752,7 +3756,7 @@ pub async fn post_save_paper_size(
     if body.width_mm < 10.0 || body.height_mm < 10.0 {
         return err_json(StatusCode::BAD_REQUEST, "ขนาดกระดาษต้องไม่น้อยกว่า 10 mm");
     }
-    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let wk = body.win_kind.unwrap_or_else(|| code.clone());
     let sta_c = if body.sta_custom.as_deref() == Some("1") { "1" } else { "2" };
     let seq = body.seq.unwrap_or(50);
@@ -3861,7 +3865,7 @@ pub async fn post_save_preprint(
         .map(|s| s.to_uppercase())
         .unwrap_or_else(|| format!("PPR-{}", &gen_guid()[..8]));
     let (pps_code, _, _, _) = lookup_paper_size(&st.pool, body.paper_size.as_deref()).await;
-    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let crop_str = body.crop_json.as_ref().and_then(|v| serde_json::to_string(v).ok());
 
     if let Err(e) = sqlx::query(
@@ -4008,7 +4012,7 @@ pub async fn post_save_lan_printer(
     })
     .to_string();
     let sta = if body.enabled.unwrap_or(true) { "1" } else { "2" };
-    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     let _ = sqlx::query(
         r#"
@@ -4128,4 +4132,465 @@ pub async fn get_image_proxy(Query(q): Query<ImageProxyQuery>) -> Response {
         Ok(_) => err_json(StatusCode::BAD_GATEWAY, "failed to fetch remote image"),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("proxy exec failed: {}", e)),
     }
+}
+
+// ─── Auto-Print @ 04:00 AM Schedule, Sync & Morning Ops APIs ────────────────
+
+pub async fn get_schedules(State(st): State<AppState>) -> Response {
+    let schedules = sqlx::query_as::<_, TCNTLabelSchedule>(
+        r#"
+        SELECT FTLscCode, FTLscName, FTLscStaUse, FTLscRunTime, FNLscPreSyncMin, FNLscJitterSec,
+               FTLscDaysMask, FTLscTriggerRules, FTLscBchCode, FTLscPplCode, FTLscLbsCode,
+               FNLscQtyMode, FTLscSyncMode, FNLscSyncRetry, FNLscRetryWaitSec, FTLscOnSyncFail,
+               FTLscOnPrinterBack, FNLscMisfireMin, FTLscStaCoverSheet, FDLscLastRunAt,
+               FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy
+        FROM TCNTLabelSchedule
+        ORDER BY FTLscCode ASC
+        "#,
+    )
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+
+    let latest_run = sqlx::query_as::<_, TCNTLabelSchedRun>(
+        "SELECT FTLsrRunID, FTLscCode, FDLsrBizDate, FTLsrTriggerBy, FTLsrStatus, FDLsrStartedAt, FDLsrSyncedAt, FTLsrSyncProofJson, FNLsrSyncAttempts, FNLsrCandTotal, FNLsrSkippedDup, FNLsrNorQty, FNLsrPmtQty, FNLsrFailQty, FTLjbJobID, FTLsrErrMsg, FDLsrFinishedAt FROM TCNTLabelSchedRun ORDER BY FDLsrStartedAt DESC LIMIT 1",
+    )
+    .fetch_optional(&st.pool)
+    .await
+    .unwrap_or(None);
+
+    let computer_name = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "LOCAL-PC".to_string());
+    let scheduler_active = std::env::var("AUTOPRINT_DISABLE_EMBEDDED_SCHEDULER").as_deref() != Ok("1");
+
+    Json(json!({
+        "schedules": schedules,
+        "latestRun": latest_run,
+        "computerName": computer_name,
+        "schedulerActive": scheduler_active,
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveScheduleBody {
+    pub code: Option<String>,
+    pub name: Option<String>,
+    pub sta_use: String,
+    pub run_time: String,
+    pub pre_sync_min: Option<i64>,
+    pub jitter_sec: Option<i64>,
+    pub days_mask: String,
+    pub trigger_rules: String,
+    pub bch_code: Option<String>,
+    pub ppl_code: Option<String>,
+    pub lbs_code: String,
+    pub qty_mode: Option<i64>,
+    pub sync_mode: Option<String>,
+    pub sync_retry: Option<i64>,
+    pub retry_wait_sec: Option<i64>,
+    pub on_sync_fail: Option<String>,
+    pub on_printer_back: Option<String>,
+    pub misfire_min: Option<i64>,
+    pub sta_cover_sheet: Option<String>,
+}
+
+pub async fn post_save_schedule(
+    State(st): State<AppState>,
+    Json(body): Json<SaveScheduleBody>,
+) -> Response {
+    let code = body.code.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("SCH-0400");
+    let run_time = body.run_time.trim();
+    if NaiveTime::parse_from_str(run_time, "%H:%M").is_err() {
+        return err_json(StatusCode::BAD_REQUEST, "รูปแบบเวลาไม่ถูกต้อง (ต้องเป็น HH:MM เช่น 04:00)");
+    }
+    let sta_use = if body.sta_use.trim() == "1" { "1" } else { "2" };
+    let on_prt_back = if body.on_printer_back.as_deref() == Some("AUTO_RESUME") {
+        "AUTO_RESUME"
+    } else {
+        "WAIT_CONFIRM"
+    };
+    let on_sync_fail = if body.on_sync_fail.as_deref() == Some("USE_LOCAL_WARN") {
+        "USE_LOCAL_WARN"
+    } else {
+        "ABORT"
+    };
+    let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+    if let Err(e) = sqlx::query(
+        r#"
+        INSERT INTO TCNTLabelSchedule (
+            FTLscCode, FTLscName, FTLscStaUse, FTLscRunTime, FNLscPreSyncMin, FNLscJitterSec,
+            FTLscDaysMask, FTLscTriggerRules, FTLscBchCode, FTLscPplCode, FTLscLbsCode,
+            FNLscQtyMode, FTLscSyncMode, FNLscSyncRetry, FNLscRetryWaitSec, FTLscOnSyncFail,
+            FTLscOnPrinterBack, FNLscMisfireMin, FTLscStaCoverSheet, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'USER_CONFIG', ?, 'USER_CONFIG')
+        ON CONFLICT(FTLscCode) DO UPDATE SET
+            FTLscName = excluded.FTLscName,
+            FTLscStaUse = excluded.FTLscStaUse,
+            FTLscRunTime = excluded.FTLscRunTime,
+            FNLscPreSyncMin = excluded.FNLscPreSyncMin,
+            FNLscJitterSec = excluded.FNLscJitterSec,
+            FTLscDaysMask = excluded.FTLscDaysMask,
+            FTLscTriggerRules = excluded.FTLscTriggerRules,
+            FTLscBchCode = excluded.FTLscBchCode,
+            FTLscPplCode = excluded.FTLscPplCode,
+            FTLscLbsCode = excluded.FTLscLbsCode,
+            FNLscQtyMode = excluded.FNLscQtyMode,
+            FTLscSyncMode = excluded.FTLscSyncMode,
+            FNLscSyncRetry = excluded.FNLscSyncRetry,
+            FNLscRetryWaitSec = excluded.FNLscRetryWaitSec,
+            FTLscOnSyncFail = excluded.FTLscOnSyncFail,
+            FTLscOnPrinterBack = excluded.FTLscOnPrinterBack,
+            FNLscMisfireMin = excluded.FNLscMisfireMin,
+            FTLscStaCoverSheet = excluded.FTLscStaCoverSheet,
+            FDLastUpdOn = excluded.FDLastUpdOn,
+            FTLastUpdBy = 'USER_CONFIG'
+        "#,
+    )
+    .bind(code)
+    .bind(body.name.as_deref().unwrap_or("พิมพ์ป้ายอัตโนมัติประจำวัน (04:00 น.)"))
+    .bind(sta_use)
+    .bind(run_time)
+    .bind(body.pre_sync_min.unwrap_or(30).clamp(5, 120))
+    .bind(body.jitter_sec.unwrap_or(900).clamp(0, 3600))
+    .bind(&body.days_mask)
+    .bind(&body.trigger_rules)
+    .bind(&body.bch_code)
+    .bind(&body.ppl_code)
+    .bind(body.lbs_code.trim())
+    .bind(body.qty_mode.unwrap_or(1))
+    .bind(body.sync_mode.as_deref().unwrap_or("DIRECT_API"))
+    .bind(body.sync_retry.unwrap_or(3).clamp(1, 5))
+    .bind(body.retry_wait_sec.unwrap_or(300).clamp(5, 1800))
+    .bind(on_sync_fail)
+    .bind(on_prt_back)
+    .bind(body.misfire_min.unwrap_or(300).clamp(15, 720))
+    .bind(if body.sta_cover_sheet.as_deref() == Some("2") { "2" } else { "1" })
+    .bind(&now)
+    .bind(&now)
+    .execute(&st.pool)
+    .await
+    {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
+
+    Json(json!({ "ok": true, "code": code })).into_response()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerScheduleBody {
+    pub mode: Option<String>, // DRY_RUN | PRINT_NOW
+    pub biz_date: Option<String>,
+    pub lbs_code: Option<String>,
+    pub trigger_rules: Option<String>,
+    pub bch_code: Option<String>,
+    pub qty_mode: Option<i64>,
+}
+
+pub async fn post_trigger_schedule(
+    State(st): State<AppState>,
+    Path(code): Path<String>,
+    Json(body): Json<TriggerScheduleBody>,
+) -> Response {
+    let mode = body.mode.unwrap_or_else(|| "DRY_RUN".to_string());
+    let dry_run = !mode.eq_ignore_ascii_case("PRINT_NOW");
+    let overrides = if dry_run
+        && (body.lbs_code.is_some()
+            || body.trigger_rules.is_some()
+            || body.bch_code.is_some()
+            || body.qty_mode.is_some())
+    {
+        Some(crate::scheduler_worker::DryRunOverrides {
+            lbs_code: body.lbs_code,
+            trigger_rules: body.trigger_rules,
+            bch_code: body.bch_code,
+            qty_mode: body.qty_mode,
+        })
+    } else {
+        None
+    };
+
+    match crate::scheduler_worker::execute_schedule_run_with_overrides(
+        &st.pool,
+        code.trim(),
+        "MANUAL",
+        dry_run,
+        body.biz_date.as_deref(),
+        overrides,
+    )
+    .await
+    {
+        Ok(res) => Json(json!(res)).into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleRunsQuery {
+    pub run_id: Option<String>,
+    pub limit: Option<i64>,
+}
+
+pub async fn get_schedule_runs(
+    State(st): State<AppState>,
+    Query(q): Query<ScheduleRunsQuery>,
+) -> Response {
+    let limit = q.limit.unwrap_or(15).clamp(1, 100);
+    let runs = sqlx::query_as::<_, TCNTLabelSchedRun>(
+        "SELECT FTLsrRunID, FTLscCode, FDLsrBizDate, FTLsrTriggerBy, FTLsrStatus, FDLsrStartedAt, FDLsrSyncedAt, FTLsrSyncProofJson, FNLsrSyncAttempts, FNLsrCandTotal, FNLsrSkippedDup, FNLsrNorQty, FNLsrPmtQty, FNLsrFailQty, FTLjbJobID, FTLsrErrMsg, FDLsrFinishedAt FROM TCNTLabelSchedRun ORDER BY FDLsrStartedAt DESC LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+
+    let focus_run_id = q
+        .run_id
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| runs.first().map(|r| r.FTLsrRunID.clone()));
+
+    let queue_items = if let Some(ref rid) = focus_run_id {
+        sqlx::query_as::<_, TCNTLabelSchedQueue>(
+            "SELECT FTLsrRunID, FNLsqSeq, FTPdtCode, FTBarCode, FTLsqTriggerSrc, FTLsqPriType, FTLbsCode, FCLsqOldPrice, FCLsqSalePrice, FTLsqPromoDocNo, FTLsqPriceHash, FNLsqQty, FNLsqBatchPage, FTLsqStatus, FTLsqErrMsg FROM TCNTLabelSchedQueue WHERE FTLsrRunID = ? ORDER BY FNLsqSeq ASC LIMIT 500",
+        )
+        .bind(rid)
+        .fetch_all(&st.pool)
+        .await
+        .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    Json(json!({
+        "runs": runs,
+        "latestRun": runs.first(),
+        "queueItems": queue_items,
+    }))
+    .into_response()
+}
+
+pub async fn post_reprint_failed_run(
+    State(st): State<AppState>,
+    Path(run_id): Path<String>,
+) -> Response {
+    match crate::scheduler_worker::reprint_failed_run(&st.pool, run_id.trim()).await {
+        Ok(res) => Json(json!(res)).into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+pub async fn post_load_failed_to_manual(
+    State(st): State<AppState>,
+    Path(run_id): Path<String>,
+) -> Response {
+    let failed_rows = sqlx::query_as::<_, TCNTLabelSchedQueue>(
+        "SELECT FTLsrRunID, FNLsqSeq, FTPdtCode, FTBarCode, FTLsqTriggerSrc, FTLsqPriType, FTLbsCode, FCLsqOldPrice, FCLsqSalePrice, FTLsqPromoDocNo, FTLsqPriceHash, FNLsqQty, FNLsqBatchPage, FTLsqStatus, FTLsqErrMsg FROM TCNTLabelSchedQueue WHERE FTLsrRunID = ? AND FTLsqStatus = 'FAILED' ORDER BY FNLsqSeq ASC",
+    )
+    .bind(run_id.trim())
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+
+    let store_name: String = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT FTBchName FROM TCNMBranch_L WHERE FNLngID = 1 LIMIT 1",
+    )
+    .fetch_optional(&st.pool)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
+    .unwrap_or_default();
+    let print_date_th = Local::now().format("%d/%m/%Y").to_string();
+
+    let mut manual_lines = Vec::with_capacity(failed_rows.len());
+    for row in failed_rows {
+        let info_row: Option<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT COALESCE(pl.FTPdtName, b.FTPdtCode), pl.FTPdtNameOth, ul.FTPunName, ps.FTPdtUnitDim
+            FROM TCNMPdtBar b
+            LEFT JOIN TCNMPdt_L pl ON pl.FTPdtCode = b.FTPdtCode AND pl.FNLngID = 1
+            LEFT JOIN TCNMPdtUnit_L ul ON ul.FTPunCode = b.FTPunCode AND ul.FNLngID = 1
+            LEFT JOIN TCNMPdtPackSize ps ON ps.FTPdtCode = b.FTPdtCode AND ps.FTPunCode = b.FTPunCode
+            WHERE b.FTPdtCode = ? AND b.FTBarCode = ?
+            LIMIT 1
+            "#,
+        )
+        .bind(&row.FTPdtCode)
+        .bind(&row.FTBarCode)
+        .fetch_optional(&st.pool)
+        .await
+        .unwrap_or(None);
+
+        let (pdt_name, name_oth, selling_unit, dim_str) = match info_row {
+            Some((n, no, u, d)) => (n, no.unwrap_or_default(), u.unwrap_or_default(), d.unwrap_or_default()),
+            None => (row.FTPdtCode.clone(), String::new(), String::new(), String::new()),
+        };
+
+        let label_size = sqlx::query_as::<_, TCNMLabelSize>(
+            "SELECT FTLbsCode, FTLbsGroup, FTLbsName, FCLbsWidth, FCLbsHeight, FNLbsCol, FNLbsRow, FCLbsMagTop, FCLbsMagLeft, FCLbsMagBottom, FCLbsMagRight, FCLbsGapH, FCLbsGapV, FNLbsQtyPageNor, FNLbsQtyPagePmt, FTLbsTmplNor, FTLbsTmplPmt, FTLbsHhtCode, FTLbsStaUse, FTLbsPaperSize, FCLbsPaperWidth, FCLbsPaperHeight, FCLbsOffsetX, FCLbsOffsetY, FTPprCode, FTLbsStdTmplNor, FTLbsStdTmplPmt FROM TCNMLabelSize WHERE FTLbsCode = ?",
+        )
+        .bind(&row.FTLbsCode)
+        .fetch_optional(&st.pool)
+        .await
+        .unwrap_or(None);
+
+        let is_promo = row.FTLsqPriType == "2";
+        let tmpl_code = if is_promo {
+            label_size.as_ref().and_then(|s| s.FTLbsTmplPmt.clone()).unwrap_or_else(|| format!("{}-PMT", row.FTLbsCode))
+        } else {
+            label_size.as_ref().and_then(|s| s.FTLbsTmplNor.clone()).unwrap_or_else(|| format!("{}-NOR", row.FTLbsCode))
+        };
+
+        let (promo_title, promo_intv) = if is_promo {
+            if let Some(ref doc_no) = row.FTLsqPromoDocNo {
+                let v6: Option<(Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+                    "SELECT COALESCE(NULLIF(hdl.FTPmhName, ''), hd.FTPmhName, hd.FTPmhDocNo), substr(CAST(hd.FDPmhDStart AS TEXT), 1, 10), substr(CAST(hd.FDPmhDStop AS TEXT), 1, 10) FROM TCNTPmtHD hd LEFT JOIN TCNTPmtHD_L hdl ON hdl.FTAgnCode = hd.FTAgnCode AND hdl.FTPmhDocNo = hd.FTPmhDocNo AND hdl.FNPmhVersion = hd.FNPmhVersion AND hdl.FNLngID = 1 WHERE hd.FTPmhDocNo = ? LIMIT 1",
+                )
+                .bind(doc_no)
+                .fetch_optional(&st.pool)
+                .await
+                .unwrap_or(None);
+                match v6 {
+                    Some((nm, ds, de)) => (nm.unwrap_or_else(|| doc_no.clone()), promo_interval(ds.as_deref(), de.as_deref())),
+                    None => (doc_no.clone(), String::new()),
+                }
+            } else {
+                (String::new(), String::new())
+            }
+        } else {
+            (String::new(), String::new())
+        };
+
+        let has_discount = is_promo && row.FCLsqOldPrice.map(|op| op > row.FCLsqSalePrice + 0.001).unwrap_or(true);
+        let is_gift = is_promo && !has_discount;
+
+        manual_lines.push(json!({
+            "pdtCode": row.FTPdtCode,
+            "barCode": row.FTBarCode,
+            "pdtName": pdt_name,
+            "price": row.FCLsqSalePrice,
+            "priType": row.FTLsqPriType,
+            "qty": row.FNLsqQty.max(1),
+            "lbsCode": row.FTLbsCode,
+            "tmplCode": tmpl_code,
+            "promoName": if promo_title.is_empty() { row.FTLsqPromoDocNo.clone() } else { Some(promo_title.clone()) },
+            "statusText": "นำเข้าจากค้างพิมพ์ตี 4",
+            "ctx": {
+                "product": {
+                    "code": row.FTPdtCode,
+                    "barcode": row.FTBarCode,
+                    "name": pdt_name,
+                    "name_oth": name_oth,
+                    "dim": dim_str,
+                    "unit": selling_unit,
+                },
+                "price": {
+                    "value": row.FCLsqSalePrice,
+                    "old_value": row.FCLsqOldPrice,
+                    "old_has": row.FCLsqOldPrice.is_some(),
+                },
+                "promotion": {
+                    "is_promo": is_promo,
+                    "is_discount": has_discount,
+                    "is_gift": is_gift,
+                    "text": if is_promo { "PROMOTION" } else { "" },
+                    "free_text": if is_gift { promo_title.as_str() } else { "" },
+                    "name": promo_title,
+                    "interval": promo_intv,
+                },
+                "tag": {
+                    "print_date": print_date_th,
+                    "pri_status": if is_promo { "2" } else { "1" },
+                    "selling_unit": selling_unit,
+                    "lab_size": row.FTLbsCode,
+                },
+                "store": {
+                    "name": store_name,
+                }
+            }
+        }));
+    }
+
+    Json(json!({
+        "ok": true,
+        "runId": run_id,
+        "count": manual_lines.len(),
+        "lines": manual_lines,
+    }))
+    .into_response()
+}
+
+pub async fn get_sync_status(State(st): State<AppState>) -> Response {
+    let states = sqlx::query_as::<_, TCNTSyncLocalState>(
+        "SELECT FTSynTable, FDSynLast, FTSynSnapshotToken, FTSynLastChecksum, FDLastSyncAt, FTSynLastStatus FROM TCNTSyncLocalState ORDER BY FTSynTable ASC",
+    )
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+
+    let cfg = crate::sync_master::load_sync_config(&st.pool, 3, None).await;
+    Json(json!({
+        "ok": true,
+        "configured": !cfg.api_url.is_empty(),
+        "apiUrl": cfg.api_url,
+        "hasApiKey": !cfg.api_key.is_empty(),
+        "agnCode": cfg.agn_code,
+        "bchCode": cfg.bch_code,
+        "states": states,
+    }))
+    .into_response()
+}
+
+pub async fn post_sync_trigger(State(st): State<AppState>) -> Response {
+    let cfg = crate::sync_master::load_sync_config(&st.pool, 3, Some(5)).await;
+    match crate::sync_master::sync_master_with_retry(&st.pool, &cfg).await {
+        Ok(proof) => Json(json!(proof)).into_response(),
+        Err(err) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "ok": false,
+                "code": err.code,
+                "attempts": err.attempts,
+                "message": err.message
+            })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyAdminPinBody {
+    pub pin: String,
+}
+
+pub async fn post_verify_admin_pin(
+    State(st): State<AppState>,
+    Json(body): Json<VerifyAdminPinBody>,
+) -> Response {
+    let saved_pin: String = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT FTSopValue FROM TCNSSysOption WHERE FTSopCode = 'AutoPrintAdminPin' LIMIT 1",
+    )
+    .fetch_optional(&st.pool)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
+    .filter(|s| !s.trim().is_empty())
+    .unwrap_or_else(|| "1234".to_string());
+
+    let ok = body.pin.trim() == saved_pin.trim();
+    if !ok {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "ok": false, "error": "รหัส PIN ผู้ดูแลระบบไม่ถูกต้อง" })),
+        )
+            .into_response();
+    }
+    Json(json!({ "ok": true })).into_response()
 }

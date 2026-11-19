@@ -1,6 +1,6 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
 use sqlx::{
-    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
     FromRow, SqlitePool,
 };
 use std::path::PathBuf;
@@ -69,13 +69,14 @@ pub fn resolve_exports_dir() -> PathBuf {
 pub async fn connect_db() -> Result<SqlitePool, sqlx::Error> {
     let db_path = resolve_db_path();
     let url = format!("sqlite:{}?mode=rwc", db_path.display());
-    println!("[DB] Connecting Read/Write to AdaAccD: {}", url);
+    println!("[DB] Connecting Read/Write (WAL) to AdaAccD: {}", url);
     let opts = SqliteConnectOptions::from_str(&url)?
         .create_if_missing(true)
-        .journal_mode(SqliteJournalMode::Delete)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
         .busy_timeout(Duration::from_secs(5));
     SqlitePoolOptions::new()
-        .max_connections(5)
+        .max_connections(8)
         .connect_with(opts)
         .await
 }
@@ -412,6 +413,175 @@ pub async fn ensure_label_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .execute(pool)
     .await;
+
+    // ─── V6 Promotion Tables Guard (for fresh DB) + 5 Auto-Print Tables ────
+    let auto_ddls = [
+        r#"CREATE TABLE IF NOT EXISTS "TCNTPmtHD" (
+            "FTAgnCode" TEXT COLLATE NOCASE NOT NULL DEFAULT '',
+            "FTPmhDocNo" TEXT COLLATE NOCASE NOT NULL DEFAULT '',
+            "FNPmhVersion" INTEGER NOT NULL DEFAULT 0,
+            "FTPmhStaActive" TEXT COLLATE NOCASE NOT NULL DEFAULT '1',
+            "FTPmhName" TEXT COLLATE NOCASE,
+            "FTPmhRmk" TEXT COLLATE NOCASE,
+            "FTPmhStaDoc" TEXT COLLATE NOCASE,
+            "FTPmhStaPrcDoc" TEXT COLLATE NOCASE,
+            "FDPmhDStart" TEXT,
+            "FDPmhDStop" TEXT,
+            "FNPmhPriority" INTEGER NOT NULL DEFAULT 100,
+            "FTPmhStaStack" TEXT COLLATE NOCASE,
+            "FTPmhFmtCode" TEXT COLLATE NOCASE,
+            "FNPmhSchemaVer" INTEGER NOT NULL DEFAULT 1,
+            "FTPmhRuleJson" TEXT,
+            "FDLastUpdOn" TEXT,
+            "FTLastUpdBy" TEXT COLLATE NOCASE,
+            "FDCreateOn" TEXT,
+            "FTCreateBy" TEXT COLLATE NOCASE,
+            PRIMARY KEY ("FTAgnCode", "FTPmhDocNo", "FNPmhVersion")
+        )"#,
+        r#"CREATE TABLE IF NOT EXISTS "TCNTPmtHD_L" (
+            "FTAgnCode" TEXT COLLATE NOCASE NOT NULL DEFAULT '',
+            "FTPmhDocNo" TEXT COLLATE NOCASE NOT NULL DEFAULT '',
+            "FNPmhVersion" INTEGER NOT NULL DEFAULT 0,
+            "FNLngID" INTEGER NOT NULL DEFAULT 0,
+            "FTPmhName" TEXT COLLATE NOCASE,
+            "FTPmhRmk" TEXT COLLATE NOCASE,
+            "FDLastUpdOn" TEXT,
+            "FTLastUpdBy" TEXT COLLATE NOCASE,
+            "FDCreateOn" TEXT,
+            "FTCreateBy" TEXT COLLATE NOCASE,
+            PRIMARY KEY ("FTAgnCode", "FTPmhDocNo", "FNPmhVersion", "FNLngID")
+        )"#,
+        r#"CREATE TABLE IF NOT EXISTS "TCNTPmtGrpDT" (
+            "FTAgnCode" TEXT COLLATE NOCASE NOT NULL DEFAULT '',
+            "FTPmhDocNo" TEXT COLLATE NOCASE NOT NULL DEFAULT '',
+            "FTPmdGrpName" TEXT COLLATE NOCASE NOT NULL DEFAULT '',
+            "FNPmdSeqNo" INTEGER NOT NULL DEFAULT 0,
+            "FTPmdStaType" TEXT COLLATE NOCASE,
+            "FTPmdRefType" TEXT COLLATE NOCASE,
+            "FTPmdRefCode" TEXT COLLATE NOCASE,
+            "FCPmdQty" REAL,
+            "FTPmdJson" TEXT,
+            "FDLastUpdOn" TEXT,
+            "FTLastUpdBy" TEXT COLLATE NOCASE,
+            "FDCreateOn" TEXT,
+            "FTCreateBy" TEXT COLLATE NOCASE,
+            PRIMARY KEY ("FTAgnCode", "FTPmhDocNo", "FTPmdGrpName", "FNPmdSeqNo")
+        )"#,
+        r#"CREATE TABLE IF NOT EXISTS "TCNTPmtCond" (
+            "FTAgnCode" TEXT COLLATE NOCASE NOT NULL DEFAULT '',
+            "FTPmhDocNo" TEXT COLLATE NOCASE NOT NULL DEFAULT '',
+            "FNPmcSeqNo" INTEGER NOT NULL DEFAULT 0,
+            "FTPmcCondType" TEXT COLLATE NOCASE,
+            "FTPmcRefCode" TEXT COLLATE NOCASE,
+            "FCPmcValue" REAL,
+            "FTPmcJson" TEXT,
+            "FDLastUpdOn" TEXT,
+            "FTLastUpdBy" TEXT COLLATE NOCASE,
+            "FDCreateOn" TEXT,
+            "FTCreateBy" TEXT COLLATE NOCASE,
+            PRIMARY KEY ("FTAgnCode", "FTPmhDocNo", "FNPmcSeqNo")
+        )"#,
+        // 1) แผนตั้งเวลาพิมพ์อัตโนมัติ
+        r#"CREATE TABLE IF NOT EXISTS "TCNTLabelSchedule" (
+            "FTLscCode"          TEXT NOT NULL PRIMARY KEY,
+            "FTLscName"          TEXT NOT NULL,
+            "FTLscStaUse"        TEXT NOT NULL DEFAULT '1',
+            "FTLscRunTime"       TEXT NOT NULL DEFAULT '04:00',
+            "FNLscPreSyncMin"    INTEGER NOT NULL DEFAULT 30,
+            "FNLscJitterSec"     INTEGER NOT NULL DEFAULT 900,
+            "FTLscDaysMask"      TEXT NOT NULL DEFAULT '1111111',
+            "FTLscTriggerRules"  TEXT NOT NULL DEFAULT 'PRICE_CHG,PROMO_START,PROMO_END_REVERT,NEW_PDT',
+            "FTLscBchCode"       TEXT,
+            "FTLscPplCode"       TEXT,
+            "FTLscLbsCode"       TEXT NOT NULL DEFAULT 'UFM-NOR-16',
+            "FNLscQtyMode"       INTEGER NOT NULL DEFAULT 1,
+            "FTLscSyncMode"      TEXT NOT NULL DEFAULT 'DIRECT_API',
+            "FNLscSyncRetry"     INTEGER NOT NULL DEFAULT 3,
+            "FNLscRetryWaitSec"  INTEGER NOT NULL DEFAULT 300,
+            "FTLscOnSyncFail"    TEXT NOT NULL DEFAULT 'ABORT',
+            "FTLscOnPrinterBack" TEXT NOT NULL DEFAULT 'WAIT_CONFIRM',
+            "FNLscMisfireMin"    INTEGER NOT NULL DEFAULT 300,
+            "FTLscStaCoverSheet" TEXT NOT NULL DEFAULT '1',
+            "FDLscLastRunAt"     DATETIME,
+            "FDCreateOn"         DATETIME,
+            "FTCreateBy"         TEXT,
+            "FDLastUpdOn"        DATETIME,
+            "FTLastUpdBy"        TEXT
+        )"#,
+        // 2) ประวัติการรันแต่ละวัน + Unique lock กัน Auto ซ้ำวัน
+        r#"CREATE TABLE IF NOT EXISTS "TCNTLabelSchedRun" (
+            "FTLsrRunID"         TEXT NOT NULL PRIMARY KEY,
+            "FTLscCode"          TEXT NOT NULL,
+            "FDLsrBizDate"       TEXT NOT NULL,
+            "FTLsrTriggerBy"     TEXT NOT NULL DEFAULT 'TIMER',
+            "FTLsrStatus"        TEXT NOT NULL,
+            "FDLsrStartedAt"     DATETIME NOT NULL,
+            "FDLsrSyncedAt"      DATETIME,
+            "FTLsrSyncProofJson" TEXT,
+            "FNLsrSyncAttempts"  INTEGER NOT NULL DEFAULT 0,
+            "FNLsrCandTotal"     INTEGER NOT NULL DEFAULT 0,
+            "FNLsrSkippedDup"    INTEGER NOT NULL DEFAULT 0,
+            "FNLsrNorQty"        INTEGER NOT NULL DEFAULT 0,
+            "FNLsrPmtQty"        INTEGER NOT NULL DEFAULT 0,
+            "FNLsrFailQty"       INTEGER NOT NULL DEFAULT 0,
+            "FTLjbJobID"         TEXT,
+            "FTLsrErrMsg"        TEXT,
+            "FDLsrFinishedAt"    DATETIME
+        )"#,
+        r#"CREATE UNIQUE INDEX IF NOT EXISTS "UX_SchedRun_DailyAuto"
+            ON "TCNTLabelSchedRun"("FTLscCode", "FDLsrBizDate")
+            WHERE "FTLsrTriggerBy" IN ('TIMER', 'MISFIRE')
+              AND "FTLsrStatus" IN ('SUCCESS', 'PARTIAL', 'SKIPPED_EMPTY')"#,
+        // 3) คิวรายการรายบาร์โค้ดต่อ 1 รอบรัน
+        r#"CREATE TABLE IF NOT EXISTS "TCNTLabelSchedQueue" (
+            "FTLsrRunID"      TEXT NOT NULL,
+            "FNLsqSeq"        INTEGER NOT NULL,
+            "FTPdtCode"       TEXT NOT NULL,
+            "FTBarCode"       TEXT NOT NULL,
+            "FTLsqTriggerSrc" TEXT NOT NULL,
+            "FTLsqPriType"    TEXT NOT NULL,
+            "FTLbsCode"       TEXT NOT NULL,
+            "FCLsqOldPrice"   REAL,
+            "FCLsqSalePrice"  REAL NOT NULL,
+            "FTLsqPromoDocNo" TEXT,
+            "FTLsqPriceHash"  TEXT NOT NULL,
+            "FNLsqQty"        INTEGER NOT NULL DEFAULT 1,
+            "FNLsqBatchPage"  INTEGER,
+            "FTLsqStatus"     TEXT NOT NULL DEFAULT 'READY',
+            "FTLsqErrMsg"     TEXT,
+            PRIMARY KEY ("FTLsrRunID", "FNLsqSeq")
+        )"#,
+        r#"CREATE INDEX IF NOT EXISTS "IX_SchedQueue_Status"
+            ON "TCNTLabelSchedQueue"("FTLsrRunID", "FTLsqStatus")"#,
+        // 4) Watermark กันพิมพ์ซ้ำ
+        r#"CREATE TABLE IF NOT EXISTS "TCNTLabelSchedWatermark" (
+            "FTBarCode"        TEXT NOT NULL,
+            "FTLbsCode"        TEXT NOT NULL,
+            "FTLswLastHash"    TEXT NOT NULL,
+            "FTLswLastPriType" TEXT NOT NULL,
+            "FCLswLastPrice"   REAL NOT NULL,
+            "FDLswPrintedAt"   DATETIME NOT NULL,
+            "FTLsrRunID"       TEXT NOT NULL,
+            PRIMARY KEY ("FTBarCode", "FTLbsCode")
+        )"#,
+        // 5) Sync Checkpoint Local State
+        r#"CREATE TABLE IF NOT EXISTS "TCNTSyncLocalState" (
+            "FTSynTable"         TEXT NOT NULL PRIMARY KEY,
+            "FDSynLast"          TEXT NOT NULL,
+            "FTSynSnapshotToken" TEXT,
+            "FTSynLastChecksum"  TEXT,
+            "FDLastSyncAt"       DATETIME NOT NULL,
+            "FTSynLastStatus"    TEXT NOT NULL
+        )"#,
+        r#"CREATE INDEX IF NOT EXISTS "IX_Price4_Pdt_Start"
+            ON "TCNTPdtPrice4PDT"("FTPdtCode", "FDPghDStart")"#,
+        r#"CREATE INDEX IF NOT EXISTS "IX_PmtHD_Dates"
+            ON "TCNTPmtHD"("FTPmhStaActive", "FDPmhDStart", "FDPmhDStop")"#,
+    ];
+    for ddl in auto_ddls {
+        let _ = sqlx::query(ddl).execute(pool).await;
+    }
+
     Ok(())
 }
 
@@ -459,7 +629,7 @@ struct PromoRow {
     get_value: Option<f64>,
 }
 
-fn parse_dt(s: &str) -> Option<DateTime<Utc>> {
+pub(crate) fn parse_dt(s: &str) -> Option<DateTime<Utc>> {
     if let Ok(ms) = s.parse::<i64>() {
         return DateTime::from_timestamp_millis(ms);
     }
@@ -604,6 +774,12 @@ pub async fn resolve_accd_promotion(
         return Ok(None);
     }
 
+    // 1) Try V6 Promotion tables (TCNTPmtHD / TCNTPmtHD_L / TCNTPmtGrpDT / TCNTPmtCond)
+    if let Some(v6_promo) = crate::promo_v6::resolve_v6_promotion(accd, barcode, pdt_code, on_date).await? {
+        return Ok(Some(v6_promo));
+    }
+
+    // 2) Fallback to POS5 Promotion tables (TCNTPdtPmtDT / HD / HD_L / CG)
     let rows: Vec<AccdPromoRow> = sqlx::query_as(
         r#"
         SELECT hd.FTPmhDocNo,
@@ -745,6 +921,13 @@ pub async fn seed_defaults(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         ("DefaultDpi", "PrintBar", "ความละเอียด DPI เริ่มต้น", "203", "ความละเอียดเครื่องพิมพ์เริ่มต้น", 4),
         ("UrlTemplate", "PrintBar", "URL Template สำหรับ QR", "", "รูปแบบ URL สินค้าใน QR Code", 5),
         ("DefaultUser", "PrintBar", "รหัสผู้ใช้งานเริ่มต้น", "ADMIN", "ชื่อผู้ใช้งานที่บันทึกลง Transaction Log", 6),
+        ("MasterApiUrl", "PrintBar", "URL ของ API2PSMaster V6", "", "ที่อยู่ API2PSMaster สำหรับซิงค์สินค้า/ราคา/โปรฯ ตรง", 10),
+        ("MasterApiKey", "PrintBar", "API Key (X-API-Key)", "", "กุญแจยืนยันตัวตน API2PSMaster", 11),
+        ("MasterAgnCode", "PrintBar", "Agency Code", "", "รหัสตัวแทน / กลุ่มธุรกิจสำหรับซิงค์", 12),
+        ("MasterBchCode", "PrintBar", "Branch Code", "", "รหัสสาขาสำหรับซิงค์ราคาและโปรโมชัน", 13),
+        ("AutoPrintRetentionDays", "PrintBar", "จำนวนวันเก็บไฟล์และคิวพิมพ์", "60", "ลบประวัติคิวและไฟล์ชั่วคราวที่เก่าเกินกำหนดอัตโนมัติ", 14),
+        ("AutoPrintRetryWaitSec", "PrintBar", "หน่วงเวลาลองซิงค์ใหม่ (วินาที)", "300", "เวลารอก่อนลอง Retry เมื่อเน็ตหลุด", 15),
+        ("AutoPrintAdminPin", "PrintBar", "รหัส PIN แท็บผู้ดูแลระบบ", "1234", "PIN สำหรับล็อกแท็บตั้งค่า API URL/Key", 16),
     ];
     for (code, app, name, val, desc, seq) in sys_opts {
         sqlx::query(
@@ -754,6 +937,26 @@ pub async fn seed_defaults(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await?;
     }
+
+    // Default Auto-Print @ 04:00 schedule (disabled until Store User turns it on in UI)
+    sqlx::query(
+        r#"
+        INSERT OR IGNORE INTO TCNTLabelSchedule (
+            FTLscCode, FTLscName, FTLscStaUse, FTLscRunTime, FNLscPreSyncMin, FNLscJitterSec,
+            FTLscDaysMask, FTLscTriggerRules, FTLscLbsCode, FNLscQtyMode, FTLscSyncMode,
+            FNLscSyncRetry, FNLscRetryWaitSec, FTLscOnSyncFail, FTLscOnPrinterBack,
+            FNLscMisfireMin, FTLscStaCoverSheet, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy
+        ) VALUES (
+            'SCH-0400', 'พิมพ์ป้ายอัตโนมัติประจำวัน (04:00 น.)', '2', '04:00', 30, 900,
+            '1111111', 'PRICE_CHG,PROMO_START,PROMO_END_REVERT,NEW_PDT', 'ADA-100x38', 1, 'DIRECT_API',
+            3, 300, 'ABORT', 'WAIT_CONFIRM', 300, '1', ?, 'SYSTEM', ?, 'SYSTEM'
+        )
+        "#,
+    )
+    .bind(&now)
+    .bind(&now)
+    .execute(pool)
+    .await?;
 
     sqlx::query(
         "INSERT OR IGNORE INTO TCNMPrinterServer (FTPsvCode, FTPsvName, FTPsvStaUse, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy) VALUES ('LOCAL', 'เครื่องนี้ (Local)', '1', ?, 'SYSTEM', ?, 'SYSTEM')"

@@ -1,0 +1,351 @@
+use chrono::{DateTime, NaiveDate, Utc};
+use sqlx::{FromRow, SqlitePool};
+
+use crate::db::{apply_promo, parse_dt, resolve_accd_promotion, PromoResult};
+
+#[derive(FromRow)]
+struct V6PromoRow {
+    #[sqlx(rename = "FTPmhDocNo")]
+    doc_no: String,
+    #[sqlx(rename = "FTPmhName")]
+    name: Option<String>,
+    #[sqlx(rename = "FTPmhRmk")]
+    rmk: Option<String>,
+    #[sqlx(rename = "FDPmhDStart")]
+    dstart: Option<String>,
+    #[sqlx(rename = "FDPmhDStop")]
+    dstop: Option<String>,
+    #[sqlx(rename = "FTPmcCondType")]
+    cond_type: Option<String>,
+    #[sqlx(rename = "FCPmcValue")]
+    value: Option<f64>,
+    #[sqlx(rename = "FTPmdGrpName")]
+    grp_name: Option<String>,
+}
+
+fn map_v6_cond_type(raw: Option<&str>) -> i64 {
+    let s = raw.unwrap_or("").trim().to_uppercase();
+    if s == "1" || s.contains("AMT") || s.contains("BAHT") || s == "DIS_AMT" {
+        1
+    } else if s == "2" || s.contains("PCT") || s.contains("PER") || s == "DIS_PCT" {
+        2
+    } else if s == "3" || s.contains("FIX") || s.contains("PRI") || s == "SET_PRI" {
+        3
+    } else {
+        4
+    }
+}
+
+fn date_in_range(dstart: Option<&str>, dstop: Option<&str>, on_date: DateTime<Utc>) -> bool {
+    let target_day = on_date.format("%Y-%m-%d").to_string();
+    let start_ok = match dstart.map(str::trim).filter(|s| !s.is_empty()) {
+        None => true,
+        Some(s) => {
+            if s.len() >= 10 && s.as_bytes().get(4) == Some(&b'-') {
+                s[..10] <= *target_day
+            } else {
+                parse_dt(s).map(|d| d <= on_date).unwrap_or(true)
+            }
+        }
+    };
+    let stop_ok = match dstop.map(str::trim).filter(|s| !s.is_empty()) {
+        None => true,
+        Some(s) => {
+            if s.len() >= 10 && s.as_bytes().get(4) == Some(&b'-') {
+                s[..10] >= *target_day
+            } else {
+                parse_dt(s).map(|d| d >= on_date).unwrap_or(true)
+            }
+        }
+    };
+    start_ok && stop_ok
+}
+
+/// Resolve active promotion from POS6 V6 tables (`TCNTPmtHD`, `TCNTPmtHD_L`, `TCNTPmtGrpDT`, `TCNTPmtCond`).
+pub async fn resolve_v6_promotion(
+    pool: &SqlitePool,
+    barcode: &str,
+    pdt_code: &str,
+    on_date: DateTime<Utc>,
+) -> Result<Option<PromoResult>, sqlx::Error> {
+    let rows_res: Result<Vec<V6PromoRow>, sqlx::Error> = sqlx::query_as(
+        r#"
+        SELECT hd.FTPmhDocNo,
+               COALESCE(NULLIF(hdl.FTPmhName, ''), NULLIF(hd.FTPmhName, ''), hd.FTPmhDocNo) AS FTPmhName,
+               COALESCE(NULLIF(hdl.FTPmhRmk, ''), hd.FTPmhRmk, '') AS FTPmhRmk,
+               CAST(hd.FDPmhDStart AS TEXT) AS FDPmhDStart,
+               CAST(hd.FDPmhDStop AS TEXT) AS FDPmhDStop,
+               cnd.FTPmcCondType,
+               cnd.FCPmcValue,
+               gd.FTPmdGrpName
+        FROM TCNTPmtHD hd
+        JOIN TCNTPmtGrpDT gd
+          ON gd.FTAgnCode = hd.FTAgnCode AND gd.FTPmhDocNo = hd.FTPmhDocNo
+        LEFT JOIN TCNTPmtHD_L hdl
+          ON hdl.FTAgnCode = hd.FTAgnCode
+         AND hdl.FTPmhDocNo = hd.FTPmhDocNo
+         AND hdl.FNPmhVersion = hd.FNPmhVersion
+         AND hdl.FNLngID = 1
+        LEFT JOIN TCNTPmtCond cnd
+          ON cnd.FTAgnCode = hd.FTAgnCode AND cnd.FTPmhDocNo = hd.FTPmhDocNo
+        WHERE COALESCE(hd.FTPmhStaActive, '1') = '1'
+          AND (COALESCE(hd.FTPmhStaDoc, '1') = '1' OR COALESCE(hd.FTPmhStaDoc, '') = '')
+          AND COALESCE(gd.FTPmdStaType, '1') != '2'
+          AND (
+                gd.FTPmdRefCode = ?
+             OR gd.FTPmdRefCode = ?
+             OR gd.FTPmdRefCode = '*'
+          )
+        ORDER BY COALESCE(hd.FNPmhPriority, 100) ASC, hd.FNPmhVersion DESC, cnd.FNPmcSeqNo ASC
+        "#,
+    )
+    .bind(pdt_code)
+    .bind(barcode)
+    .fetch_all(pool)
+    .await;
+
+    let rows = match rows_res {
+        Ok(r) => r,
+        Err(_) => return Ok(None),
+    };
+
+    for r in rows {
+        if !date_in_range(r.dstart.as_deref(), r.dstop.as_deref(), on_date) {
+            continue;
+        }
+        let get_cond = map_v6_cond_type(r.cond_type.as_deref());
+        let get_value = r.value.unwrap_or(0.0);
+        let cap_free = r.grp_name.unwrap_or_default();
+        let is_gift = get_cond == 4 || (get_cond == 3 && get_value == 0.0);
+        let is_discount = [1, 2, 3].contains(&get_cond) && !is_gift;
+
+        return Ok(Some(PromoResult {
+            code: r.doc_no,
+            name: r.name.unwrap_or_default(),
+            get_cond,
+            get_value,
+            dstart: r.dstart,
+            dstop: r.dstop,
+            cap_free,
+            cap_name: r.rmk.unwrap_or_default(),
+            price_pmt: if get_cond == 3 { Some(get_value) } else { None },
+            is_discount,
+            is_gift,
+        }));
+    }
+
+    Ok(None)
+}
+
+/// Resolve base normal price from `TCNTPdtPrice4PDT` (with optional `FTPplCode`) and approved `TCNTPdtAdjPriHD/DT` as fallback.
+pub async fn resolve_normal_price_on_date(
+    pool: &SqlitePool,
+    pdt_code: &str,
+    ppl_code: Option<&str>,
+    biz_date: &str,
+) -> Result<f64, sqlx::Error> {
+    let ppl = ppl_code.unwrap_or("").trim();
+    let price4: Option<(f64,)> = if !ppl.is_empty() {
+        sqlx::query_as(
+            r#"
+            SELECT CAST(FCPgdPriceRet AS REAL)
+            FROM TCNTPdtPrice4PDT
+            WHERE FTPdtCode = ?
+              AND FTPghDocType = '1'
+              AND (FTPplCode = ? OR FTPplCode = '' OR FTPplCode IS NULL)
+              AND (COALESCE(FDPghDStart, '') = '' OR substr(FDPghDStart, 1, 10) <= ?)
+              AND (COALESCE(FDPghDStop, '') = '' OR substr(FDPghDStop, 1, 10) >= ?)
+            ORDER BY CASE WHEN FTPplCode = ? THEN 0 ELSE 1 END,
+                     substr(COALESCE(FDPghDStart, ''), 1, 10) DESC,
+                     FDCreateOn DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(pdt_code)
+        .bind(ppl)
+        .bind(biz_date)
+        .bind(biz_date)
+        .bind(ppl)
+        .fetch_optional(pool)
+        .await?
+    } else {
+        sqlx::query_as(
+            r#"
+            SELECT CAST(FCPgdPriceRet AS REAL)
+            FROM TCNTPdtPrice4PDT
+            WHERE FTPdtCode = ?
+              AND FTPghDocType = '1'
+              AND (COALESCE(FDPghDStart, '') = '' OR substr(FDPghDStart, 1, 10) <= ?)
+              AND (COALESCE(FDPghDStop, '') = '' OR substr(FDPghDStop, 1, 10) >= ?)
+            ORDER BY substr(COALESCE(FDPghDStart, ''), 1, 10) DESC, FDCreateOn DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(pdt_code)
+        .bind(biz_date)
+        .bind(biz_date)
+        .fetch_optional(pool)
+        .await?
+    };
+
+    if let Some((p,)) = price4 {
+        return Ok(p);
+    }
+
+    let adj_price: Option<(f64,)> = sqlx::query_as(
+        r#"
+        SELECT CAST(dt.FCXpdPriceRet AS REAL)
+        FROM TCNTPdtAdjPriDT dt
+        JOIN TCNTPdtAdjPriHD hd
+          ON hd.FTBchCode = dt.FTBchCode AND hd.FTXphDocNo = dt.FTXphDocNo
+        WHERE dt.FTPdtCode = ?
+          AND COALESCE(hd.FTXphStaApv, '1') = '1'
+          AND (COALESCE(hd.FDXphDStart, '') = '' OR substr(hd.FDXphDStart, 1, 10) <= ?)
+          AND (COALESCE(hd.FDXphDStop, '') = '' OR substr(hd.FDXphDStop, 1, 10) >= ?)
+        ORDER BY substr(COALESCE(hd.FDXphDStart, ''), 1, 10) DESC, hd.FDCreateOn DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(pdt_code)
+    .bind(biz_date)
+    .bind(biz_date)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
+
+    if let Some((p,)) = adj_price {
+        return Ok(p);
+    }
+
+    let pack_pri: Option<(f64,)> = sqlx::query_as(
+        "SELECT CAST(FCPdtPriceRET AS REAL) FROM TCNMPdtPackSize WHERE FTPdtCode = ? AND COALESCE(FCPdtPriceRET, 0) > 0 ORDER BY FCPdtPunFact ASC LIMIT 1",
+    )
+    .bind(pdt_code)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
+
+    if let Some((p,)) = pack_pri {
+        return Ok(p);
+    }
+
+    let legacy_pri: Option<(f64,)> = sqlx::query_as(
+        "SELECT CAST(FCPpcPrice AS REAL) FROM TCNMPdtPri WHERE FTPdtCode = ? AND FTPpcStaUse = '1' ORDER BY FDPpcDStart DESC LIMIT 1",
+    )
+    .bind(pdt_code)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
+
+    if let Some((p,)) = legacy_pri {
+        return Ok(p);
+    }
+
+    let latest_p4: Option<(f64,)> = sqlx::query_as(
+        "SELECT CAST(FCPgdPriceRet AS REAL) FROM TCNTPdtPrice4PDT WHERE FTPdtCode = ? AND FTPghDocType = '1' AND COALESCE(FCPgdPriceRet, 0) > 0 ORDER BY substr(COALESCE(FDPghDStart, ''), 1, 10) DESC, FDCreateOn DESC LIMIT 1",
+    )
+    .bind(pdt_code)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
+
+    Ok(latest_p4.map(|r| r.0).unwrap_or(0.0))
+}
+
+#[derive(Debug, Clone)]
+pub struct EffectivePriceInfo {
+    pub normal_price: f64,
+    pub sale_price: f64,
+    pub pri_type: String, // "1" = Normal, "2" = Promo
+    pub promo: Option<PromoResult>,
+}
+
+/// Resolve final normal price + active promotion (V6 or POS5) for a given business date (`YYYY-MM-DD`).
+pub async fn resolve_effective_price(
+    pool: &SqlitePool,
+    pdt_code: &str,
+    barcode: &str,
+    ppl_code: Option<&str>,
+    biz_date: &str,
+    verify_promo: bool,
+) -> Result<EffectivePriceInfo, sqlx::Error> {
+    let normal_price = resolve_normal_price_on_date(pool, pdt_code, ppl_code, biz_date).await?;
+    let on_date = NaiveDate::parse_from_str(biz_date, "%Y-%m-%d")
+        .ok()
+        .and_then(|d| d.and_hms_opt(12, 0, 0))
+        .map(|ndt| ndt.and_utc())
+        .unwrap_or_else(Utc::now);
+
+    let promo = resolve_accd_promotion(pool, barcode, pdt_code, on_date, verify_promo).await?;
+    if let Some(ref pr) = promo {
+        if pr.is_discount || pr.is_gift {
+            let sale_price = if pr.is_discount {
+                apply_promo(normal_price, pr).max(0.0)
+            } else {
+                normal_price
+            };
+            return Ok(EffectivePriceInfo {
+                normal_price,
+                sale_price,
+                pri_type: "2".to_string(),
+                promo,
+            });
+        }
+    }
+
+    Ok(EffectivePriceInfo {
+        normal_price,
+        sale_price: normal_price,
+        pri_type: "1".to_string(),
+        promo: None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::ensure_label_schema;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn tc02_v6_promotion_resolver_works_when_pos5_is_empty() {
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        // Create minimal tables referenced by ensure_label_schema ALTERs
+        sqlx::query("CREATE TABLE IF NOT EXISTS TCNTPdtPrice4PDT (FTAgnCode TEXT, FTPdtCode TEXT, FTPunCode TEXT, FDPghDStart TEXT, FTPghTStart TEXT, FTPplCode TEXT, FDPghDStop TEXT, FTPghTStop TEXT, FTPghDocNo TEXT, FTPghDocType TEXT, FTPghStaAdj TEXT, FCPgdPriceRet REAL, FCPgdPriceWhs REAL, FCPgdPriceNet REAL, FDLastUpdOn TEXT, FTLastUpdBy TEXT, FDCreateOn TEXT, FTCreateBy TEXT)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("CREATE TABLE IF NOT EXISTS TCNTPdtAdjPriHD (FTBchCode TEXT, FTXphDocNo TEXT, FDXphDStart TEXT, FDXphDStop TEXT, FTXphStaApv TEXT, FDCreateOn TEXT)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("CREATE TABLE IF NOT EXISTS TCNTPdtAdjPriDT (FTBchCode TEXT, FTXphDocNo TEXT, FNXpdSeq INTEGER, FTPdtCode TEXT, FCXpdPriceRet REAL)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("CREATE TABLE IF NOT EXISTS TCNTPdtPmtHD (FTBchCode TEXT, FTPmhDocNo TEXT, FDPmhDStart TEXT, FDPmhDStop TEXT, FTPmhStaClosed TEXT, FTPmhStaApv TEXT)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("CREATE TABLE IF NOT EXISTS TCNTPdtPmtHD_L (FTBchCode TEXT, FTPmhDocNo TEXT, FNLngID INTEGER, FTPmhName TEXT, FTPmhNameSlip TEXT, FTPmhRmk TEXT)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("CREATE TABLE IF NOT EXISTS TCNTPdtPmtDT (FTBchCode TEXT, FTPmhDocNo TEXT, FNPmdSeq INTEGER, FTPmdGrpName TEXT, FTPmdRefCode TEXT, FTPmdBarCode TEXT)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("CREATE TABLE IF NOT EXISTS TCNTPdtPmtCG (FTBchCode TEXT, FTPmhDocNo TEXT, FTPmdGrpName TEXT, FTPgtStaGetType TEXT, FCPgtGetvalue REAL)")
+            .execute(&pool).await.unwrap();
+        ensure_label_schema(&pool).await.unwrap();
+
+        sqlx::query("INSERT INTO TCNTPdtPrice4PDT (FTAgnCode, FTPdtCode, FTPunCode, FDPghDStart, FTPghTStart, FTPplCode, FTPghDocNo, FTPghDocType, FCPgdPriceRet) VALUES ('001', 'PDT001', '001', '2026-11-01', '00:00:00', '', 'DOC01', '1', 100.0)")
+            .execute(&pool).await.unwrap();
+
+        sqlx::query("INSERT INTO TCNTPmtHD (FTAgnCode, FTPmhDocNo, FNPmhVersion, FTPmhStaActive, FTPmhName, FTPmhStaDoc, FDPmhDStart, FDPmhDStop, FNPmhPriority) VALUES ('001', 'PMT-V6-001', 1, '1', 'ลดราคา V6 สดใหม่', '1', '2026-11-18', '2026-11-30', 1)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNTPmtGrpDT (FTAgnCode, FTPmhDocNo, FTPmdGrpName, FNPmdSeqNo, FTPmdRefType, FTPmdRefCode) VALUES ('001', 'PMT-V6-001', 'GRP1', 1, '1', 'PDT001')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNTPmtCond (FTAgnCode, FTPmhDocNo, FNPmcSeqNo, FTPmcCondType, FCPmcValue) VALUES ('001', 'PMT-V6-001', 1, 'FIX_PRI', 79.0)")
+            .execute(&pool).await.unwrap();
+
+        let info = resolve_effective_price(&pool, "PDT001", "8850001000014", None, "2026-11-19", true)
+            .await
+            .unwrap();
+        assert_eq!(info.pri_type, "2");
+        assert!((info.normal_price - 100.0).abs() < 0.01);
+        assert!((info.sale_price - 79.0).abs() < 0.01);
+        assert_eq!(info.promo.unwrap().code, "PMT-V6-001");
+    }
+}

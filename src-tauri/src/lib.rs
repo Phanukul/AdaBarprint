@@ -1,8 +1,13 @@
 pub mod barcode;
 pub mod db;
+pub mod delta_engine;
+pub mod label_renderer;
 pub mod models;
 pub mod print_drivers;
+pub mod promo_v6;
 pub mod routes;
+pub mod scheduler_worker;
+pub mod sync_master;
 pub mod templates;
 
 use axum::{
@@ -59,6 +64,9 @@ pub async fn init_db_and_router() -> Result<(Router, SqlitePool), sqlx::Error> {
     let _ = db::seed_defaults(&pool).await;
     let _ = db::ensure_ufm_label_sizes(&pool).await;
     let _ = db::ensure_ada_label_sizes(&pool).await;
+    if std::env::var("AUTOPRINT_DISABLE_EMBEDDED_SCHEDULER").as_deref() != Ok("1") {
+        scheduler_worker::spawn_scheduler_loop(pool.clone());
+    }
     Ok((build_router(pool.clone()), pool))
 }
 
@@ -69,6 +77,15 @@ pub fn build_router(pool: SqlitePool) -> Router {
         .route("/api/seed", get(get_seed).post(post_seed))
         .route("/api/branches", get(get_branches))
         .route("/api/filters/master", get(get_filter_master))
+        .route("/api/schedules", get(get_schedules))
+        .route("/api/schedules/save", post(post_save_schedule))
+        .route("/api/schedules/:code/trigger", post(post_trigger_schedule))
+        .route("/api/schedules/runs", get(get_schedule_runs))
+        .route("/api/schedules/runs/:runId/reprint-failed", post(post_reprint_failed_run))
+        .route("/api/schedules/runs/:runId/load-to-manual", post(post_load_failed_to_manual))
+        .route("/api/sync/status", get(get_sync_status))
+        .route("/api/sync/trigger", post(post_sync_trigger))
+        .route("/api/config/admin-verify", post(post_verify_admin_pin))
         .route("/api/paper-sizes", get(get_paper_sizes))
         .route("/api/paper-sizes/save", post(post_save_paper_size))
         .route("/api/paper-sizes/delete", post(post_delete_paper_size))

@@ -310,3 +310,94 @@ pub struct TCNTLabelLog {
     pub FDLastUpdOn: Option<String>,
     pub FTLastUpdBy: Option<String>,
 }
+
+// ─── Auto-Print @ 04:00 AM Schedule, Queue, Watermark & Sync State ──────────
+
+#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
+pub struct TCNTLabelSchedule {
+    pub FTLscCode: String,
+    pub FTLscName: String,
+    pub FTLscStaUse: String,
+    pub FTLscRunTime: String,
+    pub FNLscPreSyncMin: i64,
+    pub FNLscJitterSec: i64,
+    pub FTLscDaysMask: String,
+    pub FTLscTriggerRules: String,
+    pub FTLscBchCode: Option<String>,
+    pub FTLscPplCode: Option<String>,
+    pub FTLscLbsCode: String,
+    pub FNLscQtyMode: i64,
+    pub FTLscSyncMode: String,
+    pub FNLscSyncRetry: i64,
+    pub FNLscRetryWaitSec: i64,
+    pub FTLscOnSyncFail: String,
+    pub FTLscOnPrinterBack: String,
+    pub FNLscMisfireMin: i64,
+    pub FTLscStaCoverSheet: String,
+    pub FDLscLastRunAt: Option<String>,
+    pub FDCreateOn: Option<String>,
+    pub FTCreateBy: Option<String>,
+    pub FDLastUpdOn: Option<String>,
+    pub FTLastUpdBy: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
+pub struct TCNTLabelSchedRun {
+    pub FTLsrRunID: String,
+    pub FTLscCode: String,
+    pub FDLsrBizDate: String,
+    pub FTLsrTriggerBy: String,
+    pub FTLsrStatus: String,
+    pub FDLsrStartedAt: String,
+    pub FDLsrSyncedAt: Option<String>,
+    pub FTLsrSyncProofJson: Option<String>,
+    pub FNLsrSyncAttempts: i64,
+    pub FNLsrCandTotal: i64,
+    pub FNLsrSkippedDup: i64,
+    pub FNLsrNorQty: i64,
+    pub FNLsrPmtQty: i64,
+    pub FNLsrFailQty: i64,
+    pub FTLjbJobID: Option<String>,
+    pub FTLsrErrMsg: Option<String>,
+    pub FDLsrFinishedAt: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
+pub struct TCNTLabelSchedQueue {
+    pub FTLsrRunID: String,
+    pub FNLsqSeq: i64,
+    pub FTPdtCode: String,
+    pub FTBarCode: String,
+    pub FTLsqTriggerSrc: String,
+    pub FTLsqPriType: String,
+    pub FTLbsCode: String,
+    pub FCLsqOldPrice: Option<f64>,
+    pub FCLsqSalePrice: f64,
+    pub FTLsqPromoDocNo: Option<String>,
+    pub FTLsqPriceHash: String,
+    pub FNLsqQty: i64,
+    pub FNLsqBatchPage: Option<i64>,
+    pub FTLsqStatus: String,
+    pub FTLsqErrMsg: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
+pub struct TCNTLabelSchedWatermark {
+    pub FTBarCode: String,
+    pub FTLbsCode: String,
+    pub FTLswLastHash: String,
+    pub FTLswLastPriType: String,
+    pub FCLswLastPrice: f64,
+    pub FDLswPrintedAt: String,
+    pub FTLsrRunID: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
+pub struct TCNTSyncLocalState {
+    pub FTSynTable: String,
+    pub FDSynLast: String,
+    pub FTSynSnapshotToken: Option<String>,
+    pub FTSynLastChecksum: Option<String>,
+    pub FDLastSyncAt: String,
+    pub FTSynLastStatus: String,
+}

@@ -8,8 +8,10 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
+  Clock,
   Edit3,
   FileText,
+  History,
   Loader2,
   Network,
   Plus,
@@ -52,6 +54,9 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { AutoScheduleSettings } from '@/components/AutoScheduleSettings';
+import { AutoScheduleHistory } from '@/components/AutoScheduleHistory';
+import type { ManualLoadLine } from '@/components/MorningOpsBanner';
 import type { PrinterBrand, PrinterConfig } from '@/types/printer';
 import {
   mergePaperSizeOptions,
@@ -137,6 +142,9 @@ interface SettingsPanelProps {
   formatTrayLabel: (tray: string) => string;
   initialEditLbsCode?: string | null;
   onClearInitialEdit?: () => void;
+  initialSubTab?: 'sizes' | 'preprints' | 'printers' | 'devices' | 'system' | 'autoprint' | 'autoprint_history' | null;
+  onClearInitialSubTab?: () => void;
+  onLoadManualRows?: (lines: ManualLoadLine[]) => void;
 }
 
 interface SizeFormState {
@@ -248,9 +256,12 @@ export function SettingsPanel({
   formatTrayLabel,
   initialEditLbsCode,
   onClearInitialEdit,
+  initialSubTab,
+  onClearInitialSubTab,
+  onLoadManualRows,
 }: SettingsPanelProps) {
-  const [subTab, setSubTab] = useState<'sizes' | 'preprints' | 'printers' | 'devices' | 'system'>(
-    initialEditLbsCode ? 'printers' : 'sizes'
+  const [subTab, setSubTab] = useState<'sizes' | 'preprints' | 'printers' | 'devices' | 'system' | 'autoprint' | 'autoprint_history'>(
+    initialEditLbsCode ? 'printers' : initialSubTab || 'sizes'
   );
 
   // ── Tab 1: Label Sizes State ───────────────────────────────────────────────
@@ -341,6 +352,13 @@ export function SettingsPanel({
       onClearInitialEdit?.();
     }
   }, [initialEditLbsCode, driverMappings, onClearInitialEdit]);
+
+  React.useEffect(() => {
+    if (initialSubTab) {
+      setSubTab(initialSubTab);
+      onClearInitialSubTab?.();
+    }
+  }, [initialSubTab, onClearInitialSubTab]);
 
   // ── Filtered Lists ─────────────────────────────────────────────────────────
   const filteredSizes = useMemo(() => {
@@ -875,35 +893,43 @@ export function SettingsPanel({
   return (
     <main className="max-w-[1600px] w-full mx-auto p-4 space-y-4">
       <Tabs value={subTab} onValueChange={(v) => setSubTab(v as typeof subTab)} className="space-y-4">
-        <TabsList className="bg-white border border-slate-200 p-1 h-11 flex-wrap">
-          <TabsTrigger value="sizes" className="text-xs px-3.5 gap-1.5">
+        <TabsList className="bg-white border border-slate-200 p-1 h-auto min-h-11 w-fit max-w-full flex-wrap justify-start gap-1">
+          <TabsTrigger value="sizes" className="flex-none h-9 text-xs px-2.5 gap-1.5">
             <Ruler className="h-4 w-4 text-[#007a87]" />
             <span>1. ขนาดป้ายและระยะขอบ</span>
             <Badge variant="secondary" className="h-4 px-1.5 text-[10px] bg-slate-100 text-slate-700">
               {allLabelSizes.length}
             </Badge>
           </TabsTrigger>
-          <TabsTrigger value="preprints" className="text-xs px-3.5 gap-1.5">
+          <TabsTrigger value="preprints" className="flex-none h-9 text-xs px-2.5 gap-1.5">
             <FileText className="h-4 w-4 text-amber-600" />
             <span>2. คลังฟอร์ม Pre-Print</span>
             <Badge variant="secondary" className="h-4 px-1.5 text-[10px] bg-amber-100 text-amber-800">
               {preprints.length}
             </Badge>
           </TabsTrigger>
-          <TabsTrigger value="printers" className="text-xs px-3.5 gap-1.5">
+          <TabsTrigger value="printers" className="flex-none h-9 text-xs px-2.5 gap-1.5">
             <Printer className="h-4 w-4 text-[#007a87]" />
             <span>3. เครื่องพิมพ์และถาดตามป้าย</span>
           </TabsTrigger>
-          <TabsTrigger value="devices" className="text-xs px-3.5 gap-1.5">
+          <TabsTrigger value="devices" className="flex-none h-9 text-xs px-2.5 gap-1.5">
             <Network className="h-4 w-4 text-[#007a87]" />
             <span>4. เครื่องพิมพ์ LAN &amp; รายชื่อเครื่อง</span>
             <Badge variant="secondary" className="h-4 px-1.5 text-[10px] bg-slate-100 text-slate-700">
               {printers.length}
             </Badge>
           </TabsTrigger>
-          <TabsTrigger value="system" className="text-xs px-3.5 gap-1.5">
+          <TabsTrigger value="system" className="flex-none h-9 text-xs px-2.5 gap-1.5">
             <Sliders className="h-4 w-4 text-[#007a87]" />
             <span>5. ค่าเริ่มต้นระบบ</span>
+          </TabsTrigger>
+          <TabsTrigger value="autoprint" className="flex-none h-9 text-xs px-2.5 gap-1.5">
+            <Clock className="h-4 w-4 text-emerald-600" />
+            <span>6. พิมพ์อัตโนมัติ</span>
+          </TabsTrigger>
+          <TabsTrigger value="autoprint_history" className="flex-none h-9 text-xs px-2.5 gap-1.5">
+            <History className="h-4 w-4 text-sky-600" />
+            <span>7. ประวัติพิมพ์อัตโนมัติ</span>
           </TabsTrigger>
         </TabsList>
 
@@ -1702,6 +1728,29 @@ export function SettingsPanel({
             </CardContent>
           </Card>
 
+        </TabsContent>
+
+        {/* ══════════════════ TAB 6: AUTO-PRINT @ 04:00 AM ══════════════════ */}
+        <TabsContent value="autoprint" className="space-y-4 mt-0">
+          <AutoScheduleSettings
+            allLabelSizes={allLabelSizes}
+            sysOptions={sysOptions}
+            branches={branches}
+            windowsPrinters={windowsPrinters}
+            printers={printers}
+            driverMappings={driverMappings}
+            driverServerCode={driverServerCode}
+            formatTrayLabel={formatTrayLabel}
+            onRefreshAll={onRefreshAll}
+          />
+        </TabsContent>
+
+        {/* ══════════════════ TAB 7: AUTO-PRINT HISTORY ══════════════════ */}
+        <TabsContent value="autoprint_history" className="space-y-4 mt-0">
+          <AutoScheduleHistory
+            onLoadManualRows={onLoadManualRows}
+            onOpenAutoPrintTab={() => setSubTab('autoprint')}
+          />
         </TabsContent>
       </Tabs>
 

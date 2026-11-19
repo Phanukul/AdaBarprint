@@ -1,0 +1,1688 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>เอกสารออกแบบระบบพิมพ์ป้ายอัตโนมัติ (AdaBarprint Auto-Print @ 04:00 AM) — ฉบับอ่านง่าย + ER Diagram &amp; SDLC ครบ</title>
+  <style>
+    :root {
+      --teal: #007a87;
+      --teal-dark: #005b66;
+      --teal-soft: #e6f4f6;
+      --slate-900: #0f172a;
+      --slate-800: #1e293b;
+      --slate-700: #334155;
+      --slate-600: #475569;
+      --slate-200: #e2e8f0;
+      --slate-100: #f1f5f9;
+      --slate-50: #f8fafc;
+      --amber: #d97706;
+      --amber-soft: #fffbeb;
+      --red: #dc2626;
+      --red-soft: #fef2f2;
+      --green: #059669;
+      --green-soft: #ecfdf5;
+      --blue: #0284c7;
+      --blue-soft: #eff6ff;
+      --purple: #7c3aed;
+      --purple-soft: #f5f3ff;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: "Sarabun", "Noto Sans Thai", "Segoe UI", Tahoma, sans-serif;
+      color: var(--slate-800);
+      background: var(--slate-50);
+      line-height: 1.65;
+      font-size: 14.5px;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      background: #131c27;
+      color: #fff;
+      border-bottom: 3px solid var(--teal);
+      padding: 12px 24px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.22);
+    }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand-badge {
+      background: var(--teal);
+      color: #fff;
+      font-weight: 700;
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 13px;
+    }
+    .brand h1 { margin: 0; font-size: 17.5px; font-weight: 700; }
+    .brand p { margin: 0; font-size: 12px; color: #cbd5e1; }
+    .top-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .doc-meta-pill {
+      font-size: 12px;
+      color: #cbd5e1;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.16);
+      padding: 5px 10px;
+      border-radius: 6px;
+    }
+    .btn-action {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      border: 1px solid var(--teal);
+      color: #fff;
+      background: var(--teal);
+    }
+    .btn-action:hover { opacity: 0.92; }
+
+    .layout {
+      max-width: 1480px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 285px 1fr;
+      gap: 24px;
+      padding: 24px;
+      align-items: start;
+    }
+
+    .toc {
+      position: sticky;
+      top: 84px;
+      background: #fff;
+      border: 1px solid var(--slate-200);
+      border-radius: 12px;
+      padding: 16px;
+      max-height: calc(100vh - 104px);
+      overflow-y: auto;
+      box-shadow: 0 1px 4px rgba(15, 23, 42, 0.05);
+    }
+    .toc h2 {
+      margin: 0 0 10px 0;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--teal-dark);
+      border-bottom: 1px solid var(--slate-200);
+      padding-bottom: 8px;
+    }
+    .toc a {
+      display: block;
+      padding: 5px 8px;
+      color: var(--slate-700);
+      text-decoration: none;
+      border-radius: 6px;
+      font-size: 12.8px;
+    }
+    .toc a:hover { background: var(--teal-soft); color: var(--teal-dark); }
+    .toc .sub { padding-left: 18px; font-size: 12px; color: var(--slate-600); }
+
+    main { min-width: 0; }
+
+    .card {
+      background: #fff;
+      border: 1px solid var(--slate-200);
+      border-radius: 14px;
+      padding: 24px 28px;
+      margin-bottom: 22px;
+      box-shadow: 0 1px 4px rgba(15, 23, 42, 0.04);
+      scroll-margin-top: 84px;
+    }
+    .card h2 {
+      margin: 0 0 14px 0;
+      font-size: 20px;
+      color: var(--slate-900);
+      border-bottom: 2px solid var(--teal-soft);
+      padding-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .card h3 {
+      margin: 22px 0 10px 0;
+      font-size: 16px;
+      color: var(--teal-dark);
+      scroll-margin-top: 84px;
+      border-left: 4px solid var(--teal);
+      padding-left: 10px;
+    }
+    .card h4 { margin: 14px 0 8px 0; font-size: 14.5px; color: var(--slate-900); }
+
+    .tag {
+      display: inline-block;
+      padding: 2px 9px;
+      border-radius: 999px;
+      font-size: 11.5px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .tag.ro { background: var(--blue-soft); color: var(--blue); border: 1px solid #bfdbfe; }
+    .tag.rw { background: var(--green-soft); color: var(--green); border: 1px solid #a7f3d0; }
+    .tag.api { background: var(--purple-soft); color: var(--purple); border: 1px solid #ddd6fe; }
+    .tag.crit { background: var(--red-soft); color: var(--red); border: 1px solid #fecaca; }
+    .tag.warn { background: var(--amber-soft); color: #b45309; border: 1px solid #fde68a; }
+    .tag.new { background: #ecfeff; color: #0e7490; border: 1px solid #a5f3fc; }
+    .tag.num { background: var(--teal); color: #fff; font-size: 12.5px; padding: 3px 10px; }
+
+    .step-strip {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+      gap: 12px;
+      margin: 14px 0;
+    }
+    .step-box {
+      border: 1px solid var(--slate-200);
+      border-top: 4px solid var(--teal);
+      border-radius: 10px;
+      padding: 14px;
+      background: #fff;
+    }
+    .step-box .num-lbl {
+      font-size: 12px;
+      font-weight: 800;
+      color: var(--teal);
+      text-transform: uppercase;
+    }
+    .step-box .title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--slate-900);
+      margin: 2px 0 6px 0;
+    }
+    .step-box p { margin: 0; font-size: 12.8px; color: var(--slate-600); }
+
+    .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 14px; margin: 12px 0; }
+    .grid-4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin: 12px 0; }
+    .box {
+      border: 1px solid var(--slate-200);
+      background: var(--slate-50);
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .box h4 { margin: 0 0 8px 0; font-size: 14.5px; color: var(--slate-900); }
+    .case-card {
+      border: 1px solid var(--slate-200);
+      border-radius: 10px;
+      padding: 14px;
+      background: #fff;
+    }
+    .case-card.blue { border-left: 4px solid var(--blue); background: #f8fbff; }
+    .case-card.red { border-left: 4px solid var(--red); background: #fffafa; }
+    .case-card.amber { border-left: 4px solid var(--amber); background: #fffdf5; }
+    .case-card.green { border-left: 4px solid var(--green); background: #f7fefb; }
+    .case-card h4 { margin: 0 0 6px 0; font-size: 14px; }
+    .case-card p { margin: 0; font-size: 12.8px; color: var(--slate-700); }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0;
+      font-size: 12.8px;
+    }
+    th, td {
+      border: 1px solid var(--slate-200);
+      padding: 7px 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #263342; color: #fff; font-weight: 600; }
+    tr:nth-child(even) td { background: var(--slate-50); }
+
+    code {
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12px;
+      background: var(--slate-100);
+      border: 1px solid var(--slate-200);
+      padding: 1px 5px;
+      border-radius: 4px;
+      color: var(--teal-dark);
+      word-break: break-word;
+    }
+    pre {
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 14px 16px;
+      border-radius: 10px;
+      overflow-x: auto;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12px;
+      line-height: 1.55;
+      margin: 10px 0;
+    }
+
+    .flow-wrap {
+      overflow-x: auto;
+      background: var(--slate-50);
+      border: 1px solid var(--slate-200);
+      border-radius: 10px;
+      padding: 16px;
+      margin: 14px 0;
+    }
+    .flow-wrap svg {
+      display: block;
+      max-width: 100%;
+      height: auto;
+      margin: 0 auto;
+    }
+    .flow-caption {
+      font-size: 12.5px;
+      color: var(--slate-600);
+      margin-top: 8px;
+      text-align: center;
+      font-weight: 600;
+    }
+
+    .callout {
+      border-radius: 10px;
+      padding: 12px 16px;
+      margin: 12px 0;
+      border-left: 4px solid var(--teal);
+      background: var(--teal-soft);
+      font-size: 13.5px;
+    }
+    .callout.amber { border-left-color: var(--amber); background: var(--amber-soft); color: #78350f; }
+    .callout.green { border-left-color: var(--green); background: var(--green-soft); color: #064e3b; }
+
+    .phase-badge {
+      display: inline-flex;
+      align-items: center;
+      font-weight: 700;
+      font-size: 12px;
+      padding: 3px 10px;
+      border-radius: 6px;
+      background: #1e293b;
+      color: #fff;
+    }
+
+    /* Quick-Glance Executive UX Components */
+    .tldr-banner {
+      background: linear-gradient(135deg, #0f172a 0%, #005b66 100%);
+      color: #fff;
+      border-radius: 14px;
+      padding: 20px 24px;
+      margin-bottom: 22px;
+      box-shadow: 0 4px 14px rgba(0, 91, 102, 0.18);
+    }
+    .tldr-banner h2 {
+      margin: 0 0 12px 0;
+      font-size: 18px;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .tldr-pill {
+      background: #14b8a6;
+      color: #0f172a;
+      font-size: 11.5px;
+      font-weight: 800;
+      padding: 3px 10px;
+      border-radius: 999px;
+    }
+    .tldr-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+    }
+    .tldr-item {
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      border-radius: 10px;
+      padding: 12px 14px;
+    }
+    .tldr-item strong {
+      display: block;
+      font-size: 13.5px;
+      color: #99f6e4;
+      margin-bottom: 4px;
+    }
+    .tldr-item span {
+      font-size: 12.8px;
+      color: #f1f5f9;
+      line-height: 1.5;
+      display: block;
+    }
+    .plain-hint {
+      background: #f0fdfa;
+      border: 1px solid #99f6e4;
+      border-radius: 8px;
+      padding: 8px 14px;
+      margin: 8px 0 10px 0;
+      font-size: 13px;
+      color: #115e59;
+    }
+    .plain-hint strong { color: #0f766e; }
+    .mini-visual {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 10px;
+      margin: 12px 0;
+    }
+    .mv-step {
+      border-radius: 10px;
+      padding: 11px 13px;
+      border: 1px solid var(--slate-200);
+      background: #fff;
+      font-size: 12.6px;
+    }
+    .mv-step.ok { border-left: 4px solid var(--green); background: #f0fdf4; }
+    .mv-step.err { border-left: 4px solid var(--red); background: #fef2f2; }
+    .mv-step.hold { border-left: 4px solid var(--amber); background: #fffbeb; }
+    .mv-step.fix { border-left: 4px solid var(--blue); background: #eff6ff; }
+    .mv-step .mv-title { font-weight: 700; font-size: 13.2px; margin-bottom: 3px; color: var(--slate-900); }
+    details.dev-details {
+      margin-top: 12px;
+      border: 1px solid var(--slate-200);
+      border-radius: 10px;
+      background: var(--slate-50);
+      padding: 10px 14px;
+    }
+    details.dev-details summary {
+      cursor: pointer;
+      font-weight: 700;
+      font-size: 13px;
+      color: var(--teal-dark);
+      user-select: none;
+    }
+    details.dev-details[open] summary { margin-bottom: 8px; }
+
+    ul, ol { padding-left: 20px; margin: 8px 0; }
+    li { margin-bottom: 5px; }
+
+    @media (max-width: 980px) {
+      .layout { grid-template-columns: 1fr; padding: 14px; }
+      .toc { position: static; max-height: none; }
+    }
+    @media print {
+      .topbar, .toc, .top-actions { display: none !important; }
+      .layout { display: block; padding: 0; }
+      .card { box-shadow: none; break-inside: avoid; border: 1px solid #cbd5e1; margin-bottom: 14px; }
+    }
+  </style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-badge">AUTO-PRINT @ 04:00</div>
+    <div>
+      <h1>สรุปการออกแบบระบบพิมพ์ป้ายอัตโนมัติ — AdaBarprint + API2PSMaster (ฉบับอ่านง่าย + ER Diagram + Full SDLC)</h1>
+      <p>ทำครบใน AdaBarprint ตัวเดียว 100% &bull; เครื่องเปิดตลอด 24/7 &bull; ใช้ db/AdaAccD.db ก้อนเดียว (WAL) &bull; ตั้งค่าเองใน UI</p>
+    </div>
+  </div>
+  <div class="top-actions">
+    <span class="doc-meta-pill">Architecture &amp; SDLC Spec (ยังไม่แก้โค้ด)</span>
+    <button class="btn-action" onclick="window.print()">พิมพ์ / Save PDF</button>
+  </div>
+</header>
+
+<div class="layout">
+  <nav class="toc">
+    <h2>สารบัญ (เรียงตามความเข้าใจ 1 &rarr; 7)</h2>
+    <a href="#sec-tldr"><strong>0. สรุปใน 30 วินาที (อ่านกล่องนี้เข้าใจทันที)</strong></a>
+    <a href="#sec-overview"><strong>1. ภาพรวมแบบเข้าใจง่าย (สำหรับ PM)</strong></a>
+    <a class="sub" href="#ov-diff">1.1 ก่อนแก้ VS หลังแก้ (ต้องปรับอะไรบ้าง)</a>
+    <a class="sub" href="#ov-scope">1.2 ขอบเขตงาน (In-Scope / Out-of-Scope)</a>
+    <a href="#sec-flows"><strong>2. Flow Diagrams การทำงานทั้งหมด</strong></a>
+    <a class="sub" href="#diag-bigpic">2.1 แผนภาพสถาปัตยกรรมภาพรวม</a>
+    <a class="sub" href="#diag-sync">2.2 Flow ดึงข้อมูลตรงจาก API2PSMaster</a>
+    <a class="sub" href="#diag-timeline">2.3 Timeline รอบ 04:00 บนเครื่อง 24/7</a>
+    <a class="sub" href="#diag-decision">2.4 Flowchart ตัดสินใจครบวงจร (มีจุดแยก ใช่/ไม่)</a>
+    <a class="sub" href="#ov-4cases">2.5 ตัวอย่าง 4 เคสที่พิมพ์ตอนตี 4</a>
+    <a class="sub" href="#diag-swimlane">2.6 Swimlane Diagram (แยกบทบาทใครทำอะไร)</a>
+    <a class="sub" href="#ov-partial">2.7 การเก็บ Log &amp; กด Manual เมื่อพิมพ์ค้าง (20 ได้ 5)</a>
+    <a href="#sec-er"><strong>3. ER Diagram &amp; ตารางฐานข้อมูล (AdaAccD.db)</strong></a>
+    <a class="sub" href="#er-part1">3.1 ER Diagram 1: สินค้า ราคา โปรโมชัน &amp; ป้าย</a>
+    <a class="sub" href="#er-part2">3.2 ER Diagram 2: ระบบตั้งเวลา คิว &amp; ประวัติพิมพ์</a>
+    <a class="sub" href="#db-dict">3.3 สรุปตารางทั้งหมด + DDL ตารางใหม่ 5 ตาราง</a>
+    <a href="#sec-srs"><strong>4. ข้อกำหนดระบบ (FR / NFR) &amp; ความเสี่ยง</strong></a>
+    <a href="#sec-code"><strong>5. โครงสร้างโปรแกรม, API &amp; สิทธิ์ User ตั้งค่า</strong></a>
+    <a href="#sec-test"><strong>6. แผนทดสอบ (Test Cases TC-01..10 &amp; UAT)</strong></a>
+    <a href="#sec-deploy"><strong>7. แผนพัฒนา, Deploy 24/7, Rollback &amp; แก้ปัญหา</strong></a>
+  </nav>
+
+  <main>
+
+    <!-- 30-SECOND EXECUTIVE SNAPSHOT -->
+    <section class="tldr-banner" id="sec-tldr">
+      <h2><span class="tldr-pill">อ่าน 30 วินาทีเข้าใจเลย</span> ภาพใหญ่ทั้งระบบแบบภาษาคน (ไม่ต้องรู้ศัพท์เทคนิคก็อ่านรู้เรื่อง)</h2>
+      <div class="tldr-grid">
+        <div class="tldr-item">
+          <strong>1. แก้โปรแกรมตรงไหน?</strong>
+          <span>แก้แค่ใน <code>AdaBarprint</code> ตัวเดียว + ฐานข้อมูลเดียว (<code>AdaAccD.db</code>) ไม่ต้องยุ่งกับเครื่อง POS ขายหน้าร้านหรือ Gateway</span>
+        </div>
+        <div class="tldr-item">
+          <strong>2. ตี 4 ระบบทำอะไรบ้าง?</strong>
+          <span>ดึงราคา/โปรฯ ใหม่ล่วงหน้า &rarr; คัดเฉพาะสินค้าที่เปลี่ยน 4 แบบ &rarr; ใส่ลงแม่แบบป้ายที่ User ตั้งไว้ &rarr; พิมพ์แยกถาดปกติ/โปรฯ</span>
+        </div>
+        <div class="tldr-item">
+          <strong>3. ถ้าเน็ตล่ม / ไฟดับ / เครื่องพิมพ์ดับ?</strong>
+          <span>เน็ตล่ม = <b>ไม่พิมพ์ราคาเก่า</b> | ไฟดับ = บูตกลับมาพิมพ์ชดเชย | เครื่องพิมพ์ดับใบที่ 6 = <b>จำว่า 1–5 ออกแล้ว</b> เหลือซ่อมแค่ 6–20</span>
+        </div>
+        <div class="tldr-item">
+          <strong>4. คนหน้าร้านต้องทำอะไร?</strong>
+          <span>ตั้งเวลา + ผูกถาดครั้งเดียวในหน้า Settings; ตอนเช้าเปิดร้านหยิบปึกป้าย + ใบสรุป 1 แผ่นเสียบเชลฟ์ได้เลย</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- 1. EASY EXECUTIVE OVERVIEW -->
+    <section class="card" id="sec-overview">
+      <h2><span class="tag num">ส่วนที่ 1</span> สรุปภาพรวมแบบเข้าใจง่าย (ทำไมต้องปรับ &amp; ทำงานยังไงใน 4 ขั้นตอน)</h2>
+      <p>
+        โจทย์คือ <strong>"ตั้งเวลาให้เครื่องที่เปิดทิ้งไว้ตลอด 24/7 สั่งพิมพ์ป้ายราคาอัตโนมัติตอนตี 4 โดยดึงข้อมูลสินค้า/ราคา/โปรโมชันล่าสุดจาก <code>API2PSMaster</code> เพื่อเปิดร้านมาตอนเช้าพนักงานหยิบป้ายไปเสียบขายได้ทันที"</strong> โดยทำทุกอย่างจบในโปรแกรม <strong><code>AdaBarprint</code> ตัวเดียว 100%</strong> (ไม่ต้องพึ่ง <code>ada-gateway</code> และใช้ฐานข้อมูล <code>db/AdaAccD.db</code> ไฟล์เดียว)
+      </p>
+
+      <div class="step-strip">
+        <div class="step-box">
+          <div class="num-lbl">ขั้นที่ 1 • ตั้งค่าครั้งเดียว</div>
+          <div class="title">User ตั้งเวลาในหน้า UI</div>
+          <p>เปิด Auto-Print, เลือกเวลา (เช่น <code>04:00 น.</code>), เลือกวัน, เลือกว่าจะพิมพ์เคสไหนบ้าง และผูกเครื่องพิมพ์/ถาดปกติ-โปรฯ</p>
+        </div>
+        <div class="step-box">
+          <div class="num-lbl">ขั้นที่ 2 • 03:15–04:00 น.</div>
+          <div class="title">ดึงข้อมูลใหม่จาก API2PSMaster</div>
+          <p>โปรแกรมหลังบ้าน (Rust Agent) ดูดราคา/สินค้า/โปรฯ ล่าสุดล่วงหน้า (Pre-Sync) และเช็กซ้ำตอน 04:00 น. (ไม่ผ่าน = ห้ามพิมพ์ของเก่า)</p>
+        </div>
+        <div class="step-box">
+          <div class="num-lbl">ขั้นที่ 3 • 04:02 น.</div>
+          <div class="title">คัดตัวที่เปลี่ยน + ประกอบข้อมูลลงแม่แบบ</div>
+          <p>คัดเฉพาะ 4 เคส, กันซ้ำด้วย Hash, แล้ว<strong>ดึงแม่แบบที่ User ตั้งไว้ (<code>TCNMLabelTmpl</code>) มาใส่ราคาใหม่</strong> แปลงเป็นไฟล์พร้อมพิมพ์ใน Backend ไม่ต้องเปิด Browser</p>
+        </div>
+        <div class="step-box">
+          <div class="num-lbl">ขั้นที่ 4 • 04:06 &rarr; เปิดร้าน</div>
+          <div class="title">พิมพ์แยกถาด + สรุปตอนเช้า</div>
+          <p>ปลุก Printer พิมพ์ป้ายปกติออกถาด 1, ป้ายโปรฯ ออกถาด 2 พร้อมใบปะหน้า 1 แผ่น ตอนเช้าเปิดจอดูผลและกดซ่อมใบที่ตกได้ทันที</p>
+        </div>
+      </div>
+
+      <h3 id="ov-diff">1.1 เทียบให้เห็นชัด: ระบบตอนนี้ VS ระบบ Auto-Print ที่ต้องปรับเพิ่ม</h3>
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 190px;">หัวข้อ</th>
+            <th>ระบบ <code>AdaBarprint</code> ปัจจุบัน (Manual)</th>
+            <th>จุดต้องปรับเพิ่มเพื่อให้ Auto-Print ตี 4 ทำงานได้จริง</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>1. การดึงข้อมูลใหม่</strong></td>
+            <td>เปิดอ่านไฟล์ <code>db/AdaAccD.db</code> อย่างเดียว <strong>ไม่มีตัวดึง API</strong></td>
+            <td>เพิ่มโมดูล <code>sync_master.rs</code> ให้ยิงตรง <code>API2PSMaster V6</code> (เฉพาะ ~12 ตารางที่ใช้พิมพ์ป้าย) พร้อม Retry ถ้าเน็ตหลุด</td>
+          </tr>
+          <tr>
+            <td><strong>2. การประกอบข้อมูลเป็นไฟล์ส่งพิมพ์</strong></td>
+            <td>ต้องเปิดหน้าจอเว็บ (React DOM) ดึงแม่แบบ+ข้อมูลมาแคปภาพหน้าจอส่งพิมพ์ &mdash; <strong>ถ้าปิดแท็บ/ติด Lock Screen ตอนตี 4 จะส่งพิมพ์ไม่ได้</strong></td>
+            <td>เพิ่มตัวสร้างไฟล์พิมพ์ฝั่งหลังบ้าน (<strong>Headless Print Renderer</strong> ใน Rust) ดึงแม่แบบที่ User ออกแบบไว้ใน <code>TCNMLabelTmpl</code> มาสวมราคาใหม่ &rarr; แปลงเป็น PNG/ZPL โดยตรงไม่ต้องเปิด UI</td>
+          </tr>
+          <tr>
+            <td><strong>3. การอ่านโปรโมชัน V6</strong></td>
+            <td>คิวรีจากตาราง POS5 เก่า (<code>TCNTPdtPmtHD</code>) แต่ <code>API2PSMaster V6</code> ส่งลงตาราง <code>TCNTPmtHD</code></td>
+            <td>แก้ตัวอ่านโปรโมชันให้อ่านจากตาราง <strong>V6 (<code>TCNTPmtHD/GrpDT/Cond</code>)</strong> ได้ด้วย ไม่อย่างนั้นซิงค์ V6 แล้วป้ายโปรฯ ไม่ออก</td>
+          </tr>
+          <tr>
+            <td><strong>4. การคัดเลือกสินค้า</strong></td>
+            <td>ดึงทีละ max 500 ตัว ไม่มีระบบเช็กตัวที่เปลี่ยนอัตโนมัติ และไม่มีเช็กโปรฯ หมดอายุ</td>
+            <td>สร้างตัวคัดกรอง <strong>4 เคสเปลี่ยนวันนี้</strong> (ปลดเพดาน 500) + เก็บ Hash กันพิมพ์ซ้ำทั้งร้านหากรีสตาร์ต</td>
+          </tr>
+          <tr>
+            <td><strong>5. การรันตลอด 24/7</strong></td>
+            <td>เป็นแอปเปิด-ปิดมือ และเปิด SQLite โหมด <code>Delete</code> อาจชน Lock ถ้ารันพร้อม Sync</td>
+            <td>เพิ่ม Background Service รันอัตโนมัติเมื่อเปิดเครื่อง, เปิด SQLite <strong>WAL Mode</strong>, ป้องกัน Sleep/Printer หลับ และหมุน Log กันดิสก์เต็ม</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3 id="ov-scope">1.2 ขอบเขตงาน (ตกลงกับ PM เพื่อกันงานบานปลาย)</h3>
+      <div class="grid-2">
+        <div class="box">
+          <h4><span class="tag rw">In-Scope (ทำในเฟสนี้)</span></h4>
+          <ul>
+            <li>ทำทั้งหมดใน <code>AdaBarprint</code> ตัวเดียว ยิงตรง <code>API2PSMaster V6</code></li>
+            <li>ใช้ <code>db/AdaAccD.db</code> ไฟล์เดียว (เปิด WAL Mode เก็บทั้งข้อมูล Sync + ตารางป้าย + ตารางตั้งเวลา)</li>
+            <li>รองรับเครื่องเปิด 24/7 (Pre-Sync กระจายเวลา + Auto-Print + Auto-Recover หลังไฟดับ/Reboot)</li>
+            <li>User ตั้งเวลา/กติกา/ถาด/Dry-Run เองผ่านหน้าจอ UI (และ Admin ตั้ง URL/Key ในแท็บขั้นสูง ไม่ต้องแก้ไฟล์ <code>.env</code>)</li>
+          </ul>
+        </div>
+        <div class="box">
+          <h4><span class="tag warn">Out-of-Scope (ไม่ทำในเฟสนี้)</span></h4>
+          <ul>
+            <li>ไม่แก้ระบบ <code>AdaPos6.0StoreFront</code>, <code>ada-gateway</code>, หรือ Backend <code>API2PSMaster</code></li>
+            <li>ไม่ดึงตารางขาย/สต็อก/CRM ของ POS (ดึงเฉพาะ 10–12 ตารางสินค้า ราคา โปรโมชัน และสาขา)</li>
+            <li>ยังไม่ทำแจ้งเตือนส่งออก LINE OA / SMS / Email (ดูผลบน Dashboard + Cover Sheet แทน)</li>
+            <li>ยังไม่รวมป้ายราคาดิจิทัล E-Ink (ESL)</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- 2. FLOW DIAGRAMS -->
+    <section class="card" id="sec-flows">
+      <h2><span class="tag num">ส่วนที่ 2</span> แผนภาพการทำงานทั้งหมด (Flow Diagrams ดูแล้วเห็นภาพรวมทันที)</h2>
+
+      <!-- Diagram 1: Big Picture -->
+      <h3 id="diag-bigpic">2.1 แผนภาพที่ 1: ภาพรวมระบบทั้งหมด (Big Picture Architecture)</h3>
+      <div class="plain-hint"><strong>สรุปภาพนี้ใน 5 วิ:</strong> ซ้ายคือหน้าจอตั้งค่าและดูผลของร้าน &bull; กลางคือตัวทำงานอัตโนมัติตอนตี 4 (ทำงานแม้ไม่เปิดจอ) &bull; ขวาคือดึงข้อมูลส่วนกลางลง DB เดียวแล้วพิมพ์แยกถาดให้พนักงานตอนเช้า</div>
+      <div class="flow-wrap">
+        <svg viewBox="0 0 1100 340" width="1100" height="340" style="min-width:840px;" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <marker id="ov-arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 1 L10 5 L0 9 z" fill="#007a87"/>
+            </marker>
+            <marker id="ov-arr-pur" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 1 L10 5 L0 9 z" fill="#7c3aed"/>
+            </marker>
+            <marker id="ov-arr-grn" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 1 L10 5 L0 9 z" fill="#059669"/>
+            </marker>
+          </defs>
+
+          <!-- Col 1: ร้านค้าตั้งค่า (ซ้าย) -->
+          <rect x="14" y="16" width="215" height="308" rx="12" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+          <rect x="14" y="16" width="215" height="34" rx="12" fill="#1e293b"/>
+          <text x="121" y="38" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">1. หน้าจอร้านค้า (ตั้งครั้งเดียว)</text>
+
+          <rect x="26" y="64" width="191" height="92" rx="8" fill="#fff" stroke="#007a87" stroke-width="1.5"/>
+          <text x="121" y="84" text-anchor="middle" fill="#005b66" font-size="12" font-weight="700">User ตั้งเวลาพิมพ์</text>
+          <text x="121" y="102" text-anchor="middle" fill="#334155" font-size="11">&bull; ตั้งเวลา (เช่น 04:00 น.)</text>
+          <text x="121" y="118" text-anchor="middle" fill="#334155" font-size="11">&bull; เลือก 4 เคส + ขนาด/ถาด</text>
+          <text x="121" y="135" text-anchor="middle" fill="#059669" font-size="10.5">&bull; กด Dry-Run ทดลองก่อนได้</text>
+
+          <rect x="26" y="168" width="191" height="58" rx="8" fill="#fff" stroke="#7c3aed" stroke-width="1.5"/>
+          <text x="121" y="188" text-anchor="middle" fill="#5b21b6" font-size="11.5" font-weight="700">IT Admin (PIN Lock)</text>
+          <text x="121" y="206" text-anchor="middle" fill="#475569" font-size="10.5">ใส่ API URL, Key, รหัสสาขา</text>
+
+          <rect x="26" y="238" width="191" height="72" rx="8" fill="#eff6ff" stroke="#0284c7" stroke-width="1.5"/>
+          <text x="121" y="258" text-anchor="middle" fill="#0369a1" font-size="11.5" font-weight="700">หน้าจอเช้า (ดูผล &amp; ซ่อม)</text>
+          <text x="121" y="276" text-anchor="middle" fill="#334155" font-size="10.5">Auto-Refresh ผลตี 4</text>
+          <text x="121" y="294" text-anchor="middle" fill="#dc2626" font-size="10.5" font-weight="700">[Reprint ใบที่ค้าง / ส่ง Manual]</text>
+
+          <!-- Col 2: ส่วนกลาง &amp; DB เดียว -->
+          <rect x="265" y="16" width="235" height="308" rx="12" fill="#f5f3ff" stroke="#ddd6fe" stroke-width="1.5"/>
+          <rect x="265" y="16" width="235" height="34" rx="12" fill="#5b21b6"/>
+          <text x="382" y="38" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">2. ส่วนกลาง &amp; ฐานข้อมูลเดียว</text>
+
+          <rect x="280" y="64" width="205" height="92" rx="8" fill="#fff" stroke="#7c3aed" stroke-width="1.5"/>
+          <text x="382" y="84" text-anchor="middle" fill="#5b21b6" font-size="12" font-weight="700">Server ส่วนกลาง (HQ V6)</text>
+          <text x="382" y="102" text-anchor="middle" fill="#334155" font-size="11">API2PSMaster (HTTPS)</text>
+          <text x="382" y="119" text-anchor="middle" fill="#475569" font-size="10.5">ส่งสินค้า ราคา โปรฯ ล่าสุด ~12 ตาราง</text>
+          <text x="382" y="137" text-anchor="middle" fill="#5b21b6" font-size="10.5">ไม่ต้องใช้ Gateway / RabbitMQ</text>
+
+          <rect x="280" y="176" width="205" height="134" rx="8" fill="#eff6ff" stroke="#0284c7" stroke-width="1.8"/>
+          <text x="382" y="198" text-anchor="middle" fill="#0369a1" font-size="12.5" font-weight="700">db/AdaAccD.db (ไฟล์เดียว)</text>
+          <text x="382" y="216" text-anchor="middle" fill="#0284c7" font-size="10.5" font-weight="700">เปิด WAL Mode อ่าน-เขียนไม่ชนกัน</text>
+          <text x="382" y="236" text-anchor="middle" fill="#334155" font-size="10.8">&bull; ข้อมูลสินค้า / ราคา / โปรฯ V6</text>
+          <text x="382" y="254" text-anchor="middle" fill="#334155" font-size="10.8">&bull; แบบป้ายที่ร้านออกแบบไว้เดิม</text>
+          <text x="382" y="272" text-anchor="middle" fill="#065f46" font-size="10.8">&bull; 5 ตารางใหม่: เวลา, คิว, กันซ้ำ</text>
+          <text x="382" y="290" text-anchor="middle" fill="#dc2626" font-size="10.5">&bull; Log จำได้ว่าใบไหนออกแล้ว/ค้าง</text>
+
+          <!-- Col 3: โปรแกรมหลังบ้านตี 4 -->
+          <rect x="536" y="16" width="275" height="308" rx="12" fill="#e6f4f6" stroke="#007a87" stroke-width="1.8"/>
+          <rect x="536" y="16" width="275" height="34" rx="12" fill="#007a87"/>
+          <text x="673" y="38" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">3. ตัวทำงานตี 4 (24/7 Rust Agent)</text>
+
+          <rect x="552" y="62" width="243" height="52" rx="7" fill="#fff" stroke="#007a87"/>
+          <text x="673" y="81" text-anchor="middle" fill="#005b66" font-size="11.5" font-weight="700">ขั้น A: ดูดข้อมูลใหม่ &amp; เช็กซ้ำ 04:00</text>
+          <text x="673" y="99" text-anchor="middle" fill="#334155" font-size="10.5">03:15 ล่วงหน้า + 04:00 (พัง 3x = ห้ามพิมพ์เก่า)</text>
+
+          <rect x="552" y="124" width="243" height="52" rx="7" fill="#fff" stroke="#d97706"/>
+          <text x="673" y="143" text-anchor="middle" fill="#92400e" font-size="11.5" font-weight="700">ขั้น B: คัด 4 เคส + กรองตัวซ้ำออก</text>
+          <text x="673" y="161" text-anchor="middle" fill="#334155" font-size="10.5">ราคาใหม่/โปรเริ่ม/โปรหมดคืนปกติ/ของใหม่</text>
+
+          <rect x="552" y="186" width="243" height="52" rx="7" fill="#fff" stroke="#7c3aed"/>
+          <text x="673" y="205" text-anchor="middle" fill="#5b21b6" font-size="11.5" font-weight="700">ขั้น C: ดึงแม่แบบเดิม + เติมราคาใหม่</text>
+          <text x="673" y="223" text-anchor="middle" fill="#334155" font-size="10.5">สร้างไฟล์ 300 DPI/ZPL + Cover (ไม่ต้องเปิดจอ)</text>
+
+          <rect x="552" y="248" width="243" height="56" rx="7" fill="#fffbeb" stroke="#d97706"/>
+          <text x="673" y="268" text-anchor="middle" fill="#92400e" font-size="11.5" font-weight="700">ขั้น D: ปลุก Printer &amp; ส่งทีละใบ/หน้า</text>
+          <text x="673" y="286" text-anchor="middle" fill="#334155" font-size="10.5">บันทึกผลทุกใบ &bull; ดับกลางคัน = หยุด &amp; ล้างคิว</text>
+
+          <!-- Col 4: เครื่องพิมพ์ &amp; เปิดร้าน -->
+          <rect x="846" y="16" width="238" height="308" rx="12" fill="#ecfdf5" stroke="#a7f3d0" stroke-width="1.5"/>
+          <rect x="846" y="16" width="238" height="34" rx="12" fill="#059669"/>
+          <text x="965" y="38" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">4. เครื่องพิมพ์ &amp; เปิดร้านเช้า</text>
+
+          <rect x="862" y="64" width="206" height="72" rx="8" fill="#fff" stroke="#059669" stroke-width="1.5"/>
+          <text x="965" y="84" text-anchor="middle" fill="#065f46" font-size="12" font-weight="700">เครื่อง / ถาดที่ 1 (ป้ายปกติ)</text>
+          <text x="965" y="102" text-anchor="middle" fill="#334155" font-size="11">ราคาใหม่ + สินค้าใหม่</text>
+          <text x="965" y="119" text-anchor="middle" fill="#334155" font-size="11">+ โปรฯ หมดอายุ (คืนป้ายขาว)</text>
+
+          <rect x="862" y="148" width="206" height="72" rx="8" fill="#fff" stroke="#dc2626" stroke-width="1.5"/>
+          <text x="965" y="168" text-anchor="middle" fill="#991b1b" font-size="12" font-weight="700">เครื่อง / ถาดที่ 2 (ป้ายโปรฯ)</text>
+          <text x="965" y="186" text-anchor="middle" fill="#334155" font-size="11">ป้ายสีแดง/SALE เริ่มวันนี้</text>
+          <text x="965" y="203" text-anchor="middle" fill="#0369a1" font-size="10.8">+ ใบปะหน้า Cover Sheet 1 แผ่น</text>
+
+          <rect x="862" y="232" width="206" height="78" rx="8" fill="#fff" stroke="#0284c7" stroke-width="1.5"/>
+          <text x="965" y="253" text-anchor="middle" fill="#0369a1" font-size="12" font-weight="700">พนักงานเปิดร้าน (07:00+)</text>
+          <text x="965" y="272" text-anchor="middle" fill="#334155" font-size="11">หยิบปึกป้ายเสียบเชลฟ์ทันที</text>
+          <text x="965" y="290" text-anchor="middle" fill="#059669" font-size="10.5" font-weight="700">ตรง POS 100% ตั้งแต่นาทีแรก</text>
+
+          <!-- Clean Non-Crossing Connectors -->
+          <path d="M217 110 L240 110 L240 245 L278 245" stroke="#007a87" stroke-width="1.8" fill="none" marker-end="url(#ov-arr)"/>
+          <path d="M217 197 L250 197 L250 265 L278 265" stroke="#7c3aed" stroke-width="1.5" fill="none" marker-end="url(#ov-arr-pur)"/>
+          <path d="M278 282 L219 282" stroke="#0284c7" stroke-width="1.8" stroke-dasharray="4 3" fill="none" marker-end="url(#ov-arr)"/>
+
+          <path d="M485 108 L516 108 L516 88 L550 88" stroke="#7c3aed" stroke-width="2" fill="none" marker-end="url(#ov-arr-pur)"/>
+          <path d="M550 212 L487 212" stroke="#0284c7" stroke-width="1.8" fill="none" marker-end="url(#ov-arr)"/>
+          <path d="M485 232 L516 232 L516 150 L550 150" stroke="#0284c7" stroke-width="1.8" fill="none" marker-end="url(#ov-arr)"/>
+          <path d="M550 276 L487 276" stroke="#0284c7" stroke-width="1.6" stroke-dasharray="4 3" fill="none" marker-end="url(#ov-arr)"/>
+
+          <!-- Vertical spine inside Col 3 -->
+          <path d="M673 114 L673 122" stroke="#007a87" stroke-width="1.8" fill="none" marker-end="url(#ov-arr)"/>
+          <path d="M673 176 L673 184" stroke="#007a87" stroke-width="1.8" fill="none" marker-end="url(#ov-arr)"/>
+          <path d="M673 238 L673 246" stroke="#007a87" stroke-width="1.8" fill="none" marker-end="url(#ov-arr)"/>
+
+          <!-- Clean Exit to Printers -->
+          <path d="M795 268 L826 268 L826 100 L860 100" stroke="#059669" stroke-width="2" fill="none" marker-end="url(#ov-arr-grn)"/>
+          <path d="M795 280 L834 280 L834 184 L860 184" stroke="#dc2626" stroke-width="2" fill="none" marker-end="url(#ov-arr)"/>
+          <path d="M965 220 L965 230" stroke="#059669" stroke-width="1.8" fill="none" marker-end="url(#ov-arr-grn)"/>
+        </svg>
+        <div class="flow-caption">แผนภาพที่ 1: ภาพรวม 4 เสาหลักเรียงซ้ายไปขวา (ตั้งค่า &rarr; ส่วนกลาง/DB เดียว &rarr; ระบบตี 4 &rarr; เครื่องพิมพ์/เปิดร้าน)</div>
+      </div>
+
+      <!-- Diagram 2: Sync -->
+      <h3 id="diag-sync">2.2 แผนภาพที่ 2: การดึงข้อมูลจาก <code>API2PSMaster V6</code> (ไม่ต้องใช้ RabbitMQ / Gateway)</h3>
+      <div class="callout">
+        <strong>ข้อเท็จจริงจากการตรวจโค้ด POS6:</strong> การดึงข้อมูล Master (สินค้า/ราคา/โปรโมชัน) ลง <code>AdaAccD.db</code> <strong>ใช้ HTTP REST API ของ <code>API2PSMaster V6</code> เท่านั้น ไม่ได้ดึงจาก RabbitMQ</strong> (RabbitMQ 13 คิวอยู่ฝั่ง Upload บิลขายเท่านั้น) ดังนั้น <code>AdaBarprint</code> จึงยิง HTTP ตรงหา <code>API2PSMaster</code> เองได้เลยเฉพาะ ~12 ตารางที่เกี่ยวกับป้าย
+      </div>
+      <div class="plain-hint"><strong>สรุปภาพนี้ใน 5 วิ:</strong> อ่านจากซ้ายไปขวา: ดึงเฉพาะข้อมูลสินค้า/ราคา/โปรฯ ใหม่ล่าสุดจากส่วนกลาง &rarr; เซฟลง <code>AdaAccD.db</code> (ไม่ทับแบบป้ายของร้าน) &rarr; จดเวลาซิงค์ไว้รอรอบพรุ่งนี้</div>
+      <div class="flow-wrap">
+        <svg viewBox="0 0 1100 250" width="1100" height="250" style="min-width:840px;" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <marker id="a1" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 1 L10 5 L0 9 z" fill="#007a87"/>
+            </marker>
+          </defs>
+          <rect x="15" y="14" width="1070" height="222" rx="12" fill="#e6f4f6" stroke="#99f6e4"/>
+          <text x="32" y="38" font-weight="700" font-size="13" fill="#005b66">ขั้นตอนดึงข้อมูลตรงจากส่วนกลาง (5 ก้าว ซ้าย &rarr; ขวา)</text>
+
+          <rect x="28" y="54" width="185" height="162" rx="8" fill="#fff" stroke="#7c3aed" stroke-width="1.5"/>
+          <text x="120" y="76" text-anchor="middle" font-weight="700" font-size="12" fill="#5b21b6">1. Server ส่วนกลาง (V6)</text>
+          <text x="120" y="96" text-anchor="middle" font-size="11" fill="#334155">เตรียมชุดข้อมูลใหม่ไว้ให้</text>
+          <text x="120" y="116" text-anchor="middle" font-size="10.8" fill="#334155">&bull; รายการสินค้า &amp; บาร์โค้ด</text>
+          <text x="120" y="134" text-anchor="middle" font-size="10.8" fill="#334155">&bull; ราคาขาย &amp; ใบปรับราคา</text>
+          <text x="120" y="152" text-anchor="middle" font-size="10.8" fill="#334155">&bull; โปรโมชัน V6 ล่าสุด</text>
+          <text x="120" y="182" text-anchor="middle" font-size="10.2" fill="#5b21b6">(API2PSMaster HTTPS)</text>
+
+          <rect x="242" y="54" width="195" height="162" rx="8" fill="#fff" stroke="#007a87" stroke-width="1.5"/>
+          <text x="339" y="76" text-anchor="middle" font-weight="700" font-size="12" fill="#005b66">2. ตัวโหลดข้อมูลใหม่</text>
+          <text x="339" y="96" text-anchor="middle" font-size="11" fill="#334155">ส่ง "เวลาซิงค์ล่าสุด" ไปถาม</text>
+          <text x="339" y="116" text-anchor="middle" font-size="10.8" fill="#334155">&bull; โหลดเฉพาะตัวที่เพิ่ม/แก้</text>
+          <text x="339" y="134" text-anchor="middle" font-size="10.8" fill="#334155">&bull; เช็กจำนวนครบไม่ตกหล่น</text>
+          <text x="339" y="156" text-anchor="middle" font-size="10.5" fill="#dc2626" font-weight="700">ถ้าเน็ตหลุด ลองใหม่ 3 รอบ</text>
+          <text x="339" y="182" text-anchor="middle" font-size="10.2" fill="#475569">(อ่าน URL/Key จาก Admin UI)</text>
+
+          <rect x="466" y="54" width="195" height="162" rx="8" fill="#fff" stroke="#007a87" stroke-width="1.5"/>
+          <text x="563" y="76" text-anchor="middle" font-weight="700" font-size="12" fill="#005b66">3. แปลง &amp; บันทึกปลอดภัย</text>
+          <text x="563" y="98" text-anchor="middle" font-size="11" fill="#334155">จัดฟิลด์ให้เข้ากับ SQLite</text>
+          <text x="563" y="118" text-anchor="middle" font-size="10.8" fill="#059669" font-weight="700">อัปเดตเสร็จในชุดเดียว</text>
+          <text x="563" y="138" text-anchor="middle" font-size="10.5" fill="#334155">(พังกลางคัน = ย้อนคืนทั้งหมด)</text>
+          <text x="563" y="164" text-anchor="middle" font-size="10.8" fill="#059669" font-weight="700">ไม่แตะต้องแบบป้ายเดิม!</text>
+          <text x="563" y="182" text-anchor="middle" font-size="10.2" fill="#475569">(แบบป้ายในร้านอยู่ครบ 100%)</text>
+
+          <rect x="690" y="54" width="185" height="162" rx="8" fill="#eff6ff" stroke="#0284c7" stroke-width="1.5"/>
+          <text x="782" y="76" text-anchor="middle" font-weight="700" font-size="12" fill="#0369a1">4. AdaAccD.db (DB เดียว)</text>
+          <text x="782" y="98" text-anchor="middle" font-size="11" fill="#334155">ข้อมูลใหม่พร้อมใช้งาน:</text>
+          <text x="782" y="118" text-anchor="middle" font-size="10.8" fill="#334155">&bull; สินค้า / บาร์โค้ดล่าสุด</text>
+          <text x="782" y="136" text-anchor="middle" font-size="10.8" fill="#334155">&bull; ราคาขายปัจจุบัน</text>
+          <text x="782" y="154" text-anchor="middle" font-size="10.8" fill="#334155">&bull; โปรโมชัน V6 ล่าสุด</text>
+          <text x="782" y="182" text-anchor="middle" font-size="10.2" fill="#0284c7">(เปิด WAL อ่านชนไม่ค้าง)</text>
+
+          <rect x="904" y="54" width="166" height="162" rx="8" fill="#fff" stroke="#059669" stroke-width="1.5"/>
+          <text x="987" y="76" text-anchor="middle" font-weight="700" font-size="12" fill="#065f46">5. จดเวลาซิงค์ล่าสุด</text>
+          <text x="987" y="104" text-anchor="middle" font-size="11" fill="#334155">เมื่อข้อมูลลงครบ 100%</text>
+          <text x="987" y="124" text-anchor="middle" font-size="11" fill="#334155">จึงเลื่อนเวลา Checkpoint</text>
+          <text x="987" y="152" text-anchor="middle" font-size="10.8" fill="#059669" font-weight="700">พร้อมส่งต่อให้ตัวคัด 4 เคส</text>
+          <text x="987" y="182" text-anchor="middle" font-size="10.2" fill="#475569">(เก็บใน LocalSyncState)</text>
+
+          <path d="M213 135 L240 135" stroke="#007a87" stroke-width="2" fill="none" marker-end="url(#a1)"/>
+          <path d="M437 135 L464 135" stroke="#007a87" stroke-width="2" fill="none" marker-end="url(#a1)"/>
+          <path d="M661 135 L688 135" stroke="#007a87" stroke-width="2" fill="none" marker-end="url(#a1)"/>
+          <path d="M875 135 L902 135" stroke="#007a87" stroke-width="2" fill="none" marker-end="url(#a1)"/>
+        </svg>
+        <div class="flow-caption">แผนภาพที่ 2: ขั้นตอนซิงค์ข้อมูลตรง 5 ก้าว (Server HQ &rarr; โหลดเพิ่มเฉพาะที่แก้ &rarr; เซฟปลอดภัย &rarr; DB เดียว &rarr; จดเวลา)</div>
+      </div>
+
+      <!-- Diagram 3: 24/7 Timeline -->
+      <h3 id="diag-timeline">2.3 แผนภาพที่ 3: เส้นเวลาทำงานตี 4 บนเครื่องที่เปิดตลอด 24/7 (Pre-Sync + Final Check + Print)</h3>
+      <div class="plain-hint"><strong>สรุปภาพนี้ใน 5 วิ:</strong> ทยอยดูดข้อมูลล่วงหน้า 03:15–03:45 (กันสาขาแย่ง Server) &rarr; 04:00 เช็กซ้ำ &rarr; 04:02 คัดตัวที่เปลี่ยน &rarr; 04:04 ทำไฟล์ &rarr; 04:06 ปลุก Printer พิมพ์รอเปิดร้าน</div>
+      <div class="flow-wrap">
+        <svg viewBox="0 0 1120 245" width="1120" height="245" style="min-width:840px;" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <marker id="a3" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 1 L10 5 L0 9 z" fill="#1e293b"/>
+            </marker>
+          </defs>
+          <rect x="15" y="25" width="165" height="190" rx="10" fill="#f1f5f9" stroke="#64748b"/>
+          <rect x="15" y="25" width="165" height="32" rx="10" fill="#334155"/>
+          <text x="97" y="46" text-anchor="middle" font-weight="700" font-size="11.5" fill="#fff">03:15–03:45 Pre-Sync</text>
+          <text x="27" y="78" font-size="11.2" fill="#1e293b">&bull; Service ทำงานตลอด 24/7</text>
+          <text x="27" y="98" font-size="11.2" fill="#1e293b">&bull; กระจายเวลา Jitter รายสาขา</text>
+          <text x="27" y="118" font-size="11.2" fill="#1e293b">&bull; ดูดสินค้า/ราคา/โปรฯ ล่วงหน้า</text>
+          <text x="27" y="138" font-size="11.2" fill="#1e293b">&bull; ลดปัญหาพันสาขาชนกัน</text>
+          <text x="27" y="158" font-size="11.2" fill="#1e293b">  ตอน 04:00:00 เป๊ะ</text>
+          <text x="27" y="182" font-size="11" fill="#0284c7">Pre-warm AdaAccD.db</text>
+
+          <rect x="200" y="25" width="165" height="190" rx="10" fill="#e6f4f6" stroke="#007a87"/>
+          <rect x="200" y="25" width="165" height="32" rx="10" fill="#007a87"/>
+          <text x="282" y="46" text-anchor="middle" font-weight="700" font-size="11.5" fill="#fff">04:00 น. Final Sync Gate</text>
+          <text x="212" y="78" font-size="11.2" fill="#1e293b">&bull; สร้าง Run Record (ล็อกวัน)</text>
+          <text x="212" y="98" font-size="11.2" fill="#1e293b">&bull; เช็ก CheckTaskDownload</text>
+          <text x="212" y="118" font-size="11.2" fill="#1e293b">  รอบสุดท้ายก่อนสั่งพิมพ์</text>
+          <text x="212" y="138" font-size="11.2" fill="#1e293b">&bull; ถ้าเน็ตหลุด Retry 3 รอบ</text>
+          <text x="212" y="158" font-size="11.2" fill="#1e293b">  (ห่างรอบละ 5 นาที)</text>
+          <text x="212" y="182" font-size="11" fill="#dc2626">Fail 3x &rarr; Abort ห้ามพิมพ์เก่า</text>
+
+          <rect x="386" y="25" width="170" height="190" rx="10" fill="#fffbeb" stroke="#d97706"/>
+          <rect x="386" y="25" width="170" height="32" rx="10" fill="#d97706"/>
+          <text x="471" y="46" text-anchor="middle" font-weight="700" font-size="11.5" fill="#fff">04:02 น. Delta Engine</text>
+          <text x="398" y="78" font-size="11.2" fill="#1e293b">&bull; คัดสินค้าเฉพาะ 4 เคส</text>
+          <text x="398" y="98" font-size="11.2" fill="#1e293b">&bull; อ่านราคา V6 + โปรฯ V6</text>
+          <text x="398" y="118" font-size="11.2" fill="#1e293b">&bull; คำนวณ PriceHash</text>
+          <text x="398" y="138" font-size="11.2" fill="#1e293b">&bull; ตัดตัวที่พิมพ์ไปแล้วออก</text>
+          <text x="398" y="158" font-size="11.2" fill="#1e293b">&bull; แยกกลุ่มปกติ vs โปรโมชัน</text>
+          <text x="398" y="182" font-size="11" fill="#92400e">ลงคิว TCNTLabelSchedQueue</text>
+
+          <rect x="579" y="25" width="165" height="190" rx="10" fill="#f5f3ff" stroke="#7c3aed"/>
+          <rect x="579" y="25" width="165" height="32" rx="10" fill="#7c3aed"/>
+          <text x="661" y="46" text-anchor="middle" font-weight="700" font-size="11.5" fill="#fff">04:04 น. Headless Render</text>
+          <text x="591" y="78" font-size="11.2" fill="#1e293b">&bull; อ่านขนาดป้าย (TCNMLabelSize)</text>
+          <text x="591" y="98" font-size="11.2" fill="#1e293b">&bull; เติมข้อมูลลงแม่แบบที่ตั้งไว้</text>
+          <text x="591" y="118" font-size="11.2" fill="#1e293b">&rarr; สร้าง PNG 300 DPI / ZPL</text>
+          <text x="591" y="138" font-size="11.2" fill="#1e293b">&bull; สร้าง Cover Sheet 1 แผ่น</text>
+          <text x="591" y="158" font-size="11.2" fill="#1e293b">&bull; คืนหน่วยความจำทันที</text>
+          <text x="591" y="182" font-size="11" fill="#5b21b6">ทำงานได้แม้ Lock Screen</text>
+
+          <rect x="767" y="25" width="165" height="190" rx="10" fill="#ecfdf5" stroke="#059669"/>
+          <rect x="767" y="25" width="165" height="32" rx="10" fill="#059669"/>
+          <text x="849" y="46" text-anchor="middle" font-weight="700" font-size="11.5" fill="#fff">04:06 น. Wake &amp; Print</text>
+          <text x="779" y="78" font-size="11.2" fill="#1e293b">&bull; ส่ง Ping ปลุก Printer ก่อน</text>
+          <text x="779" y="98" font-size="11.2" fill="#1e293b">&bull; บันทึก TCNTLabelJob / Dt</text>
+          <text x="779" y="118" font-size="11.2" fill="#1e293b">&bull; ปกติ &rarr; เครื่อง/ถาด 1</text>
+          <text x="779" y="138" font-size="11.2" fill="#1e293b">&bull; เว้น 900ms &rarr; ถาด 2 (โปร)</text>
+          <text x="779" y="158" font-size="11.2" fill="#1e293b">&bull; อัปเดต Watermark Hash</text>
+          <text x="779" y="182" font-size="11" fill="#065f46">บันทึกผลลง TCNTLabelLog</text>
+
+          <rect x="955" y="25" width="150" height="190" rx="10" fill="#eff6ff" stroke="#0284c7"/>
+          <rect x="955" y="25" width="150" height="32" rx="10" fill="#0284c7"/>
+          <text x="1030" y="46" text-anchor="middle" font-weight="700" font-size="11.5" fill="#fff">เปิดร้าน (07:00+)</text>
+          <text x="965" y="78" font-size="11.2" fill="#1e293b">&bull; หยิบป้าย + ใบปะหน้า</text>
+          <text x="965" y="98" font-size="11.2" fill="#1e293b">&bull; เสียบชั้นวางขายทันที</text>
+          <text x="965" y="118" font-size="11.2" fill="#1e293b">&bull; หน้าจอ Auto-Refresh</text>
+          <text x="965" y="138" font-size="11.2" fill="#1e293b">  เห็นผลรอบ 04:00 ทันที</text>
+          <text x="965" y="158" font-size="11.2" fill="#1e293b">&bull; ถ้า Error กดพิมพ์ซ้ำ</text>
+          <text x="965" y="182" font-size="11" fill="#0369a1">  เฉพาะใบค้างใน 1 คลิก</text>
+
+          <path d="M180 120 L198 120" stroke="#1e293b" stroke-width="2" fill="none" marker-end="url(#a3)"/>
+          <path d="M365 120 L384 120" stroke="#1e293b" stroke-width="2" fill="none" marker-end="url(#a3)"/>
+          <path d="M556 120 L577 120" stroke="#1e293b" stroke-width="2" fill="none" marker-end="url(#a3)"/>
+          <path d="M744 120 L765 120" stroke="#1e293b" stroke-width="2" fill="none" marker-end="url(#a3)"/>
+          <path d="M932 120 L953 120" stroke="#1e293b" stroke-width="2" fill="none" marker-end="url(#a3)"/>
+        </svg>
+        <div class="flow-caption">แผนภาพที่ 3: เส้นเวลาตั้งแต่ Pre-Sync ตอนตี 3 ถึงพนักงานเปิดร้านตอนเช้า (24/7 Mode)</div>
+      </div>
+
+      <!-- Diagram 4: Decision Flowchart -->
+      <h3 id="diag-decision">2.4 แผนภาพที่ 4: Flowchart ตัดสินใจครบวงจร (มีจุดตัดสินใจ ใช่/ไม่ และกรณี Error)</h3>
+      <div class="plain-hint"><strong>สรุปภาพนี้ใน 5 วิ:</strong> เดินเส้นตรงจากบนลงล่างคือ "ทางปกติจนพิมพ์เสร็จ" &bull; ถ้าติดขัดหรือซ้ำ ระบบจะดีดออกทางขวาทั้งหมด</div>
+      <div class="flow-wrap">
+        <svg viewBox="0 0 1060 660" width="1060" height="660" style="min-width:820px;" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <marker id="fd-arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 1 L10 5 L0 9 z" fill="#334155"/>
+            </marker>
+            <marker id="fd-yes" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 1 L10 5 L0 9 z" fill="#059669"/>
+            </marker>
+            <marker id="fd-no" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 1 L10 5 L0 9 z" fill="#dc2626"/>
+            </marker>
+          </defs>
+
+          <!-- Spine Header Labels -->
+          <rect x="40" y="8" width="440" height="26" rx="13" fill="#e6f4f6"/>
+          <text x="260" y="25" text-anchor="middle" fill="#005b66" font-size="11.5" font-weight="700">ทางเดินหลัก (ไล่ลงตรงๆ จนพิมพ์สำเร็จ)</text>
+          <rect x="595" y="8" width="430" height="26" rx="13" fill="#fef2f2"/>
+          <text x="810" y="25" text-anchor="middle" fill="#991b1b" font-size="11.5" font-weight="700">ทางแยกออกขวา (กรณีข้าม / หยุด / เครื่องพัง)</text>
+
+          <!-- Step 1 Start -->
+          <rect x="115" y="44" width="290" height="38" rx="19" fill="#1e293b"/>
+          <text x="260" y="68" text-anchor="middle" fill="#fff" font-size="12.5" font-weight="700">เริ่ม: ถึงเวลา 04:00 น. / เพิ่งบูตหลังไฟดับ</text>
+
+          <!-- Decision 1: Already run today? -->
+          <polygon points="260,96 420,128 260,160 100,128" fill="#fffbeb" stroke="#d97706" stroke-width="1.8"/>
+          <text x="260" y="124" text-anchor="middle" fill="#92400e" font-size="11.5" font-weight="700">1. วันนี้พิมพ์รอบตี 4 จบไปแล้ว?</text>
+          <text x="260" y="140" text-anchor="middle" fill="#78350f" font-size="10.2">(กันรันเบิ้ลหากรีสตาร์ต)</text>
+
+          <rect x="595" y="106" width="380" height="44" rx="8" fill="#f1f5f9" stroke="#64748b"/>
+          <text x="785" y="132" text-anchor="middle" fill="#475569" font-size="12" font-weight="700">ข้ามทันที (วันนี้พิมพ์เรียบร้อยแล้ว)</text>
+
+          <!-- Decision 2: Sync OK? -->
+          <polygon points="260,180 435,216 260,252 85,216" fill="#fffbeb" stroke="#d97706" stroke-width="1.8"/>
+          <text x="260" y="211" text-anchor="middle" fill="#92400e" font-size="11.5" font-weight="700">2. ซิงค์ข้อมูลล่าสุดจาก HQ ผ่านไหม?</text>
+          <text x="260" y="227" text-anchor="middle" fill="#005b66" font-size="10.2">(ถ้าไม่ผ่าน ลองใหม่สูงสุด 3 รอบ ห่าง 5 นาที)</text>
+
+          <rect x="595" y="191" width="420" height="50" rx="8" fill="#fee2e2" stroke="#dc2626" stroke-width="1.8"/>
+          <text x="805" y="213" text-anchor="middle" fill="#991b1b" font-size="12" font-weight="700">พังครบ 3 รอบ &rarr; หยุดทันที! (E-SYNC-001)</text>
+          <text x="805" y="231" text-anchor="middle" fill="#7f1d1d" font-size="10.8">ห้ามพิมพ์ราคาเก่าเด็ดขาด &bull; แจ้งเตือนบนจอตอนเช้า</text>
+
+          <!-- Step 3: Filter 4 cases -->
+          <rect x="65" y="274" width="390" height="52" rx="8" fill="#eff6ff" stroke="#0284c7" stroke-width="1.5"/>
+          <text x="260" y="295" text-anchor="middle" fill="#0369a1" font-size="12" font-weight="700">3. คัดเฉพาะสินค้าเปลี่ยน 4 แบบ (ปลด Limit 500)</text>
+          <text x="260" y="313" text-anchor="middle" fill="#1e293b" font-size="10.8">ปรับราคาวันนี้ &bull; โปรฯ เริ่มวันนี้ &bull; โปรฯ หมดคืนปกติ &bull; สินค้าใหม่</text>
+
+          <!-- Decision 3: >0 items? -->
+          <polygon points="260,342 425,374 260,406 95,374" fill="#fffbeb" stroke="#d97706" stroke-width="1.8"/>
+          <text x="260" y="370" text-anchor="middle" fill="#92400e" font-size="11.5" font-weight="700">4. มีสินค้าเปลี่ยนมากกว่า 0 ตัว</text>
+          <text x="260" y="386" text-anchor="middle" fill="#92400e" font-size="11">และราคายังไม่เคยพิมพ์ใช่ไหม?</text>
+
+          <rect x="595" y="352" width="380" height="44" rx="8" fill="#f1f5f9" stroke="#64748b"/>
+          <text x="785" y="378" text-anchor="middle" fill="#475569" font-size="11.5" font-weight="700">จบงาน (วันนี้ไม่มีป้ายเปลี่ยน / พิมพ์แล้วไม่พิมพ์ซ้ำ)</text>
+
+          <!-- Step 5: Render + Print -->
+          <rect x="65" y="428" width="390" height="56" rx="8" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.5"/>
+          <text x="260" y="449" text-anchor="middle" fill="#5b21b6" font-size="12" font-weight="700">5. เติมราคาลงแม่แบบป้าย + ปลุก Printer สั่งพิมพ์ทีละใบ</text>
+          <text x="260" y="468" text-anchor="middle" fill="#334155" font-size="10.8">แยกถาด 1 ปกติ / ถาด 2 โปรฯ + ใบสรุป 1 แผ่น (ทำงานได้แม้ Lock หน้าจอ)</text>
+
+          <!-- Decision 4: All Printed? -->
+          <polygon points="260,502 425,534 260,566 95,534" fill="#fffbeb" stroke="#d97706" stroke-width="1.8"/>
+          <text x="260" y="530" text-anchor="middle" fill="#92400e" font-size="11.5" font-weight="700">6. เครื่องพิมพ์พิมพ์ออกครบ</text>
+          <text x="260" y="546" text-anchor="middle" fill="#92400e" font-size="11.5" font-weight="700">ทุกใบโดยไม่ดับกลางคัน?</text>
+
+          <rect x="595" y="502" width="420" height="64" rx="8" fill="#fee2e2" stroke="#dc2626" stroke-width="1.6"/>
+          <text x="805" y="523" text-anchor="middle" fill="#991b1b" font-size="12" font-weight="700">พังกลางคัน (เช่น 20 ออก 5, ค้าง 15) &rarr; หยุด + ล้างคิว Windows</text>
+          <text x="805" y="541" text-anchor="middle" fill="#7f1d1d" font-size="10.8">จด 1–5 ออกแล้ว &bull; ค้าง 6–20 เป็น FAILED</text>
+          <text x="805" y="557" text-anchor="middle" fill="#0369a1" font-size="10.8" font-weight="700">ต่ออัตโนมัติ (AUTO_RESUME) หรือรอปุ่ม Reprint/Manual</text>
+
+          <!-- Step 7 End Success -->
+          <rect x="65" y="592" width="390" height="52" rx="10" fill="#ecfdf5" stroke="#059669" stroke-width="2"/>
+          <text x="260" y="614" text-anchor="middle" fill="#065f46" font-size="12.5" font-weight="700">สำเร็จ! บันทึกประวัติ + เตรียมป้ายรอเปิดร้าน (SUCCESS)</text>
+          <text x="260" y="632" text-anchor="middle" fill="#334155" font-size="10.8">พนักงานมาถึงร้าน 07:00 น. หยิบปึกป้าย + ใบสรุปเสียบเชลฟ์ได้ทันที</text>
+
+          <!-- Clean Downward Spine Arrows -->
+          <path d="M260 82 L260 94" stroke="#334155" stroke-width="1.8" fill="none" marker-end="url(#fd-arr)"/>
+          <path d="M260 160 L260 178" stroke="#059669" stroke-width="2" fill="none" marker-end="url(#fd-yes)"/>
+          <text x="270" y="173" fill="#059669" font-size="10.5" font-weight="700">ยัง</text>
+
+          <path d="M260 252 L260 272" stroke="#059669" stroke-width="2" fill="none" marker-end="url(#fd-yes)"/>
+          <text x="270" y="266" fill="#059669" font-size="10.5" font-weight="700">ผ่าน (ข้อมูลสด 100%)</text>
+
+          <path d="M260 326 L260 340" stroke="#334155" stroke-width="1.8" fill="none" marker-end="url(#fd-arr)"/>
+          <path d="M260 406 L260 426" stroke="#059669" stroke-width="2" fill="none" marker-end="url(#fd-yes)"/>
+          <text x="270" y="420" fill="#059669" font-size="10.5" font-weight="700">ใช่ (มีรายการต้องพิมพ์)</text>
+
+          <path d="M260 484 L260 500" stroke="#334155" stroke-width="1.8" fill="none" marker-end="url(#fd-arr)"/>
+          <path d="M260 566 L260 590" stroke="#059669" stroke-width="2" fill="none" marker-end="url(#fd-yes)"/>
+          <text x="270" y="582" fill="#059669" font-size="10.5" font-weight="700">ครบทุกใบ</text>
+
+          <!-- Clean Rightward Branch Arrows -->
+          <path d="M420 128 L593 128" stroke="#64748b" stroke-width="1.8" fill="none" marker-end="url(#fd-arr)"/>
+          <text x="505" y="121" text-anchor="middle" fill="#475569" font-size="10.5" font-weight="700">ทำจบแล้ว</text>
+
+          <path d="M435 216 L593 216" stroke="#dc2626" stroke-width="1.8" fill="none" marker-end="url(#fd-no)"/>
+          <text x="514" y="209" text-anchor="middle" fill="#dc2626" font-size="10.5" font-weight="700">เน็ตล่มครบ 3 ครั้ง</text>
+
+          <path d="M425 374 L593 374" stroke="#64748b" stroke-width="1.8" fill="none" marker-end="url(#fd-arr)"/>
+          <text x="509" y="367" text-anchor="middle" fill="#475569" font-size="10.5" font-weight="700">ไม่มี / เคยพิมพ์แล้ว</text>
+
+          <path d="M425 534 L593 534" stroke="#dc2626" stroke-width="1.8" fill="none" marker-end="url(#fd-no)"/>
+          <text x="509" y="527" text-anchor="middle" fill="#dc2626" font-size="10.5" font-weight="700">ดับ/กระดาษหมด</text>
+        </svg>
+        <div class="flow-caption">แผนภาพที่ 4: Flowchart แนวตั้ง 6 ด่าน (เดินตรงลงล่างคือทางสำเร็จ &bull; แยกออกขวาคือกรณีข้าม/หยุด/กู้คืน)</div>
+      </div>
+
+      <h3 id="ov-4cases">2.5 ทำไมไม่พิมพ์ทั้งร้าน? (ตัวอย่าง 4 เคสที่ระบบคัดมาพิมพ์ตอนตี 4)</h3>
+      <div class="grid-4">
+        <div class="case-card blue">
+          <h4>1. สินค้าปรับราคาวันนี้</h4>
+          <p><strong>ตัวอย่าง:</strong> น้ำดื่มจาก 10 บ. ปรับเป็น 12 บ. มีผลวันนี้<br><strong>ผล:</strong> สั่งพิมพ์<strong>ป้ายปกติ (ถาด 1)</strong> เพื่อให้ราคาบนชั้นตรงกับ POS ตั้งแต่เช้า</p>
+        </div>
+        <div class="case-card red">
+          <h4>2. สินค้าเริ่มโปรโมชันวันนี้</h4>
+          <p><strong>ตัวอย่าง:</strong> ขนมจัดโปรฯ SALE 19 บ. เริ่มวันนี้–สิ้นเดือน<br><strong>ผล:</strong> สั่งพิมพ์<strong>ป้ายโปรโมชันสีแดง (ถาด 2)</strong> พร้อมช่วงวันที่โปรฯ</p>
+        </div>
+        <div class="case-card amber">
+          <h4>3. โปรโมชันหมดอายุเมื่อวาน!</h4>
+          <p><strong>ตัวอย่าง:</strong> กาแฟหมดโปรฯ เมื่อวาน วันนี้กลับมาราคาปกติ<br><strong>ผล:</strong> สั่งพิมพ์<strong>ป้ายปกติ (ถาด 1)</strong> เพื่อดึงป้ายแดงออกแล้วเสียบป้ายปกติแทน</p>
+        </div>
+        <div class="case-card green">
+          <h4>4. สินค้าเพิ่มใหม่จาก HQ</h4>
+          <p><strong>ตัวอย่าง:</strong> สินค้าใหม่เพิ่ง Sync เข้ามาเมื่อคืน <code>FDCreateOn</code><br><strong>ผล:</strong> สั่งพิมพ์ตามสถานะปกติ/โปรฯ ใช้ขนาดป้าย Default หรือจาก <code>TCNMPdtLabel</code></p>
+        </div>
+      </div>
+
+      <!-- Diagram 5: Swimlane -->
+      <h3 id="diag-swimlane">2.6 แผนภาพที่ 5: Cross-Functional Swimlane Diagram (แสดงว่าแต่ละส่วนทำหน้าที่อะไรในแต่ละช่วงเวลา)</h3>
+      <div class="plain-hint"><strong>สรุปภาพนี้ใน 5 วิ:</strong> อ่านจากซ้ายไปขวาตามลำดับเลข <strong>① &rarr; ⑨</strong> (เลขเรียงตามเวลาจริง) จะเห็นชัดทันทีว่าแต่ละฝ่ายส่งต่องานให้กันตอนกี่โมง</div>
+      <div class="flow-wrap">
+        <svg viewBox="0 0 1140 525" width="1140" height="525" style="min-width:860px;" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <marker id="sw-arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 1 L10 5 L0 9 z" fill="#334155"/>
+            </marker>
+            <marker id="sw-pur" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 1 L10 5 L0 9 z" fill="#7c3aed"/>
+            </marker>
+            <marker id="sw-blu" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 1 L10 5 L0 9 z" fill="#0284c7"/>
+            </marker>
+            <marker id="sw-grn" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 1 L10 5 L0 9 z" fill="#059669"/>
+            </marker>
+          </defs>
+
+          <!-- Phase Header Strip -->
+          <rect x="175" y="10" width="950" height="30" rx="6" fill="#1e293b"/>
+          <text x="270" y="30" text-anchor="middle" fill="#cbd5e1" font-size="11.5" font-weight="700">1) ช่วงตั้งค่า (กลางวัน)</text>
+          <text x="462" y="30" text-anchor="middle" fill="#99f6e4" font-size="11.5" font-weight="700">2) 03:15–03:45 เตรียมข้อมูล</text>
+          <text x="662" y="30" text-anchor="middle" fill="#fde68a" font-size="11.5" font-weight="700">3) 04:00 เช็กซ้ำ &amp; คัด 4 เคส</text>
+          <text x="857" y="30" text-anchor="middle" fill="#ddd6fe" font-size="11.5" font-weight="700">4) 04:04 ประกอบไฟล์ &amp; พิมพ์</text>
+          <text x="1037" y="30" text-anchor="middle" fill="#a7f3d0" font-size="11.5" font-weight="700">5) 07:00+ เปิดร้าน</text>
+
+          <!-- Lane 1: User / IT UI -->
+          <rect x="12" y="46" width="1113" height="86" rx="6" fill="#f8fafc" stroke="#cbd5e1"/>
+          <rect x="12" y="46" width="160" height="86" rx="6" fill="#334155"/>
+          <text x="92" y="84" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">1. ร้านค้า / Admin</text>
+          <text x="92" y="102" text-anchor="middle" fill="#cbd5e1" font-size="10.5">(หน้าจอ React UI)</text>
+
+          <!-- Lane 2: AdaBarprint 24/7 Agent -->
+          <rect x="12" y="138" width="1113" height="104" rx="6" fill="#e6f4f6" stroke="#99f6e4"/>
+          <rect x="12" y="138" width="160" height="104" rx="6" fill="#007a87"/>
+          <text x="92" y="180" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">2. ระบบตี 4 หลังบ้าน</text>
+          <text x="92" y="198" text-anchor="middle" fill="#e6f4f6" font-size="10.5">24/7 Agent (Rust)</text>
+          <text x="92" y="214" text-anchor="middle" fill="#e6f4f6" font-size="10">(ทำงานแม้ Lock หน้าจอ)</text>
+
+          <!-- Lane 3: API2PSMaster V6 -->
+          <rect x="12" y="248" width="1113" height="78" rx="6" fill="#f5f3ff" stroke="#ddd6fe"/>
+          <rect x="12" y="248" width="160" height="78" rx="6" fill="#5b21b6"/>
+          <text x="92" y="282" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">3. Server ส่วนกลาง</text>
+          <text x="92" y="300" text-anchor="middle" fill="#ddd6fe" font-size="10.5">(API2PSMaster V6)</text>
+
+          <!-- Lane 4: AdaAccD.db (WAL) -->
+          <rect x="12" y="332" width="1113" height="84" rx="6" fill="#eff6ff" stroke="#bfdbfe"/>
+          <rect x="12" y="332" width="160" height="84" rx="6" fill="#0369a1"/>
+          <text x="92" y="369" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">4. ฐานข้อมูลเดียว</text>
+          <text x="92" y="387" text-anchor="middle" fill="#bfdbfe" font-size="10.5">(AdaAccD.db WAL)</text>
+
+          <!-- Lane 5: Printers &amp; Morning Staff -->
+          <rect x="12" y="422" width="1113" height="90" rx="6" fill="#ecfdf5" stroke="#a7f3d0"/>
+          <rect x="12" y="422" width="160" height="90" rx="6" fill="#059669"/>
+          <text x="92" y="462" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">5. เครื่องพิมพ์ &amp;</text>
+          <text x="92" y="480" text-anchor="middle" fill="#ecfdf5" font-size="10.5">พนักงานเปิดร้าน</text>
+
+          <!-- Vertical Column Dashed Dividers -->
+          <line x1="365" y1="46" x2="365" y2="512" stroke="#94a3b8" stroke-dasharray="4 4"/>
+          <line x1="560" y1="46" x2="560" y2="512" stroke="#94a3b8" stroke-dasharray="4 4"/>
+          <line x1="765" y1="46" x2="765" y2="512" stroke="#94a3b8" stroke-dasharray="4 4"/>
+          <line x1="948" y1="46" x2="948" y2="512" stroke="#94a3b8" stroke-dasharray="4 4"/>
+
+          <!-- Col 1: ① -->
+          <rect x="188" y="58" width="164" height="60" rx="7" fill="#fff" stroke="#007a87" stroke-width="1.5"/>
+          <text x="270" y="79" text-anchor="middle" fill="#0f172a" font-size="11.5" font-weight="700">① ตั้งค่า &amp; กด Dry-Run</text>
+          <text x="270" y="96" text-anchor="middle" fill="#475569" font-size="10.3">เวลา 04:00, 4 เคส, ถาดพิมพ์</text>
+          <text x="270" y="110" text-anchor="middle" fill="#5b21b6" font-size="10">+ Admin ใส่ API URL/Key</text>
+
+          <rect x="188" y="347" width="164" height="54" rx="7" fill="#fff" stroke="#0284c7" stroke-width="1.5"/>
+          <text x="270" y="369" text-anchor="middle" fill="#0369a1" font-size="11" font-weight="700">จำค่าที่ตั้งไว้ใน SQLite</text>
+          <text x="270" y="387" text-anchor="middle" fill="#475569" font-size="10">เก็บตารางเวลา + API Key</text>
+
+          <!-- Col 2: ② -> ③ -->
+          <rect x="380" y="156" width="165" height="68" rx="7" fill="#fff" stroke="#007a87" stroke-width="1.5"/>
+          <text x="462" y="177" text-anchor="middle" fill="#005b66" font-size="11.5" font-weight="700">② ดึงข้อมูลล่วงหน้า</text>
+          <text x="462" y="194" text-anchor="middle" fill="#334155" font-size="10.3">กระจายเวลาตามรหัสสาขา</text>
+          <text x="462" y="210" text-anchor="middle" fill="#475569" font-size="10">กันสาขายิงชน Server ตอน 04:00</text>
+
+          <rect x="380" y="260" width="165" height="54" rx="7" fill="#fff" stroke="#7c3aed" stroke-width="1.5"/>
+          <text x="462" y="281" text-anchor="middle" fill="#5b21b6" font-size="11.2" font-weight="700">③ ส่งชุดข้อมูล V6 ล่าสุด</text>
+          <text x="462" y="299" text-anchor="middle" fill="#475569" font-size="10.2">สินค้า / ราคา / โปรฯ ~12 ตาราง</text>
+
+          <!-- Col 3: ④ -> ⑤ -->
+          <rect x="575" y="152" width="175" height="76" rx="7" fill="#fff" stroke="#d97706" stroke-width="1.5"/>
+          <text x="662" y="172" text-anchor="middle" fill="#92400e" font-size="11.5" font-weight="700">④ เช็กซ้ำ &amp; คัด 4 เคส</text>
+          <text x="662" y="189" text-anchor="middle" fill="#334155" font-size="10.3">04:00 เช็กส่วนกลางอีกรอบ (Retry 3x)</text>
+          <text x="662" y="205" text-anchor="middle" fill="#334155" font-size="10.3">คัด 4 เคส + กรองตัวที่เคยพิมพ์แล้ว</text>
+          <text x="662" y="220" text-anchor="middle" fill="#059669" font-size="10">ไฟดับบูตมาพิมพ์ชดเชยให้อัตโนมัติ</text>
+
+          <rect x="575" y="260" width="175" height="54" rx="7" fill="#fff" stroke="#7c3aed" stroke-width="1.5"/>
+          <text x="662" y="281" text-anchor="middle" fill="#5b21b6" font-size="11" font-weight="700">ยืนยันไม่มีของค้างตอนตี 4</text>
+          <text x="662" y="299" text-anchor="middle" fill="#475569" font-size="10.2">(CheckTaskDownload ล่าสุด)</text>
+
+          <rect x="575" y="347" width="175" height="54" rx="7" fill="#fff" stroke="#0284c7" stroke-width="1.5"/>
+          <text x="662" y="369" text-anchor="middle" fill="#0369a1" font-size="11.2" font-weight="700">⑤ จดคิวพิมพ์ลง DB</text>
+          <text x="662" y="387" text-anchor="middle" fill="#475569" font-size="10">บันทึกคิวรายใบพร้อมเลขลำดับ</text>
+
+          <!-- Col 4: ⑥ -> ⑦ -->
+          <rect x="780" y="156" width="155" height="68" rx="7" fill="#fff" stroke="#7c3aed" stroke-width="1.5"/>
+          <text x="857" y="177" text-anchor="middle" fill="#5b21b6" font-size="11.5" font-weight="700">⑥ ทำไฟล์ &amp; ปลุก Printer</text>
+          <text x="857" y="194" text-anchor="middle" fill="#334155" font-size="10.3">ใส่ข้อมูลลงแม่แบบ &rarr; PNG/ZPL</text>
+          <text x="857" y="210" text-anchor="middle" fill="#475569" font-size="10">ส่งพิมพ์ทีละใบ (ดับ=หยุดทันที)</text>
+
+          <rect x="780" y="347" width="155" height="54" rx="7" fill="#fff" stroke="#0284c7" stroke-width="1.5"/>
+          <text x="857" y="369" text-anchor="middle" fill="#0369a1" font-size="11" font-weight="700">จด Log ใครออก / ใครค้าง</text>
+          <text x="857" y="387" text-anchor="middle" fill="#475569" font-size="10">1–5=PRINTED | 6–20=FAILED</text>
+
+          <rect x="780" y="437" width="155" height="62" rx="7" fill="#fff" stroke="#059669" stroke-width="1.6"/>
+          <text x="857" y="458" text-anchor="middle" fill="#065f46" font-size="11.5" font-weight="700">⑦ พิมพ์ออกแยกถาด</text>
+          <text x="857" y="475" text-anchor="middle" fill="#334155" font-size="10.2">ถาด 1 ปกติ &bull; ถาด 2 โปรฯ</text>
+          <text x="857" y="490" text-anchor="middle" fill="#059669" font-size="10">+ Cover Sheet สรุปงาน</text>
+
+          <!-- Col 5: ⑧ &amp; ⑨ -->
+          <rect x="962" y="56" width="150" height="64" rx="7" fill="#fff" stroke="#0284c7" stroke-width="1.5"/>
+          <text x="1037" y="76" text-anchor="middle" fill="#0369a1" font-size="11.2" font-weight="700">⑧ จอรอเปิดร้านตอนเช้า</text>
+          <text x="1037" y="93" text-anchor="middle" fill="#334155" font-size="10.3">แสดงยอด Normal / Promo</text>
+          <text x="1037" y="109" text-anchor="middle" fill="#dc2626" font-size="10.3" font-weight="700">มีปุ่มซ่อม / ส่ง Manual ถ้าค้าง</text>
+
+          <rect x="962" y="437" width="150" height="62" rx="7" fill="#fff" stroke="#059669" stroke-width="1.6"/>
+          <text x="1037" y="458" text-anchor="middle" fill="#065f46" font-size="11.5" font-weight="700">⑨ หยิบป้ายเสียบเชลฟ์</text>
+          <text x="1037" y="475" text-anchor="middle" fill="#334155" font-size="10.2">วางตามหมวดพร้อมขาย</text>
+          <text x="1037" y="490" text-anchor="middle" fill="#0284c7" font-size="10">ราคาตรง POS 100%</text>
+
+          <!-- Clean Sequential Connectors (① -> ② -> ③ -> ④ -> ⑤ -> ⑥ -> ⑦ -> ⑧/⑨) -->
+          <path d="M270 118 L270 345" stroke="#334155" stroke-width="1.8" fill="none" marker-end="url(#sw-arr)"/>
+          <path d="M462 224 L462 258" stroke="#7c3aed" stroke-width="1.8" fill="none" marker-end="url(#sw-pur)"/>
+          <path d="M545 287 L562 287 L562 374 L573 374" stroke="#0284c7" stroke-width="1.6" fill="none" marker-end="url(#sw-blu)"/>
+          <path d="M635 228 L635 258" stroke="#7c3aed" stroke-width="1.6" fill="none" marker-end="url(#sw-pur)"/>
+          <path d="M685 314 L685 345" stroke="#0284c7" stroke-width="1.6" fill="none" marker-end="url(#sw-blu)"/>
+          <path d="M750 190 L778 190" stroke="#334155" stroke-width="1.8" fill="none" marker-end="url(#sw-arr)"/>
+          <path d="M857 224 L857 345" stroke="#0284c7" stroke-width="1.6" fill="none" marker-end="url(#sw-blu)"/>
+          <path d="M857 401 L857 435" stroke="#059669" stroke-width="2" fill="none" marker-end="url(#sw-grn)"/>
+          <path d="M935 468 L960 468" stroke="#059669" stroke-width="2" fill="none" marker-end="url(#sw-grn)"/>
+          <path d="M935 374 L952 374 L952 88 L960 88" stroke="#0284c7" stroke-width="1.6" stroke-dasharray="4 3" fill="none" marker-end="url(#sw-blu)"/>
+        </svg>
+        <div class="flow-caption">แผนภาพที่ 5 (Swimlane Diagram): อ่านตามลำดับ ① &rarr; ⑨ แยกหน้าที่ชัดเจนทั้ง 5 ส่วน</div>
+      </div>
+
+      <h3 id="ov-partial">2.7 การเก็บ Log และกู้คืนเมื่อพิมพ์ค้างกลางคัน (ตัวอย่าง: มี 20 รายการ พิมพ์ได้ 5 แล้วเครื่องพิมพ์ Lost)</h3>
+      <div class="mini-visual">
+        <div class="mv-step ok"><div class="mv-title">1. พิมพ์แล้ว (1–5) ✅</div>ระบบส่งทีละหน้า/ดวง: ใบ 1–5 ถูกจดว่า <b>PRINTED</b> และอัปเดตประวัติแล้ว (ไม่พิมพ์ซ้ำ)</div>
+        <div class="mv-step err"><div class="mv-title">2. เครื่องดับ (ใบที่ 6) ⛔</div>หยุดพิมพ์ทันที! ยกเลิกคิวค้างใน Windows Spooler ทิ้งเพื่อป้องกันพิมพ์เบิ้ล</div>
+        <div class="mv-step hold"><div class="mv-title">3. เก็บคิวค้าง (6–20) 📝</div>จด <b>Run = PARTIAL</b> และคิว 6–20 = <b>FAILED</b> รออยู่ในฐานข้อมูลพร้อมรหัส Error</div>
+        <div class="mv-step fix"><div class="mv-title">4. ตอนเปิดร้าน / กลับมาติด 🔁</div>เลือกให้พิมพ์ต่ออัตโนมัติ (<code>AUTO_RESUME</code>) หรือรอคนกดปุ่ม <b>[Reprint] / [ส่งเข้า Manual]</b></div>
+      </div>
+      <div class="callout amber">
+        <strong>สำคัญมาก:</strong> ถ้าส่งพิมพ์ 20 รายการเป็น Spooler Job ก้อนใหญ่ก้อนเดียว ระบบจะไม่รู้เลยว่าเครื่องพิมพ์ดับตอนใบที่ 5 ดังนั้น <strong>Print Dispatcher ต้องส่งเป็น Chunk/Page ย่อย พร้อมเช็กสถานะเครื่องพิมพ์คั่นทุกรอบ</strong> เพื่อให้รู้ชัดเจนว่าใบที่ 1–5 ออกแล้ว และใบที่ 6–20 ยังไม่ออก!
+      </div>
+      <div class="grid-2">
+        <div class="box">
+          <h4>1. สิ่งที่ระบบเก็บ Log ไว้ให้อัตโนมัติตอนตี 4</h4>
+          <ul>
+            <li><strong>Thermal LAN (<code>IP:9100</code>):</strong> ส่งทีละดวงและรอ Ack &rarr; ดวงที่ 1–5 ถูกมาร์ก <code>PRINTED</code>, พอถึงดวงที่ 6 เครื่อง Lost ระบบหยุดทันทีแล้วมาร์กดวง 6–20 เป็น <code>FAILED</code></li>
+            <li><strong>Windows Driver (A4/B5):</strong> ส่งพิมพ์ทีละหน้า (หรือ Chunk 1–2 หน้า) แล้วเช็ก <code>PrinterStatus</code>/Spooler Error หลังจบแต่ละหน้า</li>
+            <li><strong>บันทึกลง 3 ตารางใน <code>AdaAccD.db</code>:</strong>
+              <ul>
+                <li><code>TCNTLabelSchedRun</code>: สถานะ = <strong><code>PARTIAL</code></strong>, สำเร็จ = <code>5</code>, ค้าง = <code>15</code>, รหัส Error = <code>E-PRT-001/002</code></li>
+                <li><code>TCNTLabelSchedQueue</code>: แถว 1–5 = <code>PRINTED</code> (บันทึก Watermark แล้ว) | แถว 6–20 = <strong><code>FAILED</code></strong> (คงค้างรอซ่อม)</li>
+                <li><code>TCNTLabelLog</code>: เก็บ Log เหตุการณ์ (เวลาที่พัง + ชื่อเครื่องพิมพ์ + Error Message)</li>
+                <li><strong>กันพิมพ์เบิ้ลจาก Spooler:</strong> เมื่อตัดจบว่า Error ระบบจะ <strong>สั่ง Cancel คิวค้างใน Windows Spooler ทิ้งทันที</strong> เพื่อไม่ให้ Windows แอบปล่อยของเก่าซ้ำตอนเครื่องกลับมา Online</li>
+              </ul>
+            </li>
+            <li><strong>ถ้าเครื่องกลับมาทำงานปกติทีหลัง จะพิมพ์ต่ออัตโนมัติไหม? (ตั้งเลือกได้ 2 แบบใน <code>FTLscOnPrinterBack</code>):</strong>
+              <ul>
+                <li><strong>1) ระยะสั้น (ภายใน ~10 นาทีตอนตี 4):</strong> Agent ลอง Ping/Poll เครื่องพิมพ์ซ้ำทุก 30–60 วิ หากกลับมาทัน <strong>จะพิมพ์ต่อจากใบที่ 6–20 ให้อัตโนมัติทันที</strong></li>
+                <li><strong>2) ระยะยาว (พ้นช่วง Retry แล้วกลับมา Online ตอน 07:00 น.):</strong> เลือกได้ตาม Policy ร้าน &mdash; <code>AUTO_RESUME</code> (พิมพ์ต่อเฉพาะ 6–20 ให้อัตโนมัติถ้ายังอยู่ในวันเดียวกันก่อน 09:00 น.) <strong>หรือ</strong> <code>WAIT_CONFIRM</code> <em>(ค่าเริ่มต้นที่ปลอดภัยสุด: รอให้พนักงานกดปุ่ม Reprint / Manual เองกันพิมพ์ชนตอนตั้งถาด)</em></li>
+              </ul>
+            </li>
+          </ul>
+        </div>
+        <div class="box">
+          <h4>2. ทางเลือกให้ User จัดการตอนเช้า (กด Auto หรือโหลดไปพิมพ์ Manual เอง)</h4>
+          <ul>
+            <li>หน้าแรกจะขึ้นแถบแจ้งเตือน <strong>"รอบ 04:00 น. พิมพ์สำเร็จ 5 / ค้างพิมพ์ 15 รายการ (E-PRT-002)"</strong></li>
+            <li><strong>วิธีที่ 1 — กดพิมพ์ซ้ำอัตโนมัติ (1 คลิก):</strong> กดปุ่ม <strong>[Reprint Failed Only (15)]</strong> ระบบพิมพ์เฉพาะแถว 6–20 ที่สถานะ <code>FAILED</code> ออกเครื่องพิมพ์เดิมทันที (1–5 ไม่พิมพ์ซ้ำ)</li>
+            <li><strong>วิธีที่ 2 — ส่งเข้าหน้าจอพิมพ์ Manual ให้ User กดเอง:</strong> กดปุ่ม <strong>[ส่ง 15 รายการที่ค้างไปหน้าพิมพ์ Manual]</strong> (<code>load-to-manual</code>) ระบบจะดึงเฉพาะแถว 6–20 เข้าตารางหน้าหลักของ AdaBarprint เพื่อเปลี่ยนเครื่องพิมพ์สำรอง ปรับจำนวน หรือเลือกกดพิมพ์เองทีละตัวแบบ Manual ได้ 100%</li>
+            <li><strong>วิธีตรวจสอบย้อนหลังว่า "อะไรพิมพ์ไปแล้ว":</strong> เปิดดูจากหน้าประวัติ (<code>TCNTLabelSchedQueue</code> กรอง <code>FTLsqStatus='PRINTED'</code> หรือหน้า History จาก <code>TCNTLabelJobDt</code> โดยดู <code>FTLjbSource='2'</code>) ส่วนตัวโปรแกรมเองจะเช็กจาก <code>TCNTLabelSchedWatermark</code> ก่อนพิมพ์รอบถัดไปเสมอ</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3. REAL ER DIAGRAMS & TABLES -->
+    <section class="card" id="sec-er">
+      <h2><span class="tag num">ส่วนที่ 3</span> ER Diagram &amp; โครงสร้างฐานข้อมูล <code>db/AdaAccD.db</code> (Single DB + WAL)</h2>
+      <p>เพื่อให้อ่านความสัมพันธ์ PK/FK และเส้นเชื่อม <code>1 : N</code> ได้ชัดเจน จึงแบ่ง <strong>ER Diagram ออกเป็น 2 ภาพตามหน้าที่จริง</strong> (ทุกตารางอยู่ภายในไฟล์ <code>db/AdaAccD.db</code> เดียวกัน):</p>
+
+      <!-- ER Diagram 1: Master Product/Price/Promo & Label Config -->
+      <h3 id="er-part1">3.1 ER Diagram 1: ฝั่งข้อมูลสินค้า ราคา โปรโมชัน และแม่แบบป้าย/ถาดเครื่องพิมพ์</h3>
+      <div class="plain-hint"><strong>สรุปภาพนี้ใน 5 วิ:</strong> ครึ่งบน (ฟ้า/ม่วง) คือตารางสินค้า ราคา และโปรฯ ที่ดูดมาจาก HQ &bull; ครึ่งล่าง (เขียว) คือตารางขนาด/แม่แบบ/ถาดป้ายที่ร้านออกแบบไว้</div>
+      <div class="flow-wrap">
+        <svg viewBox="0 0 1120 560" width="1120" height="560" style="min-width:860px;" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <marker id="pk-one" viewBox="0 0 12 12" refX="2" refY="6" markerWidth="10" markerHeight="10" orient="auto">
+              <path d="M4,1 L4,11 M8,1 L8,11" stroke="#0284c7" stroke-width="1.8" fill="none"/>
+            </marker>
+            <marker id="fk-many" viewBox="0 0 14 12" refX="12" refY="6" markerWidth="12" markerHeight="12" orient="auto">
+              <path d="M1,6 L12,1 M1,6 L12,6 M1,6 L12,11" stroke="#0284c7" stroke-width="1.6" fill="none"/>
+            </marker>
+            <marker id="fk-many-grn" viewBox="0 0 14 12" refX="12" refY="6" markerWidth="12" markerHeight="12" orient="auto">
+              <path d="M1,6 L12,1 M1,6 L12,6 M1,6 L12,11" stroke="#059669" stroke-width="1.6" fill="none"/>
+            </marker>
+          </defs>
+
+          <!-- Entity: TCNMBranch -->
+          <rect x="20" y="20" width="225" height="112" rx="6" fill="#fff" stroke="#0284c7" stroke-width="1.6"/>
+          <rect x="20" y="20" width="225" height="26" rx="6" fill="#0284c7"/>
+          <text x="132" y="37" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">TCNMBranch (สาขา)</text>
+          <text x="30" y="62" font-size="11" fill="#0f172a" font-weight="700">PK  FTBchCode</text>
+          <text x="30" y="80" font-size="11" fill="#475569">    FTPplCode (กลุ่มราคาสาขา)</text>
+          <text x="30" y="98" font-size="11" fill="#475569">    FTAgnCode</text>
+          <text x="30" y="116" font-size="11" fill="#475569">    FTBchStaActive</text>
+
+          <!-- Entity: TCNMPdt -->
+          <rect x="295" y="20" width="235" height="145" rx="6" fill="#fff" stroke="#0284c7" stroke-width="1.6"/>
+          <rect x="295" y="20" width="235" height="26" rx="6" fill="#0284c7"/>
+          <text x="412" y="37" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">TCNMPdt (สินค้าหลัก)</text>
+          <text x="305" y="62" font-size="11" fill="#0f172a" font-weight="700">PK  FTPdtCode</text>
+          <text x="305" y="80" font-size="11" fill="#475569">FK  FTPgpChain &rarr; TCNMPdtGrp</text>
+          <text x="305" y="98" font-size="11" fill="#475569">FK  FTPbnCode &rarr; TCNMPdtBrand</text>
+          <text x="305" y="116" font-size="11" fill="#475569">    FTPdtStaActive</text>
+          <text x="305" y="134" font-size="11" fill="#0284c7">    FDCreateOn / FDLastUpdOn</text>
+
+          <!-- Entity: TCNMPdt_L -->
+          <rect x="20" y="160" width="225" height="106" rx="6" fill="#fff" stroke="#0284c7" stroke-width="1.5"/>
+          <rect x="20" y="160" width="225" height="26" rx="6" fill="#0369a1"/>
+          <text x="132" y="177" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">TCNMPdt_L (ชื่อสินค้า)</text>
+          <text x="30" y="202" font-size="11" fill="#0f172a" font-weight="700">PK,FK FTPdtCode</text>
+          <text x="30" y="220" font-size="11" fill="#0f172a" font-weight="700">PK    FNLngID</text>
+          <text x="30" y="238" font-size="11" fill="#475569">      FTPdtName / FTPdtNameOth</text>
+
+          <!-- Entity: TCNMPdtBar -->
+          <rect x="295" y="200" width="235" height="130" rx="6" fill="#fff" stroke="#0284c7" stroke-width="1.6"/>
+          <rect x="295" y="200" width="235" height="26" rx="6" fill="#0284c7"/>
+          <text x="412" y="217" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">TCNMPdtBar (บาร์โค้ดขาย)</text>
+          <text x="305" y="242" font-size="11" fill="#0f172a" font-weight="700">PK,FK FTPdtCode</text>
+          <text x="305" y="260" font-size="11" fill="#0f172a" font-weight="700">PK    FTBarCode / FNBarRefSeq</text>
+          <text x="305" y="278" font-size="11" fill="#475569">FK    FTPunCode &rarr; TCNMPdtUnit_L</text>
+          <text x="305" y="296" font-size="11" fill="#475569">      FTBarStaUse / FTBarStaAlwSale</text>
+          <text x="305" y="314" font-size="11" fill="#0284c7">      FDCreateOn / FDLastUpdOn</text>
+
+          <!-- Entity: TCNTPdtPrice4PDT -->
+          <rect x="585" y="20" width="245" height="145" rx="6" fill="#fff" stroke="#0284c7" stroke-width="1.6"/>
+          <rect x="585" y="20" width="245" height="26" rx="6" fill="#0284c7"/>
+          <text x="707" y="37" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">TCNTPdtPrice4PDT (ราคาขาย)</text>
+          <text x="595" y="62" font-size="11" fill="#0f172a" font-weight="700">PK,FK FTPdtCode / FTPunCode</text>
+          <text x="595" y="80" font-size="11" fill="#0f172a" font-weight="700">PK    FTPplCode / FTPghDocNo</text>
+          <text x="595" y="98" font-size="11" fill="#0f172a" font-weight="700">PK    FDPghDStart / DocType</text>
+          <text x="595" y="116" font-size="11" fill="#b45309" font-weight="700">      FCPgdPriceRet (ราคาขาย)</text>
+          <text x="595" y="134" font-size="11" fill="#475569">      FDPghDStop / FDLastUpdOn</text>
+
+          <!-- Entity: TCNTPdtAdjPriHD + DT -->
+          <rect x="865" y="20" width="235" height="145" rx="6" fill="#fff" stroke="#0284c7" stroke-width="1.5"/>
+          <rect x="865" y="20" width="235" height="26" rx="6" fill="#0369a1"/>
+          <text x="982" y="37" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">TCNTPdtAdjPriHD &rarr; DT</text>
+          <text x="875" y="62" font-size="11" fill="#0f172a" font-weight="700">PK  FTBchCode + FTXphDocNo</text>
+          <text x="875" y="80" font-size="11" fill="#475569">    FDXphDStart / FTXphStaApv</text>
+          <text x="875" y="98" font-size="11" fill="#475569">DT: FNXpdSeq, FTPdtCode (FK)</text>
+          <text x="875" y="116" font-size="11" fill="#475569">    FCXpdPriceRet / FDLastUpdOn</text>
+
+          <!-- Entity: TCNTPmtHD V6 -->
+          <rect x="585" y="195" width="245" height="135" rx="6" fill="#fff" stroke="#7c3aed" stroke-width="1.6"/>
+          <rect x="585" y="195" width="245" height="26" rx="6" fill="#7c3aed"/>
+          <text x="707" y="212" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">TCNTPmtHD (โปรโมชัน V6)</text>
+          <text x="595" y="237" font-size="11" fill="#0f172a" font-weight="700">PK  FTAgnCode + FTPmhDocNo + Ver</text>
+          <text x="595" y="255" font-size="11" fill="#475569">    FTPmhName / FTPmhStaActive</text>
+          <text x="595" y="273" font-size="11" fill="#dc2626" font-weight="700">    FDPmhDStart (เริ่มวันไหน)</text>
+          <text x="595" y="291" font-size="11" fill="#dc2626" font-weight="700">    FDPmhDStop (หมดวันไหน&rarr;คืนปกติ)</text>
+          <text x="595" y="309" font-size="11" fill="#475569">    FNPmhPriority / FTPmhRuleJson</text>
+
+          <!-- Entity: TCNTPmtGrpDT + Cond -->
+          <rect x="865" y="195" width="235" height="135" rx="6" fill="#fff" stroke="#7c3aed" stroke-width="1.5"/>
+          <rect x="865" y="195" width="235" height="26" rx="6" fill="#6d28d9"/>
+          <text x="982" y="212" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">TCNTPmtGrpDT &amp; Cond (V6)</text>
+          <text x="875" y="237" font-size="11" fill="#0f172a" font-weight="700">PK,FK FTAgnCode + FTPmhDocNo</text>
+          <text x="875" y="255" font-size="11" fill="#0f172a" font-weight="700">PK    FTPmdGrpName + FNPmdSeqNo</text>
+          <text x="875" y="273" font-size="11" fill="#0284c7">FK    FTPmdRefCode (FTPdtCode)</text>
+          <text x="875" y="291" font-size="11" fill="#475569">Cond: FNPmcSeqNo, FTPmcCondType,</text>
+          <text x="875" y="309" font-size="11" fill="#475569">      FCPmcValue (ลด/ราคาโปร)</text>
+
+          <!-- Label Config Zone Bottom -->
+          <rect x="20" y="385" width="235" height="145" rx="6" fill="#fff" stroke="#059669" stroke-width="1.6"/>
+          <rect x="20" y="385" width="235" height="26" rx="6" fill="#059669"/>
+          <text x="137" y="402" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">TCNMPdtLabel (ผูกสินค้ากับป้าย)</text>
+          <text x="30" y="427" font-size="11" fill="#0f172a" font-weight="700">PK,FK FTPdtCode</text>
+          <text x="30" y="445" font-size="11" fill="#0f172a" font-weight="700">PK,FK FTBarCode</text>
+          <text x="30" y="463" font-size="11" fill="#0f172a" font-weight="700">PK,FK FTLbsCode</text>
+          <text x="30" y="481" font-size="11" fill="#475569">      FNPdlQty (จำนวนดวง)</text>
+          <text x="30" y="499" font-size="11" fill="#475569">      FTPdlStaDef ('1'=ป้ายหลัก)</text>
+
+          <rect x="305" y="385" width="245" height="150" rx="6" fill="#fff" stroke="#059669" stroke-width="1.6"/>
+          <rect x="305" y="385" width="245" height="26" rx="6" fill="#059669"/>
+          <text x="427" y="402" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">TCNMLabelSize (ขนาดป้าย)</text>
+          <text x="315" y="427" font-size="11" fill="#0f172a" font-weight="700">PK  FTLbsCode (UFM-NOR-16 ฯลฯ)</text>
+          <text x="315" y="445" font-size="11" fill="#475569">    FCLbsWidth / FCLbsHeight</text>
+          <text x="315" y="463" font-size="11" fill="#475569">    FNLbsCol / FNLbsRow</text>
+          <text x="315" y="481" font-size="11" fill="#475569">    FTLbsPaperSize (A4/B5/ROLL)</text>
+          <text x="315" y="499" font-size="11" fill="#475569">FK  FTPprCode &rarr; TCNMPreprint</text>
+
+          <rect x="595" y="385" width="235" height="145" rx="6" fill="#fff" stroke="#059669" stroke-width="1.5"/>
+          <rect x="595" y="385" width="235" height="26" rx="6" fill="#047857"/>
+          <text x="712" y="402" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">TCNMLabelTmpl (รูปแบบหน้าป้าย)</text>
+          <text x="605" y="427" font-size="11" fill="#0f172a" font-weight="700">PK  FTLtmCode</text>
+          <text x="605" y="445" font-size="11" fill="#059669" font-weight="700">FK  FTLbsCode</text>
+          <text x="605" y="463" font-size="11" fill="#475569">    FTLtmPriType ('1'=ปกติ/'2'=โปร)</text>
+          <text x="605" y="481" font-size="11" fill="#475569">    FTLtmLayout (JSON วางฟิลด์)</text>
+
+          <rect x="865" y="385" width="235" height="145" rx="6" fill="#fff" stroke="#059669" stroke-width="1.5"/>
+          <rect x="865" y="385" width="235" height="26" rx="6" fill="#047857"/>
+          <text x="982" y="402" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">TCNMLabelPrinter (ผูกถาดพิมพ์)</text>
+          <text x="875" y="427" font-size="11" fill="#0f172a" font-weight="700">PK,FK FTLbsCode</text>
+          <text x="875" y="445" font-size="11" fill="#0f172a" font-weight="700">PK    FTPsvCode + FTLbpPriType</text>
+          <text x="875" y="463" font-size="11" fill="#475569">      FTLbpPrinter (ชื่อเครื่องพิมพ์)</text>
+          <text x="875" y="481" font-size="11" fill="#475569">      FTLbpTray (ถาดกระดาษ 1/2)</text>
+          <text x="875" y="499" font-size="11" fill="#475569">      FTLbpProtocol (PDF/ZPL/EZPL)</text>
+
+          <!-- ER Relations 1:N -->
+          <path d="M295 110 L270 110 L270 210 L245 210" stroke="#0284c7" stroke-width="1.6" fill="none" marker-start="url(#pk-one)" marker-end="url(#fk-many)"/>
+          <path d="M412 165 L412 198" stroke="#0284c7" stroke-width="1.6" fill="none" marker-start="url(#pk-one)" marker-end="url(#fk-many)"/>
+          <path d="M530 78 L583 78" stroke="#0284c7" stroke-width="1.6" fill="none" marker-start="url(#pk-one)" marker-end="url(#fk-many)"/>
+          <path d="M530 48 L560 48 L560 12 L982 12 L982 18" stroke="#0284c7" stroke-width="1.4" stroke-dasharray="4 3" fill="none" marker-start="url(#pk-one)" marker-end="url(#fk-many)"/>
+          <path d="M245 50 L265 50 L265 180 L650 180 L650 165" stroke="#0284c7" stroke-width="1.4" stroke-dasharray="4 3" fill="none" marker-start="url(#pk-one)" marker-end="url(#fk-many)"/>
+          <path d="M830 262 L863 262" stroke="#7c3aed" stroke-width="1.6" fill="none" marker-start="url(#pk-one)" marker-end="url(#fk-many)"/>
+          <path d="M530 268 L560 268 L560 348 L982 348 L982 330" stroke="#7c3aed" stroke-width="1.4" stroke-dasharray="4 3" fill="none" marker-start="url(#pk-one)" marker-end="url(#fk-many)"/>
+
+          <path d="M350 330 L350 356 L137 356 L137 383" stroke="#059669" stroke-width="1.6" fill="none" marker-start="url(#pk-one)" marker-end="url(#fk-many-grn)"/>
+          <path d="M305 460 L257 460" stroke="#059669" stroke-width="1.6" fill="none" marker-start="url(#pk-one)" marker-end="url(#fk-many-grn)"/>
+          <path d="M550 450 L593 450" stroke="#059669" stroke-width="1.6" fill="none" marker-start="url(#pk-one)" marker-end="url(#fk-many-grn)"/>
+          <path d="M550 515 L572 515 L572 544 L848 544 L848 450 L863 450" stroke="#059669" stroke-width="1.6" fill="none" marker-start="url(#pk-one)" marker-end="url(#fk-many-grn)"/>
+
+          <!-- Human-Readable Relationship Labels on ER1 -->
+          <rect x="537" y="68" width="42" height="18" rx="4" fill="#fff" stroke="#bfdbfe"/>
+          <text x="558" y="81" text-anchor="middle" font-size="9.5" fill="#0369a1" font-weight="700">มีราคา</text>
+          <rect x="372" y="171" width="80" height="18" rx="4" fill="#fff" stroke="#bfdbfe"/>
+          <text x="412" y="184" text-anchor="middle" font-size="9.5" fill="#0369a1" font-weight="700">มีหลายบาร์โค้ด</text>
+          <rect x="833" y="242" width="30" height="18" rx="4" fill="#fff" stroke="#ddd6fe"/>
+          <text x="848" y="255" text-anchor="middle" font-size="9.5" fill="#5b21b6" font-weight="700">เงื่อนไข</text>
+          <rect x="665" y="534" width="110" height="18" rx="4" fill="#fff" stroke="#a7f3d0"/>
+          <text x="720" y="547" text-anchor="middle" font-size="9.5" fill="#065f46" font-weight="700">เลือกเครื่องพิมพ์/ถาด 1-2</text>
+        </svg>
+        <div class="flow-caption">ER Diagram 1: ความสัมพันธ์ระหว่างตาราง Master (สินค้า/บาร์โค้ด/ราคา/โปรโมชัน V6) กับตารางออกแบบป้ายและถาดเครื่องพิมพ์ (1 ──&lt; N)</div>
+      </div>
+
+      <!-- ER Diagram 2: Auto-Print Schedule, Queue, Watermark, Sync & Job -->
+      <h3 id="er-part2">3.2 ER Diagram 2: ฝั่งตาราง Auto-Print Schedule, Queue, Watermark และประวัติการพิมพ์จริง</h3>
+      <div class="plain-hint"><strong>สรุปภาพนี้ใน 5 วิ:</strong> ซ้ายคือที่เก็บ URL/เวลาซิงค์ &bull; กลาง (5 กล่องสีฟ้า) คือ 5 ตารางใหม่ที่จำเวลาตั้งพิมพ์, คิวทีละใบ (ใครออก/ใครตก) และกันพิมพ์ซ้ำ &bull; ขวา (เขียว) คือ Log การพิมพ์จริง</div>
+      <div class="flow-wrap">
+        <svg viewBox="0 0 1120 485" width="1120" height="485" style="min-width:860px;" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <marker id="pk2" viewBox="0 0 12 12" refX="2" refY="6" markerWidth="10" markerHeight="10" orient="auto">
+              <path d="M4,1 L4,11 M8,1 L8,11" stroke="#0e7490" stroke-width="1.8" fill="none"/>
+            </marker>
+            <marker id="fk2" viewBox="0 0 14 12" refX="12" refY="6" markerWidth="12" markerHeight="12" orient="auto">
+              <path d="M1,6 L12,1 M1,6 L12,6 M1,6 L12,11" stroke="#0e7490" stroke-width="1.6" fill="none"/>
+            </marker>
+          </defs>
+
+          <!-- TCNSSysOption + TCNTSyncLocalState -->
+          <rect x="20" y="20" width="235" height="125" rx="6" fill="#fff" stroke="#7c3aed" stroke-width="1.5"/>
+          <rect x="20" y="20" width="235" height="26" rx="6" fill="#7c3aed"/>
+          <text x="137" y="37" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">TCNSSysOption (ตั้งค่า Admin/UI)</text>
+          <text x="30" y="62" font-size="11" fill="#0f172a" font-weight="700">PK  FTSopCode</text>
+          <text x="30" y="80" font-size="11" fill="#475569">    FTSopValue (MasterApiUrl,</text>
+          <text x="30" y="98" font-size="11" fill="#475569">    MasterApiKey, RetentionDays)</text>
+          <text x="30" y="116" font-size="11" fill="#475569">    FTSopApp = 'PrintBar'</text>
+
+          <rect x="20" y="175" width="235" height="125" rx="6" fill="#fff" stroke="#7c3aed" stroke-width="1.5"/>
+          <rect x="20" y="175" width="235" height="26" rx="6" fill="#6d28d9"/>
+          <text x="137" y="192" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">TCNTSyncLocalState [NEW]</text>
+          <text x="30" y="217" font-size="11" fill="#0f172a" font-weight="700">PK  FTSynTable</text>
+          <text x="30" y="235" font-size="11" fill="#475569">    FDSynLast (เวลาซิงค์ล่าสุด)</text>
+          <text x="30" y="253" font-size="11" fill="#475569">    FTSynSnapshotToken</text>
+          <text x="30" y="271" font-size="11" fill="#475569">    FTSynLastStatus ('OK'|'ERROR')</text>
+
+          <!-- TCNTLabelSchedule [NEW] -->
+          <rect x="300" y="20" width="255" height="192" rx="6" fill="#ecfeff" stroke="#0e7490" stroke-width="1.8"/>
+          <rect x="300" y="20" width="255" height="26" rx="6" fill="#0e7490"/>
+          <text x="427" y="37" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">TCNTLabelSchedule [NEW]</text>
+          <text x="310" y="62" font-size="11" fill="#0f172a" font-weight="700">PK  FTLscCode ('SCH-0400')</text>
+          <text x="310" y="80" font-size="11" fill="#334155">    FTLscStaUse / FTLscRunTime ('04:00')</text>
+          <text x="310" y="98" font-size="11" fill="#334155">    FNLscPreSyncMin / FNLscJitterSec</text>
+          <text x="310" y="116" font-size="11" fill="#334155">    FTLscTriggerRules (4 เคส)</text>
+          <text x="310" y="134" font-size="11" fill="#059669" font-weight="700">FK  FTLscLbsCode &rarr; TCNMLabelSize</text>
+          <text x="310" y="152" font-size="11" fill="#334155">    FTLscOnSyncFail ('ABORT')</text>
+          <text x="310" y="170" font-size="11" fill="#dc2626" font-weight="700">    FTLscOnPrinterBack (WAIT/RESUME)</text>
+          <text x="310" y="188" font-size="11" fill="#334155">    FNLscSyncRetry / FNLscMisfireMin</text>
+
+          <!-- TCNTLabelSchedRun [NEW] -->
+          <rect x="600" y="20" width="250" height="175" rx="6" fill="#ecfeff" stroke="#0e7490" stroke-width="1.8"/>
+          <rect x="600" y="20" width="250" height="26" rx="6" fill="#0e7490"/>
+          <text x="725" y="37" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">TCNTLabelSchedRun [NEW]</text>
+          <text x="610" y="62" font-size="11" fill="#0f172a" font-weight="700">PK  FTLsrRunID (GUID)</text>
+          <text x="610" y="80" font-size="11" fill="#0e7490" font-weight="700">FK  FTLscCode (UNIQUE + BizDate)</text>
+          <text x="610" y="98" font-size="11" fill="#334155">    FDLsrBizDate / FTLsrTriggerBy</text>
+          <text x="610" y="116" font-size="11" fill="#b45309" font-weight="700">    FTLsrStatus (SUCCESS/PARTIAL/FAIL)</text>
+          <text x="610" y="134" font-size="11" fill="#334155">    FTLsrSyncProofJson / SyncAt</text>
+          <text x="610" y="152" font-size="11" fill="#334155">    FNLsrNorQty / PmtQty / FailQty</text>
+          <text x="610" y="170" font-size="11" fill="#059669" font-weight="700">FK  FTLjbJobID &rarr; TCNTLabelJob</text>
+
+          <!-- TCNTLabelSchedQueue [NEW] -->
+          <rect x="600" y="240" width="250" height="212" rx="6" fill="#ecfeff" stroke="#0e7490" stroke-width="1.8"/>
+          <rect x="600" y="240" width="250" height="26" rx="6" fill="#0e7490"/>
+          <text x="725" y="257" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">TCNTLabelSchedQueue [NEW]</text>
+          <text x="610" y="282" font-size="11" fill="#0f172a" font-weight="700">PK,FK FTLsrRunID</text>
+          <text x="610" y="300" font-size="11" fill="#0f172a" font-weight="700">PK    FNLsqSeq</text>
+          <text x="610" y="318" font-size="11" fill="#334155">      FTPdtCode / FTBarCode / FTLbsCode</text>
+          <text x="610" y="336" font-size="11" fill="#334155">      FTLsqTriggerSrc (4 เคส)</text>
+          <text x="610" y="354" font-size="11" fill="#334155">      FTLsqPriType ('1'=Nor,'2'=Pro)</text>
+          <text x="610" y="372" font-size="11" fill="#334155">      FCLsqOldPrice / FCLsqSalePrice</text>
+          <text x="610" y="390" font-size="11" fill="#0284c7">      FTLsqPriceHash (SHA256)</text>
+          <text x="610" y="408" font-size="11" fill="#334155">      FNLsqBatchPage (เลขหน้า/Chunk)</text>
+          <text x="610" y="426" font-size="11" fill="#dc2626" font-weight="700">      FTLsqStatus (PRINTED/FAILED)</text>
+
+          <!-- TCNTLabelSchedWatermark [NEW] -->
+          <rect x="300" y="290" width="255" height="145" rx="6" fill="#ecfeff" stroke="#0e7490" stroke-width="1.8"/>
+          <rect x="300" y="290" width="255" height="26" rx="6" fill="#0e7490"/>
+          <text x="427" y="307" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">TCNTLabelSchedWatermark [NEW]</text>
+          <text x="310" y="332" font-size="11" fill="#0f172a" font-weight="700">PK  FTBarCode</text>
+          <text x="310" y="350" font-size="11" fill="#0f172a" font-weight="700">PK  FTLbsCode</text>
+          <text x="310" y="368" font-size="11" fill="#0284c7" font-weight="700">    FTLswLastHash (กันพิมพ์ซ้ำ)</text>
+          <text x="310" y="386" font-size="11" fill="#334155">    FTLswLastPriType / FCLswLastPrice</text>
+          <text x="310" y="404" font-size="11" fill="#0e7490">FK  FTLsrRunID &rarr; Run ล่าสุด</text>
+
+          <!-- TCNTLabelJob + JobDt + Log -->
+          <rect x="895" y="20" width="205" height="125" rx="6" fill="#ecfdf5" stroke="#059669" stroke-width="1.6"/>
+          <rect x="895" y="20" width="205" height="26" rx="6" fill="#059669"/>
+          <text x="997" y="37" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">TCNTLabelJob (หัวงานพิมพ์)</text>
+          <text x="905" y="62" font-size="11" fill="#0f172a" font-weight="700">PK  FTLjbJobID</text>
+          <text x="905" y="80" font-size="11" fill="#334155">    FTLjbBchCode</text>
+          <text x="905" y="98" font-size="11" fill="#334155">    FTLjbSource ('2'=Auto)</text>
+          <text x="905" y="116" font-size="11" fill="#334155">    FTLjbStatus / FDCreateOn</text>
+
+          <rect x="895" y="175" width="205" height="125" rx="6" fill="#ecfdf5" stroke="#059669" stroke-width="1.5"/>
+          <rect x="895" y="175" width="205" height="26" rx="6" fill="#047857"/>
+          <text x="997" y="192" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">TCNTLabelJobDt (รายดวง)</text>
+          <text x="905" y="217" font-size="11" fill="#0f172a" font-weight="700">PK,FK FTLjbJobID</text>
+          <text x="905" y="235" font-size="11" fill="#0f172a" font-weight="700">PK    FNLjdSeq</text>
+          <text x="905" y="253" font-size="11" fill="#334155">      FTLjdBarCode / PdtCode</text>
+          <text x="905" y="271" font-size="11" fill="#334155">      FCLjdSalePrice / Page</text>
+
+          <rect x="895" y="325" width="205" height="125" rx="6" fill="#ecfdf5" stroke="#059669" stroke-width="1.5"/>
+          <rect x="895" y="325" width="205" height="26" rx="6" fill="#047857"/>
+          <text x="997" y="342" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">TCNTLabelLog (ผล Spooler)</text>
+          <text x="905" y="367" font-size="11" fill="#0f172a" font-weight="700">PK  FTLlgLogID</text>
+          <text x="905" y="385" font-size="11" fill="#059669" font-weight="700">FK  FTLjbJobID</text>
+          <text x="905" y="403" font-size="11" fill="#334155">    FTLlgPrinter / QtyPage</text>
+          <text x="905" y="421" font-size="11" fill="#334155">    FTLlgStatus / ErrMsg</text>
+
+          <!-- ER Relations -->
+          <path d="M555 95 L598 95" stroke="#0e7490" stroke-width="1.8" fill="none" marker-start="url(#pk2)" marker-end="url(#fk2)"/>
+          <path d="M725 195 L725 238" stroke="#0e7490" stroke-width="1.8" fill="none" marker-start="url(#pk2)" marker-end="url(#fk2)"/>
+          <path d="M600 165 L575 165 L575 398 L557 398" stroke="#0e7490" stroke-width="1.6" fill="none" marker-start="url(#pk2)" marker-end="url(#fk2)"/>
+          <path d="M895 75 L872 75 L872 168 L850 168" stroke="#059669" stroke-width="1.6" stroke-dasharray="4 3" fill="none" marker-end="url(#fk2)"/>
+          <path d="M997 145 L997 173" stroke="#059669" stroke-width="1.8" fill="none" marker-start="url(#pk2)" marker-end="url(#fk2)"/>
+          <path d="M895 100 L875 100 L875 385 L893 385" stroke="#059669" stroke-width="1.8" fill="none" marker-start="url(#pk2)" marker-end="url(#fk2)"/>
+
+          <!-- Human-Readable Labels on ER2 -->
+          <rect x="559" y="72" width="38" height="18" rx="4" fill="#fff" stroke="#a5f3fc"/>
+          <text x="578" y="85" text-anchor="middle" font-size="9.5" fill="#0e7490" font-weight="700">รันทุกวัน</text>
+          <rect x="688" y="206" width="74" height="18" rx="4" fill="#fff" stroke="#a5f3fc"/>
+          <text x="725" y="219" text-anchor="middle" font-size="9.5" fill="#0e7490" font-weight="700">แยกคิวทีละใบ</text>
+          <rect x="502" y="252" width="76" height="18" rx="4" fill="#fff" stroke="#a5f3fc"/>
+          <text x="540" y="265" text-anchor="middle" font-size="9.5" fill="#0e7490" font-weight="700">จำตัวพิมพ์แล้ว</text>
+          <rect x="960" y="149" width="74" height="18" rx="4" fill="#fff" stroke="#a7f3d0"/>
+          <text x="997" y="162" text-anchor="middle" font-size="9.5" fill="#065f46" font-weight="700">รายละเอียด 1..N</text>
+        </svg>
+        <div class="flow-caption">ER Diagram 2: ความสัมพันธ์ฝั่งตั้งเวลา Auto-Print, คิวรายบาร์โค้ด, Watermark กันพิมพ์ซ้ำ และ Job/Log พิมพ์จริง (1 ──&lt; N)</div>
+      </div>
+
+      <!-- Data Dictionary + DDL -->
+      <h3 id="db-dict">3.3 สรุปกลุ่มตารางทั้งหมดและสคริปต์ DDL ตารางใหม่ 5 ตาราง</h3>
+      <div class="grid-2">
+        <div class="box">
+          <h4>ตารางเดิมที่มีอยู่แล้วใน <code>AdaAccD.db</code></h4>
+          <ul>
+            <li><strong>กลุ่ม Sync &amp; Config:</strong> <code>TSysSyncData</code>, <code>TCNTConfig</code>, <code>TCNTUrlObject</code>, <code>TCNSSysOption</code>, <code>TCNMBranch/_L</code></li>
+            <li><strong>กลุ่มสินค้า &amp; ราคา (รับ Sync จาก API2PSMaster):</strong> <code>TCNMPdt/_L</code>, <code>TCNMPdtBar</code>, <code>TCNMPdtPackSize</code>, <code>TCNMPdtUnit_L</code>, <code>TCNMPdtBrand_L</code>, <code>TCNMPdtGrp_L</code>, <code>TCNTPdtPrice4PDT</code>, <code>TCNTPdtAdjPriHD/DT</code></li>
+            <li><strong>กลุ่มโปรโมชัน:</strong> V6 (<code>TCNTPmtHD/_L/GrpDT/Cond</code>) และ POS5 (<code>TCNTPdtPmtHD/_L/DT/CG</code>)</li>
+            <li><strong>กลุ่มป้าย &amp; ประวัติพิมพ์:</strong> <code>TCNMPaperSize</code>, <code>TCNMPreprint</code>, <code>TCNMLabelField</code>, <code>TCNMLabelSize</code>, <code>TCNMLabelTmpl</code>, <code>TCNMLabelPrinter</code>, <code>TCNMPdtLabel</code>, <code>TCNTLabelJob/Dt</code>, <code>TCNTLabelLog</code></li>
+          </ul>
+        </div>
+        <div class="box">
+          <h4>ตารางใหม่ 5 ตาราง (เพิ่มใน <code>AdaAccD.db</code>)</h4>
+          <ul>
+            <li><code>TCNTLabelSchedule</code> — แผนตั้งเวลา 04:00, Pre-Sync, วัน, 4 เคส</li>
+            <li><code>TCNTLabelSchedRun</code> — ประวัติรอบรันรายวัน + ล็อกกันรันซ้อนวัน</li>
+            <li><code>TCNTLabelSchedQueue</code> — คิวรายบาร์โค้ดเพื่อติดตามและกด Reprint เฉพาะใบที่ตก</li>
+            <li><code>TCNTLabelSchedWatermark</code> — เก็บ SHA256 ล่าสุดราย <code>FTBarCode + FTLbsCode</code> กันพิมพ์ซ้ำ</li>
+            <li><code>TCNTSyncLocalState</code> — เก็บ Checkpoint ล่าสุดของตารางที่ <code>sync_master.rs</code> ดึง</li>
+          </ul>
+        </div>
+      </div>
+
+      <details class="dev-details">
+        <summary>คลิกเพื่อเปิด/ปิดคำสั่ง SQL DDL สำหรับ Developer (สร้าง 5 ตารางใหม่ + Index ใน AdaAccD.db)</summary>
+        <pre>-- 1) แผนตั้งเวลาพิมพ์อัตโนมัติ
+CREATE TABLE IF NOT EXISTS "TCNTLabelSchedule" (
+    "FTLscCode"          TEXT NOT NULL PRIMARY KEY,
+    "FTLscName"          TEXT NOT NULL,
+    "FTLscStaUse"        TEXT NOT NULL DEFAULT '1',
+    "FTLscRunTime"       TEXT NOT NULL DEFAULT '04:00',
+    "FNLscPreSyncMin"    INTEGER NOT NULL DEFAULT 30,
+    "FNLscJitterSec"     INTEGER NOT NULL DEFAULT 900,
+    "FTLscDaysMask"      TEXT NOT NULL DEFAULT '1111111',
+    "FTLscTriggerRules"  TEXT NOT NULL DEFAULT 'PRICE_CHG,PROMO_START,PROMO_END_REVERT,NEW_PDT',
+    "FTLscBchCode"       TEXT,
+    "FTLscPplCode"       TEXT,
+    "FTLscLbsCode"       TEXT NOT NULL DEFAULT 'UFM-NOR-16',
+    "FNLscQtyMode"       INTEGER NOT NULL DEFAULT 1,
+    "FTLscSyncMode"      TEXT NOT NULL DEFAULT 'DIRECT_API',
+    "FNLscSyncRetry"     INTEGER NOT NULL DEFAULT 3,
+    "FNLscRetryWaitSec"  INTEGER NOT NULL DEFAULT 300,
+    "FTLscOnSyncFail"    TEXT NOT NULL DEFAULT 'ABORT',
+    "FTLscOnPrinterBack" TEXT NOT NULL DEFAULT 'WAIT_CONFIRM', -- 'WAIT_CONFIRM' | 'AUTO_RESUME'
+    "FNLscMisfireMin"    INTEGER NOT NULL DEFAULT 300,
+    "FTLscStaCoverSheet" TEXT NOT NULL DEFAULT '1',
+    "FDLscLastRunAt"     DATETIME, "FDCreateOn" DATETIME, "FTCreateBy" TEXT, "FDLastUpdOn" DATETIME, "FTLastUpdBy" TEXT
+);
+
+-- 2) ประวัติการรันแต่ละวัน (ล็อกเฉพาะ Auto รอบ TIMER/MISFIRE วันละ 1 ครั้ง — ยังกด Manual Test ซ้ำได้)
+CREATE TABLE IF NOT EXISTS "TCNTLabelSchedRun" (
+    "FTLsrRunID"         TEXT NOT NULL PRIMARY KEY,
+    "FTLscCode"          TEXT NOT NULL,
+    "FDLsrBizDate"       TEXT NOT NULL,
+    "FTLsrTriggerBy"     TEXT NOT NULL DEFAULT 'TIMER',
+    "FTLsrStatus"        TEXT NOT NULL,
+    "FDLsrStartedAt"     DATETIME NOT NULL, "FDLsrSyncedAt" DATETIME,
+    "FTLsrSyncProofJson" TEXT,
+    "FNLsrSyncAttempts"  INTEGER NOT NULL DEFAULT 0,
+    "FNLsrCandTotal"     INTEGER NOT NULL DEFAULT 0, "FNLsrSkippedDup" INTEGER NOT NULL DEFAULT 0,
+    "FNLsrNorQty"        INTEGER NOT NULL DEFAULT 0, "FNLsrPmtQty" INTEGER NOT NULL DEFAULT 0, "FNLsrFailQty" INTEGER NOT NULL DEFAULT 0,
+    "FTLjbJobID"         TEXT, "FTLsrErrMsg" TEXT, "FDLsrFinishedAt" DATETIME
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "UX_SchedRun_DailyAuto"
+    ON "TCNTLabelSchedRun"("FTLscCode", "FDLsrBizDate")
+    WHERE "FTLsrTriggerBy" IN ('TIMER', 'MISFIRE')
+      AND "FTLsrStatus" IN ('SUCCESS', 'PARTIAL', 'SKIPPED_EMPTY');
+
+-- 3) คิวรายการรายบาร์โค้ดต่อ 1 รอบรัน (ใช้กด Reprint เฉพาะรายการค้าง)
+CREATE TABLE IF NOT EXISTS "TCNTLabelSchedQueue" (
+    "FTLsrRunID" TEXT NOT NULL, "FNLsqSeq" INTEGER NOT NULL,
+    "FTPdtCode" TEXT NOT NULL, "FTBarCode" TEXT NOT NULL,
+    "FTLsqTriggerSrc" TEXT NOT NULL, "FTLsqPriType" TEXT NOT NULL, "FTLbsCode" TEXT NOT NULL,
+    "FCLsqOldPrice" REAL, "FCLsqSalePrice" REAL NOT NULL, "FTLsqPromoDocNo" TEXT,
+    "FTLsqPriceHash" TEXT NOT NULL, "FNLsqQty" INTEGER NOT NULL DEFAULT 1,
+    "FNLsqBatchPage" INTEGER, "FTLsqStatus" TEXT NOT NULL DEFAULT 'READY', "FTLsqErrMsg" TEXT,
+    PRIMARY KEY ("FTLsrRunID", "FNLsqSeq")
+);
+
+-- 4) Watermark กันพิมพ์ซ้ำ & 5) Sync State
+CREATE TABLE IF NOT EXISTS "TCNTLabelSchedWatermark" (
+    "FTBarCode" TEXT NOT NULL, "FTLbsCode" TEXT NOT NULL,
+    "FTLswLastHash" TEXT NOT NULL, "FTLswLastPriType" TEXT NOT NULL, "FCLswLastPrice" REAL NOT NULL,
+    "FDLswPrintedAt" DATETIME NOT NULL, "FTLsrRunID" TEXT NOT NULL,
+    PRIMARY KEY ("FTBarCode", "FTLbsCode")
+);
+CREATE TABLE IF NOT EXISTS "TCNTSyncLocalState" (
+    "FTSynTable" TEXT NOT NULL PRIMARY KEY, "FDSynLast" TEXT NOT NULL,
+    "FTSynSnapshotToken" TEXT, "FTSynLastChecksum" TEXT, "FDLastSyncAt" DATETIME NOT NULL, "FTSynLastStatus" TEXT NOT NULL
+);</pre>
+      </details>
+    </section>
+
+    <!-- 4. SRS & RISK -->
+    <section class="card" id="sec-srs">
+      <h2><span class="tag num">ส่วนที่ 4</span> ข้อกำหนดระบบ (SRS: FR / NFR) &amp; ความเสี่ยงเครื่องเปิด 24/7</h2>
+
+      <h3>4.1 Functional Requirements (เกณฑ์ตรวจรับงานของ PM/QA)</h3>
+      <table>
+        <thead>
+          <tr><th style="width:70px;">รหัส</th><th style="width:80px;">ระดับ</th><th style="width:220px;">ความต้องการ</th><th>เกณฑ์ผ่าน (Acceptance Criteria)</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><strong>FR-01</strong></td><td><span class="tag crit">Must</span></td><td>User ตั้งเวลาพิมพ์เองใน UI</td><td>ตั้งเวลา (<code>04:00</code>), วัน, เลือก 4 กติกา, ขนาดป้าย, และถาดเครื่องพิมพ์ผ่าน Settings UI ได้โดยไม่ต้องแก้ไฟล์โค้ด</td></tr>
+          <tr><td><strong>FR-02</strong></td><td><span class="tag crit">Must</span></td><td>Sync ตรง <code>API2PSMaster</code> ก่อนพิมพ์</td><td>Pre-Sync (Jitter) + Final Sync ก่อนพิมพ์ หากเน็ตหลุดครบ 3 รอบและตั้ง <code>ABORT</code> ต้อง<strong>ไม่พิมพ์ราคาเก่า</strong></td></tr>
+          <tr><td><strong>FR-03</strong></td><td><span class="tag crit">Must</span></td><td>Delta 4 เคส + คืนป้ายปกติ</td><td>คัด (1) ราคาใหม่ (2) โปรฯ เริ่มวันนี้ (3) โปรฯ หมดเมื่อวาน&rarr;คืนป้ายปกติ (4) สินค้าใหม่ โดยปลดเพดาน <code>LIMIT 500</code></td></tr>
+          <tr><td><strong>FR-04</strong></td><td><span class="tag crit">Must</span></td><td>อ่านโปรโมชัน V6 ตรงกับ POS</td><td><code>promo_v6.rs</code> อ่านได้ทั้งตาราง V6 (<code>TCNTPmt*</code>) และ POS5 (<code>TCNTPdtPmt*</code>)</td></tr>
+          <tr><td><strong>FR-05</strong></td><td><span class="tag crit">Must</span></td><td>Headless Render + แยก 2 ถาด</td><td>เรนเดอร์ป้ายใน Rust ได้แม้เครื่องติด Lock Screen แล้วส่งแยกถาดปกติ/โปรโมชัน + Cover Sheet 1 แผ่น</td></tr>
+          <tr><td><strong>FR-06</strong></td><td><span class="tag crit">Must</span></td><td>กันพิมพ์ซ้ำ + ชดเชยหลังไฟดับ</td><td>ไม่พิมพ์ซ้ำรายการที่ <code>PriceHash</code> เหมือนเดิม; หากไฟดับ/Reboot ช่วงตี 4 กลับมาเปิดก่อน 09:00 น. ให้พิมพ์ชดเชยอัตโนมัติ 1 ครั้ง</td></tr>
+          <tr><td><strong>FR-07</strong></td><td><span class="tag warn">Should</span></td><td>Dry-Run &amp; Reprint Failed Only</td><td>ปุ่มจำลองผลล่วงหน้าโดยไม่ใช้กระดาษ (<strong>ห้ามเขียนลง <code>Watermark</code> / <code>Job</code> จริง</strong>) + แถบ Morning Banner แจ้งผลและกดพิมพ์ซ้ำ/โหลดเข้า Manual เฉพาะรายการที่ค้าง</td></tr>
+        </tbody>
+      </table>
+
+      <h3>4.2 Non-Functional (SLA 24/7) &amp; Risk Matrix</h3>
+      <table>
+        <thead>
+          <tr><th style="width:75px;">รหัส</th><th style="width:210px;">ความเสี่ยง / ข้อกำหนด</th><th>รายละเอียด &amp; แนวทางป้องกัน (24/7 Hardening)</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><strong>NFR-01</strong></td><td>ความเร็ว &amp; RAM 24/7</td><td>100–2,000 SKUs เสร็จใน &le; 5 นาที; Agent ช่วง Idle กิน RAM &lt; 150 MB และบังคับ Dispose Memory หลังพิมพ์ทุกครั้ง + Log Rotation</td></tr>
+          <tr><td><strong>RSK-01</strong></td><td>ไฟดับ / Win Update Reboot ตี 3–4</td><td>ตั้ง Windows Update Active Hours ช่วงกลางคืน–เช้า + Agent เป็น Service Auto-Start on Boot (ไม่รอ Login) + Misfire Catch-up</td></tr>
+          <tr><td><strong>RSK-02</strong></td><td>สาขายิงชนกันตอน 04:00 เป๊ะ</td><td>ใช้ Pre-Sync Window 03:15–03:45 + Jitter กระจายตามรหัสสาขา ก่อนเช็กสั้น/พิมพ์ 04:00 น.</td></tr>
+          <tr><td><strong>RSK-03</strong></td><td>Printer Deep Sleep / USB หลับ</td><td>ปิด Power Saving ของ NIC/USB Selective Suspend + ส่ง Wake Ping ปลุก Printer ก่อนส่ง Spooler + Pre-flight Check</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 5. CODE STRUCTURE, API & USER SETTINGS -->
+    <section class="card" id="sec-code">
+      <h2><span class="tag num">ส่วนที่ 5</span> โครงสร้างโปรแกรม, REST API และสิทธิ์การตั้งค่าของ User</h2>
+
+      <div class="grid-2">
+        <div class="box">
+          <h4>5.1 โครงสร้างไฟล์ (ทำใน D:\POS6\AdaBarprint ทั้งหมด)</h4>
+          <pre>db\AdaAccD.db             -- [Single DB + WAL]
+src-tauri\src\
+├── bin\autoprint_agent.rs -- [NEW] 24/7 Service Daemon
+├── db.rs                  -- เปิด WAL + ตารางใหม่ 5 ตาราง
+├── sync_master.rs         -- [NEW] ยิงตรง API2PSMaster V6
+├── promo_v6.rs            -- [NEW] อ่านโปรโมชัน V6 + POS5
+├── delta_engine.rs        -- [NEW] คัด 4 เคส + PriceHash
+├── label_renderer.rs      -- [NEW] Headless PNG/ZPL + Cover Sheet
+├── scheduler_worker.rs    -- [NEW] Pre-Sync + 04:00 Cron + Retry
+└── routes.rs              -- เพิ่ม API Schedule &amp; Morning Ops
+frontend\components\
+├── MorningOpsBanner.tsx   -- [NEW] แถบสรุปรอบเช้า (Auto-Refresh)
+└── AutoScheduleSettings.tsx -- [NEW] User &amp; Admin Setting UI</pre>
+        </div>
+        <div class="box">
+          <h4>5.2 สิทธิ์การ Set ค่า (User ทำเองได้ผ่าน UI ไม่ต้องแก้ไฟล์)</h4>
+          <table>
+            <thead><tr><th>ผู้ตั้งค่า</th><th>สิ่งที่ตั้งได้เอง</th></tr></thead>
+            <tbody>
+              <tr><td><strong>Store User</strong><br>(ผู้จัดการร้าน)</td><td>เปิด/ปิด Auto-Print, ตั้งเวลา (<code>04:00</code>), วัน, 4 เคสที่พิมพ์, ขนาดป้าย Default, ถาดเครื่องพิมพ์, Cover Sheet, นโยบายเมื่อ Printer กลับมา (<code>WAIT_CONFIRM / AUTO_RESUME</code>), Dry-Run, Reprint Failed / โหลดเข้า Manual</td></tr>
+              <tr><td><strong>IT Admin</strong><br>(แท็บขั้นสูง PIN)</td><td>URL <code>API2PSMaster</code>, <code>X-API-Key</code>, <code>Agn/BchCode</code>, Pre-Sync Jitter, Retry 3x, วันเก็บ Temp (บันทึกใน <code>TCNSSysOption</code> แทน <code>.env</code>)</td></tr>
+              <tr><td><strong>Installer</strong><br>(อัตโนมัติ)</td><td>ลงทะเบียน 24/7 Service, เปิด SQLite WAL, ปิด Sleep / NIC / USB Suspend, ตั้ง Active Hours</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <h3>5.3 REST API Endpoints ใหม่ (พร้อม Error Codes มาตรฐาน)</h3>
+      <table>
+        <thead><tr><th style="width:85px;">Method</th><th style="width:255px;">Path</th><th>หน้าที่</th></tr></thead>
+        <tbody>
+          <tr><td><code>GET/POST</code></td><td><code>/api/schedules</code> &amp; <code>/api/schedules/save</code></td><td>โหลดและบันทึกแผนตั้งเวลา Auto-Print (<code>TCNTLabelSchedule</code>) จากหน้าจอ UI</td></tr>
+          <tr><td><code>POST</code></td><td><code>/api/schedules/:code/trigger</code></td><td>กดทดสอบจำลอง (<code>DRY_RUN</code>) หรือสั่งพิมพ์ทันที (<code>PRINT_NOW</code>)</td></tr>
+          <tr><td><code>GET/POST</code></td><td><code>/api/schedules/runs</code> &amp; <code>.../reprint-failed</code></td><td>ดึงสรุปรอบ 04:00 น. (เช่น พิมพ์แล้ว 5 / ค้าง 15) และสั่งพิมพ์ซ้ำเฉพาะใบค้าง (<code>FAILED</code>)</td></tr>
+          <tr><td><code>POST</code></td><td><code>/api/schedules/runs/:runId/load-to-manual</code></td><td>ดึงเฉพาะรายการสถานะ <code>FAILED</code> ส่งเข้าตารางหลักหน้าพิมพ์ Manual ให้ User จัดการ/เลือกเครื่องพิมพ์เอง</td></tr>
+          <tr><td><code>GET/POST</code></td><td><code>/api/sync/status</code> &amp; <code>/api/sync/trigger</code></td><td>ดูเวลา <code>FDSynLast</code> ล่าสุด และกดทดสอบ Sync กับ <code>API2PSMaster</code> จากหน้า Settings</td></tr>
+        </tbody>
+      </table>
+      <p><strong>รหัส Error สำคัญบนหน้าจอ:</strong> <code>E-SYNC-001</code> (ติดต่อ API2PSMaster ไม่ได้ &rarr; ห้ามพิมพ์ราคาเก่า) &bull; <code>E-DELT-001</code> (อ่านตาราง V6 ไม่พบ) &bull; <code>E-PRT-001/002</code> (Printer Offline / กระดาษหมด &rarr; เปิดปุ่ม Reprint Failed)</p>
+    </section>
+
+    <!-- 6. TESTING & QA -->
+    <section class="card" id="sec-test">
+      <h2><span class="tag num">ส่วนที่ 6</span> แผนทดสอบและตรวจรับงาน (Test Cases TC-01 ถึง TC-10)</h2>
+      <table>
+        <thead>
+          <tr><th style="width:68px;">Case ID</th><th style="width:105px;">ประเภท</th><th style="width:225px;">กรณีทดสอบ</th><th>ผลลัพธ์ที่ต้องผ่าน (Pass Criteria)</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><strong>TC-01</strong></td><td>Unit</td><td>Delta 4 เคสครบถ้วน</td><td>คัดเฉพาะปรับราคา, โปรฯ เริ่มวันนี้, โปรฯ หมดเมื่อวาน (เปลี่ยนเป็นป้ายปกติ), สินค้าใหม่</td></tr>
+          <tr><td><strong>TC-02</strong></td><td>Unit</td><td>V6 Promotion Resolver</td><td>ใส่โปรฯ เฉพาะในตาราง V6 (<code>TCNTPmt*</code>) โปรแกรมต้องอ่านขึ้นมาพิมพ์ป้ายโปรฯ ได้</td></tr>
+          <tr><td><strong>TC-03</strong></td><td>Unit</td><td>กันพิมพ์ซ้ำ (Watermark Hash)</td><td>รันซ้ำรอบ 2 ด้วยข้อมูลเดิมต้องข้าม <code>SKIPPED_DUP</code> ไม่เปลืองกระดาษ</td></tr>
+          <tr><td><strong>TC-04</strong></td><td>SIT</td><td>Direct Sync กับ API2PSMaster</td><td>แก้ราคาบน Mock Server &rarr; <code>sync_master.rs</code> ดึงมาลง <code>AdaAccD.db</code> แล้วพิมพ์ราคาใหม่</td></tr>
+          <tr><td><strong>TC-05</strong></td><td>Failure</td><td>เน็ตล่มตอนตี 4</td><td>Retry 3 รอบแล้วหยุดสถานะ <code>SYNC_FAILED</code> (<code>E-SYNC-001</code>) ห้ามพิมพ์ราคาเก่า</td></tr>
+          <tr><td><strong>TC-06</strong></td><td>Failure</td><td>ไฟดับ / Win Reboot ตอน 04:00</td><td>เครื่องบูตมา 04:30 โดยไม่มีคน Login &rarr; Service Auto-Start และพิมพ์ชดเชยให้อัตโนมัติ</td></tr>
+          <tr><td><strong>TC-07</strong></td><td>SIT</td><td>Headless &amp; Split-Tray</td><td>ไม่เปิดหน้า UI &rarr; พิมพ์ Cover Sheet + ปกติออกถาด 1 + โปรฯ ออกถาด 2 ครบถูกต้อง</td></tr>
+          <tr><td><strong>TC-08</strong></td><td>Failure</td><td>พิมพ์ได้ 5/20 แล้ว Printer Lost + กู้คืน Manual</td><td>ปิด Printer หลังพิมพ์ถึงแผ่นที่ 5: <code>Run='PARTIAL'</code>, 1–5=<code>PRINTED</code>, 6–20=<code>FAILED</code>; โหลด 15 ตัวเข้า Manual / Reprint ครบโดยไม่ซ้ำ 1–5</td></tr>
+          <tr><td><strong>TC-09</strong></td><td>Stress</td><td>WAL Concurrency Lock</td><td><code>sync_master.rs</code> เขียน DB พร้อม User เปิดหน้าค้นหาสินค้า &rarr; ไม่ขึ้น <code>SQLITE_BUSY</code></td></tr>
+          <tr><td><strong>TC-10</strong></td><td>Perf</td><td>2,000 SKUs (ปลด Limit 500)</td><td>คำนวณ + ประกอบไฟล์พิมพ์ + ส่ง Spooler ครบใน &le; 5 นาที โดยหน่วยความจำไม่รั่ว</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 7. ROADMAP, DEPLOYMENT & SUPPORT -->
+    <section class="card" id="sec-deploy">
+      <h2><span class="tag num">ส่วนที่ 7</span> แผนพัฒนา 4 ระยะ, การ Deploy 24/7, Rollback และคู่มือแก้ปัญหา</h2>
+
+      <table>
+        <thead>
+          <tr><th style="width:95px;">ระยะ</th><th style="width:220px;">เป้าหมาย</th><th>งานที่ทำใน <code>AdaBarprint</code></th><th style="width:175px;">เกณฑ์จบระยะ</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><span class="phase-badge">Phase 1</span></td><td>WAL Mode &amp; V6 Promo Fix</td><td>เปิด WAL ใน <code>db.rs</code>, Auto-Backup, แก้ <code>promo_v6.rs</code>, ปลด <code>LIMIT 500</code></td><td>ผ่าน <code>TC-02, TC-09</code></td></tr>
+          <tr><td><span class="phase-badge">Phase 2</span></td><td>Direct Sync API2PSMaster V6</td><td>สร้าง <code>sync_master.rs</code> ดูด ~12 ตาราง + Retry 3x &amp; Abort</td><td>ผ่าน <code>TC-04, TC-05</code></td></tr>
+          <tr><td><span class="phase-badge">Phase 3</span></td><td>Headless Render &amp; 24/7 Agent</td><td>สร้าง 5 ตารางใหม่, <code>delta_engine.rs</code>, <code>label_renderer.rs</code>, <code>autoprint_agent</code></td><td>ผ่าน <code>TC-01, 03, 06, 07, 10</code></td></tr>
+          <tr><td><span class="phase-badge">Phase 4</span></td><td>UI Settings, Morning Ops &amp; Pilot</td><td>หน้าตั้งเวลา User/Admin, Dry-Run, Banner ตอนเช้า, Pilot หน้าร้าน</td><td>ผ่าน <code>TC-08</code> &amp; UAT</td></tr>
+        </tbody>
+      </table>
+
+      <div class="grid-2">
+        <div class="box">
+          <h4>Rollback Plan (ถอยกลับใน 2 นาทีหาก Pilot ติดปัญหา)</h4>
+          <ul>
+            <li><strong>ระดับ 1 (ปิด Auto ชั่วคราว):</strong> ปิดสวิตช์ Auto-Print ใน UI หรือหยุด <code>autoprint_agent</code> พนักงานพิมพ์ Manual ได้ปกติทันที</li>
+            <li><strong>ระดับ 2 (Restore):</strong> คืนไฟล์โปรแกรมเวอร์ชันเดิม + <code>backup_AdaAccD_YYYYMMDD.db</code></li>
+          </ul>
+        </div>
+        <div class="box">
+          <h4>Checklist ก่อนปล่อยจริงบนเครื่อง 24/7</h4>
+          <ul>
+            <li>เปิด WAL Mode + ล้าง Temp PNG/Queue เกิน 60 วันอัตโนมัติ</li>
+            <li>ปิด Sleep, NIC Power Save, USB Selective Suspend + ตั้ง Windows Active Hours</li>
+            <li>Service รันด้วยบัญชี User ที่มี Printer + เติมกระดาษถาด 1/2 ก่อนปิดร้าน</li>
+          </ul>
+        </div>
+      </div>
+
+      <h3>ตารางแก้ปัญหาเบื้องต้นสำหรับ Support ตอนเช้า</h3>
+      <table>
+        <thead><tr><th>อาการตอนเปิดร้าน</th><th>รหัส Error</th><th>วิธีแก้หน้างาน</th></tr></thead>
+        <tbody>
+          <tr><td>ตี 4 ไม่พิมพ์ + แถบแดงแจ้งซิงค์ไม่ได้</td><td><code>E-SYNC-001</code></td><td>เช็กอินเทอร์เน็ต/URL API ในแท็บ Admin แล้วกด <strong>[Run Schedule Now]</strong></td></tr>
+          <tr><td>พิมพ์ไม่ครบ / ขาดเฉพาะกลุ่มโปรฯ</td><td><code>E-PRT-002</code></td><td>เติมกระดาษในถาด 2 / เช็กสายเครื่องพิมพ์ แล้วกด <strong>[Reprint Failed Only]</strong></td></tr>
+          <tr><td>ไม่มีประวัติรันรอบตี 4 เลย</td><td>-</td><td>กด <strong>[Trigger Manual Catch-up]</strong> และตรวจสถานะ Service Auto-Start บน Windows</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+  </main>
+</div>
+
+</body>
+</html>

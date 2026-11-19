@@ -52,6 +52,7 @@ import {
   type PrinterServerRow,
   type SysOptionRow,
 } from '@/components/SettingsPanel';
+import { MorningOpsBanner, type ManualLoadLine } from '@/components/MorningOpsBanner';
 import {
   PAPER_SIZE_PRESETS,
   type CompanyInfoRecord,
@@ -391,6 +392,7 @@ export default function AdaBarprintPage() {
   const [sysOptions, setSysOptions] = useState<SysOptionRow[]>([]);
   const [printerServers, setPrinterServers] = useState<PrinterServerRow[]>([]);
   const [settingsEditLbsCode, setSettingsEditLbsCode] = useState<string | null>(null);
+  const [settingsSubTab, setSettingsSubTab] = useState<'sizes' | 'preprints' | 'printers' | 'devices' | 'system' | 'autoprint' | 'autoprint_history' | null>(null);
   const [filterOpen, setFilterOpen] = useState(true);
 
   // Master data
@@ -654,11 +656,6 @@ export default function AdaBarprintPage() {
             lData.some((s: LabelSizeItem) => s.FTLbsCode === defTmpl && s.FTLbsStaUse === '1')
           ) {
             setSelectedLabelCode(defTmpl);
-          }
-          const defPrinter = findOpt('DefaultPrinter');
-          if (defPrinter) {
-            const mp = list.find((p) => p.name.toLowerCase() === defPrinter.toLowerCase());
-            if (mp) setSelectedPrinterId(mp.id);
           }
         } catch {
           // ignore
@@ -1073,20 +1070,21 @@ export default function AdaBarprintPage() {
     [driverMappings, selectedLabelCode]
   );
 
-  // Auto-select Printer dropdown when Label Format has driver mapping configured
+  // Sync Printer dropdown with Tab 3 driver mapping when configured; otherwise keep '-- ยังไม่เลือก --'
   useEffect(() => {
-    if (!activeDriverMapping || printers.length === 0) return;
+    if (printers.length === 0) return;
     const preferredName =
       sheetPriceType === 'Promotion'
-        ? activeDriverMapping.promoPrinter || activeDriverMapping.normalPrinter
-        : activeDriverMapping.normalPrinter || activeDriverMapping.promoPrinter;
-    if (!preferredName) return;
+        ? activeDriverMapping?.promoPrinter || activeDriverMapping?.normalPrinter || ''
+        : activeDriverMapping?.normalPrinter || activeDriverMapping?.promoPrinter || '';
+    if (!preferredName) {
+      setSelectedPrinterId('');
+      return;
+    }
     const matched = printers.find(
       p => p.name.toLowerCase() === preferredName.toLowerCase()
     );
-    if (matched) {
-      setSelectedPrinterId(matched.id);
-    }
+    setSelectedPrinterId(matched ? matched.id : '');
   }, [activeDriverMapping, sheetPriceType, printers]);
 
   const handleSaveDriverMapping = async () => {
@@ -1944,6 +1942,30 @@ export default function AdaBarprintPage() {
     );
   }
 
+  const handleLoadManualScheduleRows = (lines: ManualLoadLine[], switchToPrint = false) => {
+    const mapped: PrintQueueRow[] = lines.map((l) => ({
+      rowKey: nextQueueRowKey(l.pdtCode, l.barCode, l.priType),
+      pdtCode: l.pdtCode,
+      pdtName: l.pdtName,
+      barCode: l.barCode,
+      price: l.price,
+      priType: l.priType === '2' ? '2' : '1',
+      qty: Math.max(1, l.qty || 1),
+      selected: true,
+      lbsCode: l.lbsCode || selectedLabelCode || 'ADA-100x38',
+      tmplCode: l.tmplCode,
+      ctx: l.ctx,
+      promoName: l.promoName || undefined,
+      statusText: l.statusText || 'นำเข้าจากค้างพิมพ์ตี 4',
+    }));
+    if (mapped[0]?.lbsCode && labelSizes.some((s) => s.FTLbsCode === mapped[0].lbsCode && s.FTLbsStaUse === '1')) {
+      setSelectedLabelCode(mapped[0].lbsCode);
+    }
+    setMainRows((prev) => [...prev, ...mapped]);
+    setMainPage(1);
+    if (switchToPrint) setActiveMenu('print');
+  };
+
   return (
     <>
     <div className="min-h-screen flex bg-[#f0f2f5] text-slate-800 print:hidden">
@@ -2156,9 +2178,19 @@ export default function AdaBarprintPage() {
           formatTrayLabel={formatTrayLabel}
           initialEditLbsCode={settingsEditLbsCode}
           onClearInitialEdit={() => setSettingsEditLbsCode(null)}
+          initialSubTab={settingsSubTab}
+          onClearInitialSubTab={() => setSettingsSubTab(null)}
+          onLoadManualRows={(lines) => handleLoadManualScheduleRows(lines, true)}
         />
       ) : (
-      <main className="max-w-[1600px] w-full mx-auto p-4">
+      <main className="max-w-[1600px] w-full mx-auto p-4 space-y-4">
+        <MorningOpsBanner
+          onOpenScheduleSettings={() => {
+            setSettingsSubTab('autoprint');
+            setActiveMenu('settings');
+          }}
+          onLoadManualRows={(lines) => handleLoadManualScheduleRows(lines, false)}
+        />
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
           {/* Left Panel (4 cols): กำหนดเงื่อนไข */}
           <div className="lg:col-span-4">
@@ -2510,20 +2542,23 @@ export default function AdaBarprintPage() {
                     <Label className="text-xs font-medium"><span className="text-red-500">*</span> เครื่องพิมพ์ (สำรอง / LAN Printer)</Label>
                     <SearchableSelect
                       value={selectedPrinterId}
-                      onValueChange={setSelectedPrinterId}
+                      onValueChange={(v) => setSelectedPrinterId(v === '__NONE__' ? '' : v)}
                       placeholder="เลือกเครื่องพิมพ์..."
                       searchPlaceholder="ค้นหาชื่อเครื่องพิมพ์ หรือ IP..."
                       className="h-9 text-xs"
-                      options={printers.map((p) => ({
-                        value: p.id,
-                        label: `${p.name} (${p.ip}:${p.port})`,
-                        keywords: `${p.name} ${p.ip} ${p.brand}`,
-                        badge: p.ip === 'Windows' ? 'WIN' : 'LAN',
-                        badgeClassName:
-                          p.ip === 'Windows'
-                            ? 'bg-slate-100 text-slate-700'
-                            : 'bg-emerald-100 text-emerald-800',
-                      }))}
+                      options={[
+                        ...(selectedPrinterId ? [{ value: '__NONE__', label: '-- ล้างการเลือก (ยังไม่เลือก) --' }] : []),
+                        ...printers.map((p) => ({
+                          value: p.id,
+                          label: `${p.name} (${p.ip}:${p.port})`,
+                          keywords: `${p.name} ${p.ip} ${p.brand}`,
+                          badge: p.ip === 'Windows' ? 'WIN' : 'LAN',
+                          badgeClassName:
+                            p.ip === 'Windows'
+                              ? 'bg-slate-100 text-slate-700'
+                              : 'bg-emerald-100 text-emerald-800',
+                        })),
+                      ]}
                     />
                   </div>
                   
