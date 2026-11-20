@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod barcode;
 pub mod db;
 pub mod delta_engine;
@@ -9,6 +10,9 @@ pub mod routes;
 pub mod scheduler_worker;
 pub mod sync_master;
 pub mod templates;
+
+/// Global switch to disable embedded Auto-Print scheduler/triggers while preserving history for future flow redesign.
+pub const ENABLE_AUTO_PRINT: bool = false;
 
 use axum::{
     body::Body,
@@ -61,10 +65,13 @@ pub async fn init_db_and_router() -> Result<(Router, SqlitePool), sqlx::Error> {
     db::load_env();
     let pool = db::connect_db().await?;
     db::ensure_label_schema(&pool).await?;
+    auth::ensure_auth_schema(&pool).await?;
     let _ = db::seed_defaults(&pool).await;
     let _ = db::ensure_ufm_label_sizes(&pool).await;
     let _ = db::ensure_ada_label_sizes(&pool).await;
-    if std::env::var("AUTOPRINT_DISABLE_EMBEDDED_SCHEDULER").as_deref() != Ok("1") {
+    if ENABLE_AUTO_PRINT
+        && std::env::var("AUTOPRINT_DISABLE_EMBEDDED_SCHEDULER").as_deref() != Ok("1")
+    {
         scheduler_worker::spawn_scheduler_loop(pool.clone());
     }
     Ok((build_router(pool.clone()), pool))
@@ -73,19 +80,19 @@ pub async fn init_db_and_router() -> Result<(Router, SqlitePool), sqlx::Error> {
 pub fn build_router(pool: SqlitePool) -> Router {
     let state = AppState { pool };
 
-    Router::new()
+    let mut router = Router::new()
+        .route("/api/auth/login-options", get(auth::get_login_options))
+        .route("/api/auth/users", get(auth::get_auth_users))
+        .route("/api/auth/login", post(auth::post_auth_login))
+        .route("/api/auth/me", get(auth::get_auth_me))
+        .route("/api/auth/lock", post(auth::post_auth_lock))
+        .route("/api/auth/unlock", post(auth::post_auth_unlock))
+        .route("/api/auth/logout", post(auth::post_auth_logout))
         .route("/api/seed", get(get_seed).post(post_seed))
         .route("/api/branches", get(get_branches))
         .route("/api/filters/master", get(get_filter_master))
-        .route("/api/schedules", get(get_schedules))
-        .route("/api/schedules/save", post(post_save_schedule))
-        .route("/api/schedules/:code/trigger", post(post_trigger_schedule))
+        // Keep read-only run history endpoint available alongside /api/history
         .route("/api/schedules/runs", get(get_schedule_runs))
-        .route("/api/schedules/runs/:runId/reprint-failed", post(post_reprint_failed_run))
-        .route("/api/schedules/runs/:runId/load-to-manual", post(post_load_failed_to_manual))
-        .route("/api/sync/status", get(get_sync_status))
-        .route("/api/sync/trigger", post(post_sync_trigger))
-        .route("/api/config/admin-verify", post(post_verify_admin_pin))
         .route("/api/paper-sizes", get(get_paper_sizes))
         .route("/api/paper-sizes/save", post(post_save_paper_size))
         .route("/api/paper-sizes/delete", post(post_delete_paper_size))
@@ -126,7 +133,21 @@ pub fn build_router(pool: SqlitePool) -> Router {
         .route("/api/print/check", post(post_print_check))
         .route("/api/print/ezpl", get(get_print_ezpl).post(post_print_ezpl))
         .route("/api/godex/print", post(post_godex_print))
-        .route("/api/godex/status", post(post_godex_status))
+        .route("/api/godex/status", post(post_godex_status));
+
+    if ENABLE_AUTO_PRINT {
+        router = router
+            .route("/api/schedules", get(get_schedules))
+            .route("/api/schedules/save", post(post_save_schedule))
+            .route("/api/schedules/:code/trigger", post(post_trigger_schedule))
+            .route("/api/schedules/runs/:runId/reprint-failed", post(post_reprint_failed_run))
+            .route("/api/schedules/runs/:runId/load-to-manual", post(post_load_failed_to_manual))
+            .route("/api/sync/status", get(get_sync_status))
+            .route("/api/sync/trigger", post(post_sync_trigger))
+            .route("/api/config/admin-verify", post(post_verify_admin_pin));
+    }
+
+    router
         .fallback(static_handler)
         .layer(CorsLayer::permissive())
         .with_state(state)

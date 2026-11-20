@@ -125,22 +125,33 @@ fn new_curl_cmd() -> tokio::process::Command {
     tokio::process::Command::new("curl")
 }
 
-/// Perform HTTP POST JSON using system curl + temp config file (keeps API key off process cmdline).
-async fn post_json_endpoint(url: &str, api_key: &str, payload: &Value, timeout_sec: u64) -> Result<Value, String> {
+/// Perform HTTP GET or POST JSON using system curl + temp config file (keeps API key off process cmdline).
+async fn request_json_endpoint(
+    method: &str,
+    url: &str,
+    api_key: &str,
+    payload: Option<&Value>,
+    timeout_sec: u64,
+) -> Result<Value, String> {
     let tmp_dir = std::env::temp_dir().join(format!("ada_sync_{}", Uuid::new_v4()));
     let _ = std::fs::create_dir_all(&tmp_dir);
     let body_path = tmp_dir.join("req.json");
     let cfg_path = tmp_dir.join("curl.cfg");
 
-    let body_str = serde_json::to_string(payload).map_err(|e| e.to_string())?;
-    std::fs::write(&body_path, &body_str).map_err(|e| e.to_string())?;
-
     let mut cfg = format!(
-        "url = \"{}\"\nrequest = \"POST\"\nsilent\nshow-error\nfail\nmax-time = {}\nheader = \"Content-Type: application/json\"\ndata-binary = \"@{}\"\n",
+        "url = \"{}\"\nrequest = \"{}\"\nsilent\nshow-error\nfail\nmax-time = {}\n",
         url.replace('"', ""),
+        method,
         timeout_sec.max(5),
-        body_path.to_string_lossy().replace('\\', "/")
     );
+    if let Some(p) = payload {
+        let body_str = serde_json::to_string(p).map_err(|e| e.to_string())?;
+        std::fs::write(&body_path, &body_str).map_err(|e| e.to_string())?;
+        cfg.push_str(&format!(
+            "header = \"Content-Type: application/json\"\ndata-binary = \"@{}\"\n",
+            body_path.to_string_lossy().replace('\\', "/")
+        ));
+    }
     if !api_key.is_empty() {
         cfg.push_str(&format!("header = \"X-API-Key: {}\"\n", api_key.replace('"', "")));
     }
@@ -169,6 +180,41 @@ async fn post_json_endpoint(url: &str, api_key: &str, payload: &Value, timeout_s
         }
         Err(e) => Err(format!("Failed spawning curl for {}: {}", url, e)),
     }
+}
+
+async fn post_json_endpoint(url: &str, api_key: &str, payload: &Value, timeout_sec: u64) -> Result<Value, String> {
+    request_json_endpoint("POST", url, api_key, Some(payload), timeout_sec).await
+}
+
+async fn get_json_endpoint(url: &str, api_key: &str, timeout_sec: u64) -> Result<Value, String> {
+    request_json_endpoint("GET", url, api_key, None, timeout_sec).await
+}
+
+fn is_http_404_or_405(err: &str) -> bool {
+    err.contains("error: 404") || err.contains("error: 405") || err.contains(" 404") || err.contains(" 405")
+}
+
+fn url_encode_q(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(*b, b'-' | b'_' | b'.' | b'~') {
+            out.push(*b as char);
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
+}
+
+fn split_iso_date_time(raw: &str, default_time: &str) -> (String, String) {
+    let trimmed = raw.trim();
+    if trimmed.len() >= 19 && (trimmed.as_bytes()[10] == b'T' || trimmed.as_bytes()[10] == b' ') {
+        return (trimmed[..10].to_string(), trimmed[11..19].to_string());
+    }
+    if trimmed.len() >= 10 {
+        return (trimmed[..10].to_string(), default_time.to_string());
+    }
+    (trimmed.to_string(), default_time.to_string())
 }
 
 /// Helper to read JSON field supporting both Ada POS short prefix (`rtPdtCode`) and Pascal DB column (`FTPdtCode`).
@@ -270,7 +316,12 @@ pub async fn apply_master_payload_tx(
         .bind(j_str(row, &["FTPtyCode", "rtPtyCode"]))
         .bind(j_str(row, &["FTPbnCode", "rtPbnCode"]))
         .bind(j_str(row, &["FTPmoCode", "rtPmoCode"]))
-        .bind(j_str(row, &["FDCreateOn", "rdCreateOn"]).unwrap_or_else(|| now_iso.to_string()))
+        .bind(
+            j_str(row, &["FDCreateOn", "rdCreateOn"])
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "1900-01-01 00:00:00".to_string()),
+        )
         .bind(j_str(row, &["FDLastUpdOn", "rdLastUpdOn"]).unwrap_or_else(|| now_iso.to_string()))
         .execute(&mut **tx)
         .await?;
@@ -297,18 +348,32 @@ pub async fn apply_master_payload_tx(
         .await?;
     }
 
-    // 3. TCNMPdtBar
+    // 3. TCNMPdtBar (preserve genuine FDCreateOn; fall back to parent TCNMPdt.FDCreateOn when rdCreateOn is null)
     for row in extract_array(payload, &["raPdtBar", "aoTCNMPdtBar", "TCNMPdtBar", "barcodes"]) {
         let Some(pdt_code) = j_str(row, &["FTPdtCode", "rtPdtCode"]) else { continue };
         let Some(bar_code) = j_str(row, &["FTBarCode", "rtBarCode"]) else { continue };
         let pun_code = j_str(row, &["FTPunCode", "rtPunCode"]).unwrap_or_else(|| "001".to_string());
         let ref_seq = j_i64(row, &["FNBarRefSeq", "rnBarRefSeq"]).unwrap_or(1);
+        let api_bar_create = j_str(row, &["FDCreateOn", "rdCreateOn"])
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         sqlx::query(
             r#"
-            INSERT OR REPLACE INTO TCNMPdtBar (
+            INSERT INTO TCNMPdtBar (
                 FTPdtCode, FTBarCode, FTPunCode, FTBarStaUse, FTBarStaAlwSale,
                 FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy, FNBarRefSeq
-            ) VALUES (?, ?, ?, ?, ?, ?, 'API2PSMASTER', ?, 'API2PSMASTER', ?)
+            ) VALUES (
+                ?, ?, ?, ?, ?,
+                COALESCE(?, (SELECT FDCreateOn FROM TCNMPdt WHERE FTPdtCode = ? LIMIT 1), '1900-01-01 00:00:00'),
+                'API2PSMASTER', ?, 'API2PSMASTER', ?
+            )
+            ON CONFLICT(FTPdtCode, FTBarCode, FNBarRefSeq) DO UPDATE SET
+                FTPunCode = excluded.FTPunCode,
+                FTBarStaUse = excluded.FTBarStaUse,
+                FTBarStaAlwSale = excluded.FTBarStaAlwSale,
+                FDCreateOn = COALESCE(?, TCNMPdtBar.FDCreateOn),
+                FDLastUpdOn = excluded.FDLastUpdOn,
+                FTLastUpdBy = 'API2PSMASTER'
             "#,
         )
         .bind(&pdt_code)
@@ -316,24 +381,93 @@ pub async fn apply_master_payload_tx(
         .bind(&pun_code)
         .bind(j_str(row, &["FTBarStaUse", "rtBarStaUse"]).unwrap_or_else(|| "1".to_string()))
         .bind(j_str(row, &["FTBarStaAlwSale", "rtBarStaAlwSale"]).unwrap_or_else(|| "1".to_string()))
-        .bind(j_str(row, &["FDCreateOn", "rdCreateOn"]).unwrap_or_else(|| now_iso.to_string()))
+        .bind(&api_bar_create)
+        .bind(&pdt_code)
         .bind(j_str(row, &["FDLastUpdOn", "rdLastUpdOn"]).unwrap_or_else(|| now_iso.to_string()))
         .bind(ref_seq)
+        .bind(&api_bar_create)
         .execute(&mut **tx)
         .await?;
     }
 
-    // 4. TCNTPdtPrice4PDT
-    for row in extract_array(payload, &["raPdtPrice4PDT", "aoTCNTPdtPrice4PDT", "TCNTPdtPrice4PDT", "prices"]) {
+    // 3b. TCNMPdtUnit / TCNMPdtUnit_L / TCNMPdtPackSize
+    for row in extract_array(payload, &["raPdtUnit", "aoTCNMPdtUnit", "TCNMPdtUnit"]) {
+        let Some(pun_code) = j_str(row, &["FTPunCode", "rtPunCode"]) else { continue };
+        sqlx::query(
+            "INSERT OR REPLACE INTO TCNMPdtUnit (FTPunCode, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy) VALUES (?, ?, 'API2PSMASTER', ?, 'API2PSMASTER')",
+        )
+        .bind(&pun_code)
+        .bind(j_str(row, &["FDCreateOn", "rdCreateOn"]).unwrap_or_else(|| now_iso.to_string()))
+        .bind(j_str(row, &["FDLastUpdOn", "rdLastUpdOn"]).unwrap_or_else(|| now_iso.to_string()))
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    for row in extract_array(payload, &["raPdtUnitLng", "raPdtUnit_L", "aoTCNMPdtUnit_L", "TCNMPdtUnit_L"]) {
+        let Some(pun_code) = j_str(row, &["FTPunCode", "rtPunCode"]) else { continue };
+        let lng_id = j_i64(row, &["FNLngID", "rnLngID"]).unwrap_or(1);
+        sqlx::query(
+            "INSERT OR REPLACE INTO TCNMPdtUnit_L (FTPunCode, FNLngID, FTPunName) VALUES (?, ?, ?)",
+        )
+        .bind(&pun_code)
+        .bind(lng_id)
+        .bind(j_str(row, &["FTPunName", "rtPunName"]).unwrap_or_else(|| pun_code.clone()))
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    for row in extract_array(payload, &["raPdtPackSize", "aoTCNMPdtPackSize", "TCNMPdtPackSize"]) {
+        let Some(pdt_code) = j_str(row, &["FTPdtCode", "rtPdtCode"]) else { continue };
+        let pun_code = j_str(row, &["FTPunCode", "rtPunCode"]).unwrap_or_else(|| "001".to_string());
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO TCNMPdtPackSize (
+                FTPdtCode, FTPunCode, FCPdtUnitFact, FCPdtPriceRET, FCPdtPriceWHS, FCPdtPriceNET,
+                FTPdtUnitDim, FTPdtPkgDim, FTPdtStaAlwSale, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'API2PSMASTER', ?, 'API2PSMASTER')
+            "#,
+        )
+        .bind(&pdt_code)
+        .bind(&pun_code)
+        .bind(j_f64(row, &["FCPdtUnitFact", "rcPdtUnitFact"]).unwrap_or(1.0))
+        .bind(j_f64(row, &["FCPdtPriceRET", "rcPdtPriceRET"]).unwrap_or(0.0))
+        .bind(j_f64(row, &["FCPdtPriceWHS", "rcPdtPriceWHS"]).unwrap_or(0.0))
+        .bind(j_f64(row, &["FCPdtPriceNET", "rcPdtPriceNET"]).unwrap_or(0.0))
+        .bind(j_str(row, &["FTPdtUnitDim", "rtPdtUnitDim"]))
+        .bind(j_str(row, &["FTPdtPkgDim", "rtPdtPkgDim"]))
+        .bind(j_str(row, &["FTPdtStaAlwSale", "rtPdtStaAlwSale"]).unwrap_or_else(|| "1".to_string()))
+        .bind(j_str(row, &["FDCreateOn", "rdCreateOn"]).unwrap_or_else(|| now_iso.to_string()))
+        .bind(j_str(row, &["FDLastUpdOn", "rdLastUpdOn"]).unwrap_or_else(|| now_iso.to_string()))
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    // 4. TCNTPdtPrice4PDT (supports V6 Pricing Projection `raItems`/`rcPgdPrice`/`rdPghEffectiveStart` and legacy fields)
+    for row in extract_array(payload, &["raItems", "raPdtPrice4PDT", "aoTCNTPdtPrice4PDT", "TCNTPdtPrice4PDT", "prices"]) {
         let Some(pdt_code) = j_str(row, &["FTPdtCode", "rtPdtCode"]) else { continue };
         let agn = j_str(row, &["FTAgnCode", "rtAgnCode"]).unwrap_or_default();
         let pun = j_str(row, &["FTPunCode", "rtPunCode"]).unwrap_or_else(|| "001".to_string());
-        let dstart = j_str(row, &["FDPghDStart", "rdPghDStart"]).unwrap_or_else(|| now_iso[..10].to_string());
-        let tstart = j_str(row, &["FTPghTStart", "rtPghTStart"]).unwrap_or_else(|| "00:00:00".to_string());
+        let (dstart, tstart) = if let Some(eff_start) = j_str(row, &["rdPghEffectiveStart", "FDPghEffectiveStart"]).filter(|s| !s.trim().is_empty()) {
+            split_iso_date_time(&eff_start, "00:00:00")
+        } else {
+            (
+                j_str(row, &["FDPghDStart", "rdPghDStart"]).unwrap_or_else(|| now_iso[..10].to_string()),
+                j_str(row, &["FTPghTStart", "rtPghTStart"]).unwrap_or_else(|| "00:00:00".to_string()),
+            )
+        };
+        let (dstop, tstop) = if let Some(eff_stop) = j_str(row, &["rdPghEffectiveStop", "FDPghEffectiveStop"]).filter(|s| !s.trim().is_empty()) {
+            let (d, t) = split_iso_date_time(&eff_stop, "23:59:59");
+            (Some(d), Some(t))
+        } else {
+            (
+                j_str(row, &["FDPghDStop", "rdPghDStop"]),
+                j_str(row, &["FTPghTStop", "rtPghTStop"]),
+            )
+        };
         let ppl = j_str(row, &["FTPplCode", "rtPplCode"]).unwrap_or_default();
         let doc_no = j_str(row, &["FTPghDocNo", "rtPghDocNo"]).unwrap_or_else(|| "API-SYNC".to_string());
         let doc_type = j_str(row, &["FTPghDocType", "rtPghDocType"]).unwrap_or_else(|| "1".to_string());
-        let ret = j_f64(row, &["FCPgdPriceRet", "rcPgdPriceRet"]).unwrap_or(0.0);
+        let ret = j_f64(row, &["FCPgdPriceRet", "rcPgdPriceRet", "rcPgdPrice", "FCPgdPrice"]).unwrap_or(0.0);
 
         sqlx::query(
             r#"
@@ -347,8 +481,8 @@ pub async fn apply_master_payload_tx(
         )
         .bind(&agn).bind(&pdt_code).bind(&pun).bind(&dstart).bind(&tstart)
         .bind(&ppl)
-        .bind(j_str(row, &["FDPghDStop", "rdPghDStop"]))
-        .bind(j_str(row, &["FTPghTStop", "rtPghTStop"]))
+        .bind(dstop)
+        .bind(tstop)
         .bind(&doc_no).bind(&doc_type)
         .bind(j_str(row, &["FTPghStaAdj", "rtPghStaAdj"]).unwrap_or_else(|| "1".to_string()))
         .bind(ret)
@@ -392,7 +526,7 @@ pub async fn apply_master_payload_tx(
         promos_cnt += 1;
     }
 
-    for row in extract_array(payload, &["raPmtHDLng", "aoTCNTPmtHD_L", "TCNTPmtHD_L"]) {
+    for row in extract_array(payload, &["raPmtHD_L", "raPmtHDLng", "aoTCNTPmtHD_L", "TCNTPmtHD_L"]) {
         let Some(doc_no) = j_str(row, &["FTPmhDocNo", "rtPmhDocNo"]) else { continue };
         let agn = j_str(row, &["FTAgnCode", "rtAgnCode"]).unwrap_or_default();
         let ver = j_i64(row, &["FNPmhVersion", "rnPmhVersion"]).unwrap_or(1);
@@ -411,15 +545,22 @@ pub async fn apply_master_payload_tx(
     for row in extract_array(payload, &["raPmtGrpDT", "aoTCNTPmtGrpDT", "TCNTPmtGrpDT", "promotionItems"]) {
         let Some(doc_no) = j_str(row, &["FTPmhDocNo", "rtPmhDocNo"]) else { continue };
         let agn = j_str(row, &["FTAgnCode", "rtAgnCode"]).unwrap_or_default();
-        let grp = j_str(row, &["FTPmdGrpName", "rtPmdGrpName"]).unwrap_or_else(|| "DEFAULT".to_string());
-        let seq = j_i64(row, &["FNPmdSeqNo", "rnPmdSeqNo"]).unwrap_or(1);
+        let grp = j_str(row, &["FTPmdGrpName", "rtPmdGrpName", "rtPgdGrpKey"]).unwrap_or_else(|| "DEFAULT".to_string());
+        let seq = j_i64(row, &["FNPmdSeqNo", "rnPmdSeqNo", "rnPgdSeq"]).unwrap_or(1);
+        let sta_type = j_str(row, &["FTPmdStaType", "rtPmdStaType"]).unwrap_or_else(|| {
+            if j_str(row, &["rtPgdStaExc", "FTPgdStaExc"]).as_deref() == Some("1") {
+                "2".to_string()
+            } else {
+                "1".to_string()
+            }
+        });
         sqlx::query(
             "INSERT OR REPLACE INTO TCNTPmtGrpDT (FTAgnCode, FTPmhDocNo, FTPmdGrpName, FNPmdSeqNo, FTPmdStaType, FTPmdRefType, FTPmdRefCode, FCPmdQty, FDLastUpdOn, FTLastUpdBy, FDCreateOn, FTCreateBy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'API2PSMASTER', ?, 'API2PSMASTER')",
         )
         .bind(&agn).bind(&doc_no).bind(&grp).bind(seq)
-        .bind(j_str(row, &["FTPmdStaType", "rtPmdStaType"]).unwrap_or_else(|| "1".to_string()))
-        .bind(j_str(row, &["FTPmdRefType", "rtPmdRefType"]).unwrap_or_else(|| "1".to_string()))
-        .bind(j_str(row, &["FTPmdRefCode", "rtPmdRefCode"]))
+        .bind(&sta_type)
+        .bind(j_str(row, &["FTPmdRefType", "rtPmdRefType", "rtPgdRefType"]).unwrap_or_else(|| "1".to_string()))
+        .bind(j_str(row, &["FTPmdRefCode", "rtPmdRefCode", "rtPgdRefCode"]))
         .bind(j_f64(row, &["FCPmdQty", "rcPmdQty"]).unwrap_or(1.0))
         .bind(now_iso).bind(now_iso)
         .execute(&mut **tx)
@@ -455,45 +596,146 @@ async fn execute_single_sync_attempt(
     }
 
     let last_sync = get_last_sync_date(pool).await;
-    let req_body = json!({
+    let eff_bch = if cfg.bch_code.trim().is_empty() {
+        "00001".to_string()
+    } else {
+        cfg.bch_code.trim().to_string()
+    };
+    let legacy_req_body = json!({
         "ptAgnCode": cfg.agn_code,
-        "ptBchCode": cfg.bch_code,
-        "pdDate": last_sync,
+        "ptBchCode": &eff_bch,
+        "pdDate": &last_sync,
     });
 
-    // Step 1: CheckTaskDownload
-    let check_url = format!("{}/CheckTaskDownload", cfg.api_url);
-    let _check_res = post_json_endpoint(&check_url, &cfg.api_key, &req_body, 20).await?;
+    // Step 1: CheckTaskDownload (POS6 V6 `/Service/CheckTaskDownload` with array contract; fallback `/CheckTaskDownload`)
+    let v6_check_url = format!("{}/Service/CheckTaskDownload", cfg.api_url);
+    let v6_check_body = json!([
+        { "pnSynSeqNo": 37, "ptSynTable": "TCNMPdt", "pdSynLast": &last_sync, "ptAgnCode": &cfg.agn_code },
+        { "pnSynSeqNo": 49, "ptSynTable": "TCNTPmtHD", "pdSynLast": &last_sync, "ptAgnCode": &cfg.agn_code },
+        { "pnSynSeqNo": 73, "ptSynTable": "TCNTPdtPrice4PDT", "pdSynLast": &last_sync, "ptAgnCode": &cfg.agn_code }
+    ]);
+    match post_json_endpoint(&v6_check_url, &cfg.api_key, &v6_check_body, 20).await {
+        Ok(_) => {}
+        Err(e) if is_http_404_or_405(&e) => {
+            let legacy_check_url = format!("{}/CheckTaskDownload", cfg.api_url);
+            let _ = post_json_endpoint(&legacy_check_url, &cfg.api_key, &legacy_req_body, 20).await?;
+        }
+        Err(e) => return Err(e),
+    }
 
     let mut total_items = 0usize;
     let mut total_prices = 0usize;
     let mut total_promos = 0usize;
 
-    // Step 2: Pull endpoints sequentially (Products -> Price4Pdt -> Promotion)
-    let endpoints = [
-        format!("{}/Product/Download", cfg.api_url),
-        format!("{}/Price4Pdt/Download", cfg.api_url),
-        format!("{}/Promotion/Download", cfg.api_url),
-    ];
-
     let now_iso = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let mut payloads = Vec::new();
-    for ep in &endpoints {
-        match post_json_endpoint(ep, &cfg.api_key, &req_body, 30).await {
-            Ok(v) => payloads.push(v),
-            Err(e) => {
-                // Allow a unified /Sync/LabelMaster endpoint or require core endpoints
-                if ep.ends_with("/Product/Download") {
-                    let fallback = format!("{}/Product/Item/Download", cfg.api_url);
-                    let v = post_json_endpoint(&fallback, &cfg.api_key, &req_body, 30)
-                        .await
-                        .map_err(|_| e)?;
+
+    // Step 2: Pull Products (`POST /Product/Check` -> paginated `POST /Product/Item/Download`, fallback legacy `POST /Product/Download`)
+    let pdt_corr_id = format!("abp-sync-{}", Uuid::new_v4());
+    let pdt_check_url = format!("{}/Product/Check", cfg.api_url);
+    let pdt_check_body = json!({
+        "ptBchCode": &eff_bch,
+        "ptAgnCode": &cfg.agn_code,
+        "pdDate": "1999-01-01 00:00:00",
+        "ptPosCode": &eff_bch,
+        "ptShpCode": "",
+        "pnRow": 0,
+        "pnStartRow": 0,
+        "ptContractVersion": "1",
+        "pnResolverVersion": 1,
+        "ptPreviousBundleHash": null,
+        "ptCorrelationId": &pdt_corr_id
+    });
+    match post_json_endpoint(&pdt_check_url, &cfg.api_key, &pdt_check_body, 25).await {
+        Ok(chk) => {
+            let rt_code = j_str(&chk, &["rtCode"]).unwrap_or_default();
+            let total = j_i64(&chk, &["rnCount"]).unwrap_or(0).max(0);
+            let page_size = j_i64(&chk, &["rnPageSize"]).unwrap_or(500).clamp(1, 5000);
+            let token = j_str(&chk, &["rtSnapshotToken"]).unwrap_or_default();
+            if rt_code != "800" && total > 0 && !token.is_empty() {
+                let mut start_row = 0i64;
+                let mut remaining = total;
+                let dl_url = format!("{}/Product/Item/Download", cfg.api_url);
+                while remaining > 0 {
+                    let pn_row = remaining.min(page_size);
+                    let page_body = json!({
+                        "ptBchCode": &eff_bch,
+                        "ptAgnCode": &cfg.agn_code,
+                        "pdDate": "1999-01-01 00:00:00",
+                        "ptPosCode": &eff_bch,
+                        "ptShpCode": "",
+                        "pnRow": pn_row,
+                        "pnStartRow": start_row,
+                        "ptSnapshotToken": &token,
+                        "ptContractVersion": "1",
+                        "pnResolverVersion": 1,
+                        "ptPreviousBundleHash": null,
+                        "ptCorrelationId": &pdt_corr_id
+                    });
+                    let v = post_json_endpoint(&dl_url, &cfg.api_key, &page_body, 30).await?;
                     payloads.push(v);
-                } else {
-                    return Err(e);
+                    start_row += pn_row;
+                    remaining -= pn_row;
                 }
             }
         }
+        Err(e) if is_http_404_or_405(&e) => {
+            let legacy_pdt_url = format!("{}/Product/Download", cfg.api_url);
+            match post_json_endpoint(&legacy_pdt_url, &cfg.api_key, &legacy_req_body, 30).await {
+                Ok(v) => payloads.push(v),
+                Err(e2) if is_http_404_or_405(&e2) => {
+                    let fallback = format!("{}/Product/Item/Download", cfg.api_url);
+                    let v = post_json_endpoint(&fallback, &cfg.api_key, &legacy_req_body, 30)
+                        .await
+                        .map_err(|_| e2)?;
+                    payloads.push(v);
+                }
+                Err(e2) => return Err(e2),
+            }
+        }
+        Err(e) => return Err(e),
+    }
+
+    // Step 3: Pull Price4Pdt (`POST /PdtPrice/Price4Pdt/Download` V3, fallback legacy `POST /Price4Pdt/Download`)
+    let v6_price_url = format!("{}/PdtPrice/Price4Pdt/Download", cfg.api_url);
+    let v6_price_body = json!({
+        "ptAgnCode": &cfg.agn_code,
+        "ptBchCode": &eff_bch,
+        "ptPosCode": &eff_bch,
+        "ptContractVersion": "3",
+        "ptSyncMode": "FULL"
+    });
+    match post_json_endpoint(&v6_price_url, &cfg.api_key, &v6_price_body, 30).await {
+        Ok(v) => payloads.push(v),
+        Err(e) if is_http_404_or_405(&e) => {
+            let legacy_price_url = format!("{}/Price4Pdt/Download", cfg.api_url);
+            let v = post_json_endpoint(&legacy_price_url, &cfg.api_key, &legacy_req_body, 30).await?;
+            payloads.push(v);
+        }
+        Err(e) => return Err(e),
+    }
+
+    // Step 4: Pull Promotions (`GET /Product/Promotion/Download?...`, fallback legacy `POST /Promotion/Download`)
+    let promo_since = if last_sync.starts_with("1900-") {
+        "1999-01-01 00:00:00"
+    } else {
+        last_sync.as_str()
+    };
+    let v6_promo_url = format!(
+        "{}/Product/Promotion/Download?pdDate={}&ptBchCode={}&ptAgnCode={}",
+        cfg.api_url,
+        url_encode_q(promo_since),
+        url_encode_q(&eff_bch),
+        url_encode_q(&cfg.agn_code),
+    );
+    match get_json_endpoint(&v6_promo_url, &cfg.api_key, 30).await {
+        Ok(v) => payloads.push(v),
+        Err(e) if is_http_404_or_405(&e) => {
+            let legacy_promo_url = format!("{}/Promotion/Download", cfg.api_url);
+            let v = post_json_endpoint(&legacy_promo_url, &cfg.api_key, &legacy_req_body, 30).await?;
+            payloads.push(v);
+        }
+        Err(e) => return Err(e),
     }
 
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
@@ -598,7 +840,7 @@ pub async fn sync_master_with_retry(
 mod tests {
     use super::*;
     use crate::db::ensure_label_schema;
-    use axum::{routing::post, Json, Router};
+    use axum::{routing::{get, post}, Json, Router};
     use sqlx::sqlite::SqlitePoolOptions;
 
     async fn setup_test_db() -> SqlitePool {
@@ -607,6 +849,9 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS TCNMPdt (FTPdtCode TEXT PRIMARY KEY, FTPdtStaActive TEXT, FTPgpChain TEXT, FTPtyCode TEXT, FTPbnCode TEXT, FTPmoCode TEXT, FDCreateOn TEXT, FTCreateBy TEXT, FDLastUpdOn TEXT, FTLastUpdBy TEXT)",
             "CREATE TABLE IF NOT EXISTS TCNMPdt_L (FTPdtCode TEXT, FNLngID INTEGER, FTPdtName TEXT, FTPdtNameOth TEXT, FTPdtNameABB TEXT, FTPdtRmk TEXT, PRIMARY KEY (FTPdtCode, FNLngID))",
             "CREATE TABLE IF NOT EXISTS TCNMPdtBar (FTPdtCode TEXT, FTBarCode TEXT, FTPunCode TEXT, FTBarStaUse TEXT, FTBarStaAlwSale TEXT, FDCreateOn TEXT, FTCreateBy TEXT, FDLastUpdOn TEXT, FTLastUpdBy TEXT, FNBarRefSeq INTEGER, PRIMARY KEY (FTPdtCode, FTBarCode, FNBarRefSeq))",
+            "CREATE TABLE IF NOT EXISTS TCNMPdtUnit (FTPunCode TEXT PRIMARY KEY, FDCreateOn TEXT, FTCreateBy TEXT, FDLastUpdOn TEXT, FTLastUpdBy TEXT)",
+            "CREATE TABLE IF NOT EXISTS TCNMPdtUnit_L (FTPunCode TEXT, FNLngID INTEGER, FTPunName TEXT, PRIMARY KEY (FTPunCode, FNLngID))",
+            "CREATE TABLE IF NOT EXISTS TCNMPdtPackSize (FTPdtCode TEXT, FTPunCode TEXT, FCPdtUnitFact REAL, FCPdtPriceRET REAL, FCPdtPriceWHS REAL, FCPdtPriceNET REAL, FTPdtUnitDim TEXT, FTPdtPkgDim TEXT, FTPdtStaAlwSale TEXT, FDCreateOn TEXT, FTCreateBy TEXT, FDLastUpdOn TEXT, FTLastUpdBy TEXT, PRIMARY KEY (FTPdtCode, FTPunCode))",
             "CREATE TABLE IF NOT EXISTS TCNTPdtPrice4PDT (FTAgnCode TEXT, FTPdtCode TEXT, FTPunCode TEXT, FDPghDStart TEXT, FTPghTStart TEXT, FTPplCode TEXT, FDPghDStop TEXT, FTPghTStop TEXT, FTPghDocNo TEXT, FTPghDocType TEXT, FTPghStaAdj TEXT, FCPgdPriceRet REAL, FCPgdPriceWhs REAL, FCPgdPriceNet REAL, FDLastUpdOn TEXT, FTLastUpdBy TEXT, FDCreateOn TEXT, FTCreateBy TEXT, PRIMARY KEY (FTAgnCode, FTPdtCode, FTPunCode, FDPghDStart, FTPghTStart, FTPplCode, FTPghDocNo, FTPghDocType))",
             "CREATE TABLE IF NOT EXISTS TCNTPdtAdjPriHD (FTBchCode TEXT, FTXphDocNo TEXT, FDXphDStart TEXT, FDXphDStop TEXT, FTXphStaApv TEXT, FDCreateOn TEXT)",
             "CREATE TABLE IF NOT EXISTS TCNTPdtAdjPriDT (FTBchCode TEXT, FTXphDocNo TEXT, FNXpdSeq INTEGER, FTPdtCode TEXT, FCXpdPriceRet REAL)",
@@ -681,5 +926,144 @@ mod tests {
         let err = sync_master_with_retry(&pool, &bad_cfg).await.unwrap_err();
         assert_eq!(err.code, "E-SYNC-001");
         assert_eq!(err.attempts, 3);
+    }
+
+    #[tokio::test]
+    async fn tc04b_v6_real_contract_sync() {
+        let pool = setup_test_db().await;
+
+        let mock_v6 = Router::new()
+            .route("/Service/CheckTaskDownload", post(|| async { Json(json!({ "rtCode": "001", "rnCount": 3 })) }))
+            .route("/Product/Check", post(|| async {
+                Json(json!({
+                    "rtCode": "001",
+                    "rnCount": 2,
+                    "rnPageSize": 1,
+                    "rtSnapshotToken": "0123456789abcdef0123456789abcdef"
+                }))
+            }))
+            .route("/Product/Item/Download", post(|Json(body): Json<Value>| async move {
+                let start = body.get("pnStartRow").and_then(|v| v.as_i64()).unwrap_or(0);
+                if start == 0 {
+                    Json(json!({
+                        "rtCode": "001",
+                        "roItem": {
+                            "raPdt": [{ "rtPdtCode": "V6-001", "rtPdtStaActive": "1", "rdCreateOn": "2024-08-29T10:00:00" }],
+                            "raPdtLng": [{ "rtPdtCode": "V6-001", "rnLngID": 1, "rtPdtName": "สินค้า V6 หน้า 1" }],
+                            "raPdtBar": [{ "rtPdtCode": "V6-001", "rtBarCode": "8851234567890", "rtPunCode": "PCS", "rnBarRefSeq": 1 }],
+                            "raPdtUnit": [{ "rtPunCode": "PCS" }],
+                            "raPdtUnitLng": [{ "rtPunCode": "PCS", "rnLngID": 1, "rtPunName": "ชิ้น" }],
+                            "raPdtPackSize": [{ "rtPdtCode": "V6-001", "rtPunCode": "PCS", "rcPdtUnitFact": 1.0, "rcPdtPriceRET": 99.0 }]
+                        }
+                    }))
+                } else {
+                    Json(json!({
+                        "rtCode": "001",
+                        "roItem": {
+                            "raPdt": [{ "rtPdtCode": "V6-002", "rtPdtStaActive": "1" }],
+                            "raPdtLng": [{ "rtPdtCode": "V6-002", "rnLngID": 1, "rtPdtName": "สินค้า V6 หน้า 2" }],
+                            "raPdtBar": [{ "rtPdtCode": "V6-002", "rtBarCode": "8851234567899", "rtPunCode": "PCS", "rnBarRefSeq": 1 }]
+                        }
+                    }))
+                }
+            }))
+            .route("/PdtPrice/Price4Pdt/Download", post(|| async {
+                Json(json!({
+                    "rtCode": "001",
+                    "roItem": {
+                        "raItems": [{
+                            "rtAgnCode": "00001",
+                            "rtPdtCode": "V6-001",
+                            "rtPunCode": "PCS",
+                            "rtPplCode": "00003",
+                            "rtPghDocNo": "PA26-001",
+                            "rtPghDocType": "1",
+                            "rdPghEffectiveStart": "2026-11-20T01:15:00",
+                            "rdPghEffectiveStop": null,
+                            "rcPgdPrice": 350.0
+                        }]
+                    }
+                }))
+            }))
+            .route("/Product/Promotion/Download", get(|| async {
+                Json(json!({
+                    "rtCode": "001",
+                    "roItem": {
+                        "raPmtHD": [{
+                            "rtAgnCode": "",
+                            "rtPmhDocNo": "PM-V6-01",
+                            "rnPmhVersion": 1,
+                            "rtPmhStaActive": "1",
+                            "rtPmhName": "โปรฯ V6 จริง",
+                            "rdPmhDStart": "2026-11-01T00:00:00",
+                            "rdPmhDStop": "2026-11-30T00:00:00"
+                        }],
+                        "raPmtHD_L": [{
+                            "rtAgnCode": "",
+                            "rtPmhDocNo": "PM-V6-01",
+                            "rnPmhVersion": 1,
+                            "rnLngID": 1,
+                            "rtPmhName": "โปรฯ V6 ภาษาไทย"
+                        }],
+                        "raPmtGrpDT": [{
+                            "rtAgnCode": "",
+                            "rtPmhDocNo": "PM-V6-01",
+                            "rnPgdSeq": 1,
+                            "rtPgdGrpKey": "GRP1",
+                            "rtPgdRefType": "SKC",
+                            "rtPgdRefCode": "V6-001",
+                            "rtPgdStaExc": "0"
+                        }]
+                    }
+                }))
+            }));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, mock_v6).await;
+        });
+
+        let cfg = MasterSyncConfig {
+            api_url: format!("http://{}", addr),
+            api_key: "12345678-1111-1111-1111-123456789410".to_string(),
+            agn_code: "00001".to_string(),
+            bch_code: "00005".to_string(),
+            retry_count: 1,
+            retry_wait_sec: 0,
+        };
+
+        let proof = sync_master_with_retry(&pool, &cfg).await.unwrap();
+        assert!(proof.ok);
+        assert_eq!(proof.items_upserted, 2);
+        assert_eq!(proof.prices_upserted, 1);
+        assert_eq!(proof.promos_upserted, 1);
+
+        let (p_ret, p_start, p_time): (f64, String, String) = sqlx::query_as(
+            "SELECT FCPgdPriceRet, FDPghDStart, FTPghTStart FROM TCNTPdtPrice4PDT WHERE FTPdtCode = 'V6-001'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!((p_ret - 350.0).abs() < 0.01);
+        assert_eq!(p_start, "2026-11-20");
+        assert_eq!(p_time, "01:15:00");
+
+        let (grp_ref, sta_type): (String, String) = sqlx::query_as(
+            "SELECT FTPmdRefCode, FTPmdStaType FROM TCNTPmtGrpDT WHERE FTPmhDocNo = 'PM-V6-01'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(grp_ref, "V6-001");
+        assert_eq!(sta_type, "1");
+
+        let bar_create: String = sqlx::query_scalar(
+            "SELECT FDCreateOn FROM TCNMPdtBar WHERE FTPdtCode = 'V6-001'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(bar_create, "2024-08-29T10:00:00");
     }
 }

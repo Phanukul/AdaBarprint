@@ -58,6 +58,10 @@ import { AutoScheduleSettings } from '@/components/AutoScheduleSettings';
 import { AutoScheduleHistory } from '@/components/AutoScheduleHistory';
 import type { ManualLoadLine } from '@/components/MorningOpsBanner';
 import type { PrinterBrand, PrinterConfig } from '@/types/printer';
+
+/** Toggle visibility of Auto-Print setup tab & banner while keeping read-only History tab visible. */
+export const ENABLE_AUTO_PRINT_UI = false;
+export const ENABLE_AUTO_PRINT_HISTORY_TAB = true;
 import {
   mergePaperSizeOptions,
   PAPER_SIZE_PRESETS,
@@ -260,9 +264,16 @@ export function SettingsPanel({
   onClearInitialSubTab,
   onLoadManualRows,
 }: SettingsPanelProps) {
-  const [subTab, setSubTab] = useState<'sizes' | 'preprints' | 'printers' | 'devices' | 'system' | 'autoprint' | 'autoprint_history'>(
-    initialEditLbsCode ? 'printers' : initialSubTab || 'sizes'
-  );
+  const [subTab, setSubTab] = useState<'sizes' | 'preprints' | 'printers' | 'devices' | 'system' | 'autoprint' | 'autoprint_history'>(() => {
+    if (initialEditLbsCode) return 'printers';
+    if (!ENABLE_AUTO_PRINT_UI && initialSubTab === 'autoprint') {
+      return 'sizes';
+    }
+    if (!ENABLE_AUTO_PRINT_HISTORY_TAB && initialSubTab === 'autoprint_history') {
+      return 'sizes';
+    }
+    return initialSubTab || 'sizes';
+  });
 
   // ── Tab 1: Label Sizes State ───────────────────────────────────────────────
   const [sizeSearch, setSizeSearch] = useState('');
@@ -355,7 +366,14 @@ export function SettingsPanel({
 
   React.useEffect(() => {
     if (initialSubTab) {
-      setSubTab(initialSubTab);
+      if (
+        (!ENABLE_AUTO_PRINT_UI && initialSubTab === 'autoprint') ||
+        (!ENABLE_AUTO_PRINT_HISTORY_TAB && initialSubTab === 'autoprint_history')
+      ) {
+        setSubTab('sizes');
+      } else {
+        setSubTab(initialSubTab);
+      }
       onClearInitialSubTab?.();
     }
   }, [initialSubTab, onClearInitialSubTab]);
@@ -923,14 +941,18 @@ export function SettingsPanel({
             <Sliders className="h-4 w-4 text-[#007a87]" />
             <span>5. ค่าเริ่มต้นระบบ</span>
           </TabsTrigger>
-          <TabsTrigger value="autoprint" className="flex-none h-9 text-xs px-2.5 gap-1.5">
-            <Clock className="h-4 w-4 text-emerald-600" />
-            <span>6. พิมพ์อัตโนมัติ</span>
-          </TabsTrigger>
-          <TabsTrigger value="autoprint_history" className="flex-none h-9 text-xs px-2.5 gap-1.5">
-            <History className="h-4 w-4 text-sky-600" />
-            <span>7. ประวัติพิมพ์อัตโนมัติ</span>
-          </TabsTrigger>
+          {ENABLE_AUTO_PRINT_UI && (
+            <TabsTrigger value="autoprint" className="flex-none h-9 text-xs px-2.5 gap-1.5">
+              <Clock className="h-4 w-4 text-emerald-600" />
+              <span>6. พิมพ์อัตโนมัติ</span>
+            </TabsTrigger>
+          )}
+          {ENABLE_AUTO_PRINT_HISTORY_TAB && (
+            <TabsTrigger value="autoprint_history" className="flex-none h-9 text-xs px-2.5 gap-1.5">
+              <History className="h-4 w-4 text-sky-600" />
+              <span>{ENABLE_AUTO_PRINT_UI ? '7' : '6'}. ประวัติพิมพ์อัตโนมัติ</span>
+            </TabsTrigger>
+          )}
         </TabsList>
 
         {/* ══════════════════ TAB 1: LABEL SIZES & MARGINS ══════════════════ */}
@@ -1730,28 +1752,31 @@ export function SettingsPanel({
 
         </TabsContent>
 
-        {/* ══════════════════ TAB 6: AUTO-PRINT @ 04:00 AM ══════════════════ */}
-        <TabsContent value="autoprint" className="space-y-4 mt-0">
-          <AutoScheduleSettings
-            allLabelSizes={allLabelSizes}
-            sysOptions={sysOptions}
-            branches={branches}
-            windowsPrinters={windowsPrinters}
-            printers={printers}
-            driverMappings={driverMappings}
-            driverServerCode={driverServerCode}
-            formatTrayLabel={formatTrayLabel}
-            onRefreshAll={onRefreshAll}
-          />
-        </TabsContent>
+        {ENABLE_AUTO_PRINT_UI && (
+          <TabsContent value="autoprint" className="space-y-4 mt-0">
+            <AutoScheduleSettings
+              allLabelSizes={allLabelSizes}
+              sysOptions={sysOptions}
+              branches={branches}
+              windowsPrinters={windowsPrinters}
+              printers={printers}
+              driverMappings={driverMappings}
+              driverServerCode={driverServerCode}
+              formatTrayLabel={formatTrayLabel}
+              onRefreshAll={onRefreshAll}
+            />
+          </TabsContent>
+        )}
 
-        {/* ══════════════════ TAB 7: AUTO-PRINT HISTORY ══════════════════ */}
-        <TabsContent value="autoprint_history" className="space-y-4 mt-0">
-          <AutoScheduleHistory
-            onLoadManualRows={onLoadManualRows}
-            onOpenAutoPrintTab={() => setSubTab('autoprint')}
-          />
-        </TabsContent>
+        {ENABLE_AUTO_PRINT_HISTORY_TAB && (
+          <TabsContent value="autoprint_history" className="space-y-4 mt-0">
+            <AutoScheduleHistory
+              onLoadManualRows={onLoadManualRows}
+              onOpenAutoPrintTab={ENABLE_AUTO_PRINT_UI ? () => setSubTab('autoprint') : undefined}
+              readOnly={!ENABLE_AUTO_PRINT_UI}
+            />
+          </TabsContent>
+        )}
       </Tabs>
 
       {/* ════════════ MODAL: ADD / EDIT LABEL SIZE ════════════════════════════ */}

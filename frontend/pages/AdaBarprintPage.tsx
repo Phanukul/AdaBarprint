@@ -23,6 +23,9 @@ import {
   Palette,
   PanelLeftClose,
   PanelLeftOpen,
+  Lock,
+  LogOut,
+  User as UserIcon,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -47,12 +50,20 @@ import {
   type PreviewMediaConfig,
 } from '@/lib/previewMedia';
 import {
+  ENABLE_AUTO_PRINT_UI,
   SettingsPanel,
   type ConfigLabelSizeRow,
   type PrinterServerRow,
   type SysOptionRow,
 } from '@/components/SettingsPanel';
 import { MorningOpsBanner, type ManualLoadLine } from '@/components/MorningOpsBanner';
+import { LockScreen, LoginPage } from '@/components/LoginPage';
+import {
+  fetchAuthMe,
+  lockAuthSession,
+  logoutAuthSession,
+  type AuthSessionUser,
+} from '@/lib/auth';
 import {
   PAPER_SIZE_PRESETS,
   type CompanyInfoRecord,
@@ -383,7 +394,15 @@ function FilterSelect({
   );
 }
 
-export default function AdaBarprintPage() {
+function AdaBarprintWorkspace({
+  authUser,
+  onLockScreen,
+  onLogout,
+}: {
+  authUser: AuthSessionUser;
+  onLockScreen: () => void;
+  onLogout: () => void;
+}) {
   const [loading, setLoading] = useState(true);
   const [activeMenu, setActiveMenu] = useState<'print' | 'design' | 'settings'>('print');
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -2055,16 +2074,70 @@ export default function AdaBarprintPage() {
           </button>
         </nav>
 
-        {sidebarOpen && (
-          <div className="p-3 border-t border-slate-700/60 text-[10px] text-slate-400 space-y-0.5">
-            <div className="flex items-center justify-between">
-              <span>สถานะระบบ</span>
-              <span className="text-emerald-400 font-medium">พร้อมใช้งาน</span>
+        {sidebarOpen ? (
+          <div className="p-3 border-t border-slate-700/60 text-[10px] text-slate-400 space-y-2">
+            <div className="rounded-md bg-slate-800/70 border border-slate-700/70 px-2.5 py-2 space-y-1">
+              <div className="flex items-center gap-2 text-slate-100 font-semibold text-xs">
+                <UserIcon className="h-3.5 w-3.5 text-teal-400 shrink-0" />
+                <span className="truncate">{authUser.name}</span>
+              </div>
+              <div className="text-[10px] text-slate-400 font-mono truncate">
+                {authUser.id}{authUser.branchName ? ` · ${authUser.branchName}` : ''}
+              </div>
+              <div className="flex items-center gap-1 pt-1">
+                <button
+                  type="button"
+                  onClick={onLockScreen}
+                  className="flex-1 h-6 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-[10px] font-medium flex items-center justify-center gap-1 cursor-pointer"
+                  title="ล็อกหน้าจอชั่วคราว"
+                >
+                  <Lock className="h-3 w-3" />
+                  <span>ล็อก</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={onLogout}
+                  className="flex-1 h-6 rounded bg-red-950/60 hover:bg-red-900/70 text-red-200 border border-red-800/50 text-[10px] font-medium flex items-center justify-center gap-1 cursor-pointer"
+                  title="ออกจากระบบ"
+                >
+                  <LogOut className="h-3 w-3" />
+                  <span>ออก</span>
+                </button>
+              </div>
             </div>
-            <div className="flex items-center justify-between">
-              <span>แบบที่ออกแบบเอง</span>
-              <span className="text-slate-200 font-mono">{Object.keys(customLayouts).length} แบบ</span>
+            <div className="space-y-0.5">
+              <div className="flex items-center justify-between">
+                <span>สถานะระบบ</span>
+                <span className="text-emerald-400 font-medium">พร้อมใช้งาน</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>แบบที่ออกแบบเอง</span>
+                <span className="text-slate-200 font-mono">{Object.keys(customLayouts).length} แบบ</span>
+              </div>
             </div>
+          </div>
+        ) : (
+          <div className="p-2 border-t border-slate-700/60 flex flex-col items-center gap-1.5">
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              onClick={onLockScreen}
+              className="h-8 w-8 text-slate-300 hover:text-white hover:bg-slate-700/60"
+              title="ล็อกหน้าจอชั่วคราว"
+            >
+              <Lock className="h-4 w-4" />
+            </Button>
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              onClick={onLogout}
+              className="h-8 w-8 text-red-300 hover:text-red-100 hover:bg-red-900/50"
+              title="ออกจากระบบ"
+            >
+              <LogOut className="h-4 w-4" />
+            </Button>
           </div>
         )}
       </aside>
@@ -2184,13 +2257,15 @@ export default function AdaBarprintPage() {
         />
       ) : (
       <main className="max-w-[1600px] w-full mx-auto p-4 space-y-4">
-        <MorningOpsBanner
-          onOpenScheduleSettings={() => {
-            setSettingsSubTab('autoprint');
-            setActiveMenu('settings');
-          }}
-          onLoadManualRows={(lines) => handleLoadManualScheduleRows(lines, false)}
-        />
+        {ENABLE_AUTO_PRINT_UI && (
+          <MorningOpsBanner
+            onOpenScheduleSettings={() => {
+              setSettingsSubTab('autoprint');
+              setActiveMenu('settings');
+            }}
+            onLoadManualRows={(lines) => handleLoadManualScheduleRows(lines, false)}
+          />
+        )}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
           {/* Left Panel (4 cols): กำหนดเงื่อนไข */}
           <div className="lg:col-span-4">
@@ -3967,5 +4042,73 @@ export default function AdaBarprintPage() {
       </>
     )}
     </>
+  );
+}
+
+export default function AdaBarprintPage() {
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authUser, setAuthUser] = useState<AuthSessionUser | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchAuthMe()
+      .then((user) => {
+        if (!cancelled) setAuthUser(user);
+      })
+      .catch(() => {
+        if (!cancelled) setAuthUser(null);
+      })
+      .finally(() => {
+        if (!cancelled) setAuthChecked(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleLock = async () => {
+    try {
+      await lockAuthSession();
+    } catch {
+      // still lock UI safely
+    }
+    setAuthUser((prev) => (prev ? { ...prev, locked: true } : null));
+  };
+
+  const handleLogout = async () => {
+    await logoutAuthSession();
+    setAuthUser(null);
+    toast.info('ออกจากระบบเรียบร้อยแล้ว');
+  };
+
+  if (!authChecked) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-100">
+        <Loader2 className="h-6 w-6 animate-spin text-[#007a87] mr-2" />
+        <span className="text-sm text-slate-600">กำลังตรวจสอบสิทธิ์การเข้าใช้งาน...</span>
+      </div>
+    );
+  }
+
+  if (!authUser) {
+    return <LoginPage onLoginSuccess={(user) => setAuthUser(user)} />;
+  }
+
+  if (authUser.locked) {
+    return (
+      <LockScreen
+        user={authUser}
+        onUnlockSuccess={(user) => setAuthUser({ ...user, locked: false })}
+        onLogout={handleLogout}
+      />
+    );
+  }
+
+  return (
+    <AdaBarprintWorkspace
+      authUser={authUser}
+      onLockScreen={handleLock}
+      onLogout={handleLogout}
+    />
   );
 }

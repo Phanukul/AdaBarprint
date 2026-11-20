@@ -42,6 +42,7 @@ import type {
 interface AutoScheduleHistoryProps {
   onLoadManualRows?: (lines: ManualLoadLine[]) => void;
   onOpenAutoPrintTab?: () => void;
+  readOnly?: boolean;
 }
 
 function formatRunStatusTh(status: string): string {
@@ -133,6 +134,7 @@ function formatTimeShort(ts?: string | null): string {
 export function AutoScheduleHistory({
   onLoadManualRows,
   onOpenAutoPrintTab,
+  readOnly = false,
 }: AutoScheduleHistoryProps) {
   const [runs, setRuns] = useState<SchedRunRecord[]>([]);
   const [latestRun, setLatestRun] = useState<SchedRunRecord | null>(null);
@@ -353,7 +355,7 @@ export function AutoScheduleHistory({
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            {onOpenAutoPrintTab && (
+            {!readOnly && onOpenAutoPrintTab && (
               <Button
                 type="button"
                 size="sm"
@@ -415,40 +417,42 @@ export function AutoScheduleHistory({
                 )}
               </div>
 
-              <div className="flex flex-wrap items-center gap-1.5">
-                {latestRun.FNLsrFailQty > 0 && (
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="h-7 text-[11px] bg-red-600 hover:bg-red-700 text-white"
-                    disabled={reprintingRunId === latestRun.FTLsrRunID}
-                    onClick={() => handleReprintFailed(latestRun.FTLsrRunID)}
-                  >
-                    {reprintingRunId === latestRun.FTLsrRunID ? (
-                      <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                    ) : (
-                      <RotateCcw className="h-3 w-3 mr-1" />
-                    )}
-                    พิมพ์ซ้ำเฉพาะที่ค้าง ({latestRun.FNLsrFailQty})
-                  </Button>
-                )}
-                {latestRun.FTLsrStatus === 'SYNC_FAILED' && (
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="h-7 text-[11px] bg-red-600 hover:bg-red-700 text-white"
-                    disabled={retryingRunId === latestRun.FTLsrRunID}
-                    onClick={() => handleRetrySyncRun(latestRun)}
-                  >
-                    {retryingRunId === latestRun.FTLsrRunID ? (
-                      <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                    ) : (
-                      <RotateCcw className="h-3 w-3 mr-1" />
-                    )}
-                    ลองซิงค์และพิมพ์ใหม่
-                  </Button>
-                )}
-              </div>
+              {!readOnly && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {latestRun.FNLsrFailQty > 0 && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="h-7 text-[11px] bg-red-600 hover:bg-red-700 text-white"
+                      disabled={reprintingRunId === latestRun.FTLsrRunID}
+                      onClick={() => handleReprintFailed(latestRun.FTLsrRunID)}
+                    >
+                      {reprintingRunId === latestRun.FTLsrRunID ? (
+                        <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                      ) : (
+                        <RotateCcw className="h-3 w-3 mr-1" />
+                      )}
+                      พิมพ์ซ้ำเฉพาะที่ค้าง ({latestRun.FNLsrFailQty})
+                    </Button>
+                  )}
+                  {latestRun.FTLsrStatus === 'SYNC_FAILED' && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="h-7 text-[11px] bg-red-600 hover:bg-red-700 text-white"
+                      disabled={retryingRunId === latestRun.FTLsrRunID}
+                      onClick={() => handleRetrySyncRun(latestRun)}
+                    >
+                      {retryingRunId === latestRun.FTLsrRunID ? (
+                        <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                      ) : (
+                        <RotateCcw className="h-3 w-3 mr-1" />
+                      )}
+                      ลองซิงค์และพิมพ์ใหม่
+                    </Button>
+                  )}
+                </div>
+              )}
             </div>
           ) : (
             <div className="rounded-md border border-slate-200 bg-slate-50 px-3.5 py-3 text-xs text-slate-600 flex items-center gap-2">
@@ -650,59 +654,61 @@ export function AutoScheduleHistory({
                         </div>
                       </div>
 
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        {selectedRun.FNLsrFailQty > 0 && (
-                          <>
+                      {!readOnly && (
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {selectedRun.FNLsrFailQty > 0 && (
+                            <>
+                              <Button
+                                type="button"
+                                size="sm"
+                                className="h-7 px-2.5 text-[11px] bg-red-600 hover:bg-red-700 text-white"
+                                disabled={reprintingRunId === selectedRun.FTLsrRunID}
+                                onClick={() => handleReprintFailed(selectedRun.FTLsrRunID)}
+                              >
+                                {reprintingRunId === selectedRun.FTLsrRunID ? (
+                                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                                ) : (
+                                  <RotateCcw className="h-3 w-3 mr-1" />
+                                )}
+                                พิมพ์ซ้ำเฉพาะที่ค้าง ({selectedRun.FNLsrFailQty})
+                              </Button>
+                              {onLoadManualRows && (
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-7 px-2.5 text-[11px] border-red-300 text-red-800 bg-white hover:bg-red-50"
+                                  disabled={loadingManualRunId === selectedRun.FTLsrRunID}
+                                  onClick={() => handleLoadToManual(selectedRun.FTLsrRunID)}
+                                >
+                                  {loadingManualRunId === selectedRun.FTLsrRunID ? (
+                                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                                  ) : (
+                                    <FileDown className="h-3 w-3 mr-1" />
+                                  )}
+                                  ส่งไปหน้าพิมพ์หลัก
+                                </Button>
+                              )}
+                            </>
+                          )}
+                          {selectedRun.FTLsrStatus === 'SYNC_FAILED' && (
                             <Button
                               type="button"
                               size="sm"
                               className="h-7 px-2.5 text-[11px] bg-red-600 hover:bg-red-700 text-white"
-                              disabled={reprintingRunId === selectedRun.FTLsrRunID}
-                              onClick={() => handleReprintFailed(selectedRun.FTLsrRunID)}
+                              disabled={retryingRunId === selectedRun.FTLsrRunID}
+                              onClick={() => handleRetrySyncRun(selectedRun)}
                             >
-                              {reprintingRunId === selectedRun.FTLsrRunID ? (
+                              {retryingRunId === selectedRun.FTLsrRunID ? (
                                 <Loader2 className="h-3 w-3 mr-1 animate-spin" />
                               ) : (
                                 <RotateCcw className="h-3 w-3 mr-1" />
                               )}
-                              พิมพ์ซ้ำเฉพาะที่ค้าง ({selectedRun.FNLsrFailQty})
+                              ลองซิงค์และพิมพ์ใหม่
                             </Button>
-                            {onLoadManualRows && (
-                              <Button
-                                type="button"
-                                size="sm"
-                                variant="outline"
-                                className="h-7 px-2.5 text-[11px] border-red-300 text-red-800 bg-white hover:bg-red-50"
-                                disabled={loadingManualRunId === selectedRun.FTLsrRunID}
-                                onClick={() => handleLoadToManual(selectedRun.FTLsrRunID)}
-                              >
-                                {loadingManualRunId === selectedRun.FTLsrRunID ? (
-                                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                                ) : (
-                                  <FileDown className="h-3 w-3 mr-1" />
-                                )}
-                                ส่งไปหน้าพิมพ์หลัก
-                              </Button>
-                            )}
-                          </>
-                        )}
-                        {selectedRun.FTLsrStatus === 'SYNC_FAILED' && (
-                          <Button
-                            type="button"
-                            size="sm"
-                            className="h-7 px-2.5 text-[11px] bg-red-600 hover:bg-red-700 text-white"
-                            disabled={retryingRunId === selectedRun.FTLsrRunID}
-                            onClick={() => handleRetrySyncRun(selectedRun)}
-                          >
-                            {retryingRunId === selectedRun.FTLsrRunID ? (
-                              <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                            ) : (
-                              <RotateCcw className="h-3 w-3 mr-1" />
-                            )}
-                            ลองซิงค์และพิมพ์ใหม่
-                          </Button>
-                        )}
-                      </div>
+                          )}
+                        </div>
+                      )}
                     </div>
 
                     {selectedRun.FTLsrErrMsg && (
