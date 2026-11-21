@@ -26,6 +26,8 @@ pub struct DeltaCandidate {
     pub price_hash: String,
     pub qty: i64,
     pub skipped_dup: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,9 +198,24 @@ pub async fn compute_delta_candidates(
     schedule: &TCNTLabelSchedule,
     biz_date: &str,
 ) -> Result<DeltaSummary, sqlx::Error> {
+    compute_delta_candidates_since(pool, schedule, biz_date, biz_date).await
+}
+
+/// Select changes since the last completed round, resolving prices as of today.
+pub async fn compute_delta_candidates_since(
+    pool: &SqlitePool, schedule: &TCNTLabelSchedule, biz_date: &str, since: &str,
+) -> Result<DeltaSummary, sqlx::Error> {
+    crate::promo_v6::validate_v6_schema(pool).await?;
     let yesterday = previous_day(biz_date);
+    let since_stop = previous_day(since);
     let (eff_ppl, eff_bch) = resolve_effective_ppl_and_bch(pool, schedule).await;
     let mut cand_map: BTreeMap<(String, String), (String, String)> = BTreeMap::new(); // (pdt_code, bar_code) -> (trigger_src, pdt_name)
+
+    if rule_enabled(&schedule.FTLscTriggerRules, "ALL_PRODUCTS") {
+        let bars = sqlx::query_as::<_, BarBasicRow>("SELECT b.FTPdtCode,b.FTBarCode,l.FTPdtName FROM TCNMPdtBar b LEFT JOIN TCNMPdt_L l ON l.FTPdtCode=b.FTPdtCode AND l.FNLngID=1 WHERE COALESCE(b.FTBarStaUse,'1')='1'")
+            .fetch_all(pool).await?;
+        for b in bars { cand_map.insert((b.pdt_code,b.bar_code),("ALL_PRODUCTS".into(),b.pdt_name.unwrap_or_default())); }
+    }
 
     // Case 1: PRICE_CHG (TCNTPdtPrice4PDT or approved TCNTPdtAdjPriHD effective on biz_date)
     if rule_enabled(&schedule.FTLscTriggerRules, "PRICE_CHG") {
@@ -207,7 +224,7 @@ pub async fn compute_delta_candidates(
             SELECT DISTINCT FTPdtCode FROM (
                 SELECT FTPdtCode FROM TCNTPdtPrice4PDT
                 WHERE FTPghDocType = '1'
-                  AND substr(COALESCE(FDPghDStart, ''), 1, 10) = ?
+                  AND substr(COALESCE(FDPghDStart, ''), 1, 10) BETWEEN ? AND ?
                 UNION
                 SELECT dt.FTPdtCode
                 FROM TCNTPdtAdjPriDT dt
@@ -215,14 +232,14 @@ pub async fn compute_delta_candidates(
                   ON hd.FTBchCode = dt.FTBchCode AND hd.FTXphDocNo = dt.FTXphDocNo
                 WHERE COALESCE(hd.FTXphStaApv, '1') = '1'
                   AND (? = '' OR COALESCE(hd.FTBchCode, '') = '' OR hd.FTBchCode = ?)
-                  AND substr(COALESCE(hd.FDXphDStart, ''), 1, 10) = ?
+                  AND substr(COALESCE(hd.FDXphDStart, ''), 1, 10) BETWEEN ? AND ?
             )
             "#,
         )
-        .bind(biz_date)
+        .bind(since).bind(biz_date)
         .bind(&eff_bch)
         .bind(&eff_bch)
-        .bind(biz_date)
+        .bind(since).bind(biz_date)
         .fetch_all(pool)
         .await
         .unwrap_or_default();
@@ -237,11 +254,11 @@ pub async fn compute_delta_candidates(
     }
 
     // Helper closure logic to collect bars from promo refs (both V6 and POS5)
-    async fn resolve_promo_refs(pool: &SqlitePool, target_date: &str, by_stop: bool, bch_code: &str) -> Vec<(String, String)> {
+    async fn resolve_promo_refs(pool: &SqlitePool, target_date: &str, since_date: &str, by_stop: bool, bch_code: &str) -> Result<Vec<(String, String)>, sqlx::Error> {
         let col_v6 = if by_stop { "hd.FDPmhDStop" } else { "hd.FDPmhDStart" };
         let col_v5 = if by_stop { "hd.FDPmhDStop" } else { "hd.FDPmhDStart" };
 
-        let q_v6 = format!(
+        let mut q_v6 = format!(
             r#"
             SELECT DISTINCT gd.FTPmdRefCode, COALESCE(gd.FTPmdRefType, '1') AS RefType
             FROM TCNTPmtHD hd
@@ -250,10 +267,14 @@ pub async fn compute_delta_candidates(
             WHERE COALESCE(hd.FTPmhStaActive, '1') = '1'
               AND (COALESCE(hd.FTPmhStaDoc, '1') = '1' OR COALESCE(hd.FTPmhStaDoc, '') = '')
               AND COALESCE(gd.FTPmdStaType, '1') != '2'
-              AND substr(COALESCE({}, ''), 1, 10) = ?
+              AND substr(COALESCE({}, ''), 1, 10) BETWEEN ? AND ?
             "#,
             col_v6
         );
+        let canonical=crate::promo_v6::uses_canonical_rules(pool).await;
+        if canonical {
+            q_v6=format!("SELECT DISTINCT COALESCE(json_extract(ref.value,'$.code'),'*'),json_extract(ref.value,'$.type') FROM TCNTPmtHD hd,json_each(hd.FTPmhRuleJson,'$.groups') grp,json_each(grp.value,'$.include') ref WHERE COALESCE(hd.FTPmhStaActive,'1')='1' AND COALESCE(hd.FTPmhStaDoc,'')!='9' AND COALESCE(hd.FTPmhStaPrcDoc,'1') IN ('','1') AND hd.FNPmhVersion=(SELECT MAX(v.FNPmhVersion) FROM TCNTPmtHD v WHERE v.FTAgnCode=hd.FTAgnCode AND v.FTPmhDocNo=hd.FTPmhDocNo) AND substr(COALESCE({},''),1,10) BETWEEN ? AND ?",col_v6);
+        }
         let q_v5 = format!(
             r#"
             SELECT DISTINCT COALESCE(NULLIF(NULLIF(dt.FTPmdBarCode, ''), '*'), dt.FTPmdRefCode) AS RefCode,
@@ -264,49 +285,53 @@ pub async fn compute_delta_candidates(
             WHERE COALESCE(hd.FTPmhStaApv, '1') = '1'
               AND COALESCE(hd.FTPmhStaClosed, '2') != '1'
               AND (? = '' OR COALESCE(hd.FTBchCode, '') = '' OR hd.FTBchCode = ?)
-              AND substr(COALESCE({}, ''), 1, 10) = ?
+              AND substr(COALESCE({}, ''), 1, 10) BETWEEN ? AND ?
             "#,
             col_v5
         );
 
-        let mut refs: Vec<(String, String)> = sqlx::query_as(&q_v6)
-            .bind(target_date)
+        let refs_result = sqlx::query_as::<_,(String,String)>(&q_v6)
+            .bind(since_date).bind(target_date)
             .fetch_all(pool)
-            .await
-            .unwrap_or_default();
+            .await;
+        let mut refs=if canonical {refs_result?} else {refs_result.unwrap_or_default()};
         let v5_refs: Vec<(String, String)> = sqlx::query_as(&q_v5)
             .bind(bch_code)
             .bind(bch_code)
-            .bind(target_date)
+            .bind(since_date).bind(target_date)
             .fetch_all(pool)
             .await
             .unwrap_or_default();
         refs.extend(v5_refs);
-        refs
+        Ok(refs)
     }
 
-    async fn expand_refs_to_bars(pool: &SqlitePool, refs: &[(String, String)]) -> Vec<BarBasicRow> {
+    async fn expand_refs_to_bars(pool: &SqlitePool, refs: &[(String, String)]) -> Result<Vec<BarBasicRow>,sqlx::Error> {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
-        for (code, _kind) in refs {
-            if code.trim().is_empty() || code == "*" {
-                continue;
+        for (code, kind) in refs {
+            let kind=kind.to_ascii_uppercase();
+            if !["1","PDT","SKU","SKC","BAR","BARCODE","ALL"].contains(&kind.as_str()) {
+                return Err(sqlx::Error::Protocol("โปรโมชั่นใช้กลุ่มสินค้าที่ยังต้องตรวจขอบเขตก่อนสร้างรายการ Auto".into()));
             }
+            let all=kind=="ALL" || code=="*";
             let found = sqlx::query_as::<_, BarBasicRow>(
                 r#"
                 SELECT b.FTPdtCode, b.FTBarCode, COALESCE(pl.FTPdtName, b.FTPdtCode) AS FTPdtName
                 FROM TCNMPdtBar b
                 LEFT JOIN TCNMPdt_L pl ON pl.FTPdtCode = b.FTPdtCode AND pl.FNLngID = 1
-                WHERE (b.FTPdtCode = ? OR b.FTBarCode = ?)
+                WHERE (? OR (? AND b.FTPdtCode = ?) OR (? AND b.FTBarCode = ?))
                   AND COALESCE(b.FTBarStaUse, '1') = '1'
                 GROUP BY b.FTPdtCode, b.FTBarCode
                 "#,
             )
+            .bind(all)
+            .bind(["1","PDT","SKU","SKC"].contains(&kind.as_str()))
             .bind(code)
+            .bind(["1","BAR","BARCODE"].contains(&kind.as_str()))
             .bind(code)
             .fetch_all(pool)
-            .await
-            .unwrap_or_default();
+            .await?;
 
             for b in found {
                 let k = (b.pdt_code.clone(), b.bar_code.clone());
@@ -315,13 +340,13 @@ pub async fn compute_delta_candidates(
                 }
             }
         }
-        out
+        Ok(out)
     }
 
     // Case 2: PROMO_START
     if rule_enabled(&schedule.FTLscTriggerRules, "PROMO_START") {
-        let refs = resolve_promo_refs(pool, biz_date, false, &eff_bch).await;
-        for b in expand_refs_to_bars(pool, &refs).await {
+        let refs = resolve_promo_refs(pool, biz_date, since, false, &eff_bch).await?;
+        for b in expand_refs_to_bars(pool, &refs).await? {
             cand_map
                 .entry((b.pdt_code, b.bar_code))
                 .or_insert(("PROMO_START".to_string(), b.pdt_name.unwrap_or_default()));
@@ -330,8 +355,8 @@ pub async fn compute_delta_candidates(
 
     // Case 3: PROMO_END_REVERT (stopped yesterday -> reverts to Normal tag today unless overridden by another active promo)
     if rule_enabled(&schedule.FTLscTriggerRules, "PROMO_END_REVERT") {
-        let refs = resolve_promo_refs(pool, &yesterday, true, &eff_bch).await;
-        for b in expand_refs_to_bars(pool, &refs).await {
+        let refs = resolve_promo_refs(pool, &yesterday, &since_stop, true, &eff_bch).await?;
+        for b in expand_refs_to_bars(pool, &refs).await? {
             cand_map
                 .entry((b.pdt_code, b.bar_code))
                 .or_insert(("PROMO_END_REVERT".to_string(), b.pdt_name.unwrap_or_default()));
@@ -348,14 +373,14 @@ pub async fn compute_delta_candidates(
             LEFT JOIN TCNMPdt_L pl ON pl.FTPdtCode = b.FTPdtCode AND pl.FNLngID = 1
             WHERE COALESCE(b.FTBarStaUse, '1') = '1'
               AND (
-                   substr(COALESCE(p.FDCreateOn, ''), 1, 10) = ?
-                OR substr(COALESCE(b.FDCreateOn, ''), 1, 10) = ?
+                   substr(COALESCE(p.FDCreateOn, ''), 1, 10) BETWEEN ? AND ?
+                OR substr(COALESCE(b.FDCreateOn, ''), 1, 10) BETWEEN ? AND ?
               )
             GROUP BY b.FTPdtCode, b.FTBarCode
             "#,
         )
-        .bind(biz_date)
-        .bind(biz_date)
+        .bind(since).bind(biz_date)
+        .bind(since).bind(biz_date)
         .fetch_all(pool)
         .await
         .unwrap_or_default();
@@ -449,6 +474,7 @@ pub async fn compute_delta_candidates(
             price_hash,
             qty,
             skipped_dup: is_dup,
+            context: None,
         });
     }
 
@@ -486,6 +512,7 @@ mod tests {
             sqlx::query(ddl).execute(&pool).await.unwrap();
         }
         ensure_label_schema(&pool).await.unwrap();
+        crate::storage::test_master_promotion_schema(&pool).await;
         pool
     }
 
@@ -550,6 +577,8 @@ mod tests {
         sqlx::query("INSERT INTO TCNMPdtBar (FTPdtCode, FTBarCode, FNBarRefSeq, FTBarStaUse, FDCreateOn) VALUES ('P04', '885004', 1, '1', ?)").bind(biz).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO TCNTPdtPrice4PDT (FTPdtCode, FDPghDStart, FTPghDocType, FCPgdPriceRet) VALUES ('P04', '2026-11-01', '1', 45.0)").execute(&pool).await.unwrap();
 
+        sqlx::query("UPDATE TCNMPdtBar SET FTPunCode='UNIT'").execute(&pool).await.unwrap();
+        sqlx::query("UPDATE TCNTPdtPrice4PDT SET FTPunCode='UNIT'").execute(&pool).await.unwrap();
         let sched = test_sched();
         let res = compute_delta_candidates(&pool, &sched, biz).await.unwrap();
         assert_eq!(res.total_candidates, 4);

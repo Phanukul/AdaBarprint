@@ -315,6 +315,7 @@ export function CustomDesignRenderer({
         />
       )}
       {layout.elements
+        .filter(el=>!el.when||el.when.path.split('.').reduce<any>((v,key)=>v?.[key],line.ctx)===el.when.eq)
         .filter((el) => el.visible !== false)
         .map((el) => {
           const commonStyle: React.CSSProperties = {

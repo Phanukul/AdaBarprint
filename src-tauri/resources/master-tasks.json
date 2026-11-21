@@ -1,0 +1,109 @@
+[
+  {
+    "table": "TCNMBranch",
+    "uri": "/Branch/Download?pdDate={pdDate}&ptAgnCode={ptAgnCode}",
+    "mapping": {
+      "raBch": "TCNMBranch",
+      "raBchLng": "TCNMBranch_L",
+      "raAddrLng": "TCNMAddress_L",
+      "raImage": "TCNMImgObj",
+      "raTCNMBchAotConfig": "TCNMBchAotConfig"
+    }
+  },
+  {
+    "table": "TCNMUser",
+    "uri": "/User/Download?pdDate={pdDate}&ptAgnCode={ptAgnCode}",
+    "mapping": {
+      "raUser": "TCNMUser",
+      "raUserLng": "TCNMUser_L",
+      "raImage": "TCNMImgPerson",
+      "raAddrLng": "TCNMAddress_L",
+      "raUserGrp": "TCNTUsrGroup",
+      "raTCNMUsrLogin": "TCNMUsrLogin",
+      "raTCNMUsrActRole": "TCNMUsrActRole",
+      "raUsrBch": "TCNTUsrBch"
+    }
+  },
+  {
+    "table": "TCNMVatRate",
+    "uri": "/VatRate/Download?pdDate={pdDate}&ptAgnCode={ptAgnCode}",
+    "mapping": {
+      "raItems": "TCNMVatRate"
+    }
+  },
+  {
+    "table": "TCNMPdtGrp",
+    "uri": "/Product/Group/Download?pdDate={pdDate}&ptAgnCode={ptAgnCode}",
+    "mapping": {
+      "raPdtGrp": "TCNMPdtGrp",
+      "raPdtGrpLng": "TCNMPdtGrp_L",
+      "raPdtGrpImg": "TCNMImgPdt"
+    }
+  },
+  {
+    "table": "TCNMPdtBrand",
+    "uri": "/Product/Brand/Download?pdDate={pdDate}&ptAgnCode={ptAgnCode}",
+    "mapping": {
+      "raPdtBrand": "TCNMPdtBrand",
+      "raPdtBrandLng": "TCNMPdtBrand_L"
+    }
+  },
+  {
+    "table": "TCNMPdt",
+    "uri": "/Product/Item/Download",
+    "mapping": {
+      "raPdt": "TCNMPdt",
+      "raPdtLng": "TCNMPdt_L",
+      "raPdtPackSize": "TCNMPdtPackSize",
+      "raPdtBar": "TCNMPdtBar",
+      "raPdtUnit": "TCNMPdtUnit",
+      "raPdtUnitLng": "TCNMPdtUnit_L",
+      "raImgPdt": "TCNMImgPdt",
+      "raTCNMPdtAge": "TCNMPdtAge",
+      "raTCNMPdtDrug": "TCNMPdtDrug",
+      "raTCNMPdtSpcWah": "TCNMPdtSpcWah",
+      "raPdtSet": "TCNTPdtSet",
+      "raPdtFhn": "TFHMPdtFhn",
+      "raPdtColorSize": "TFHMPdtColorSize",
+      "raPdtSpl": "TCNMPdtSpl",
+      "raPdtPolicy": "TCNMPdtPolicy",
+      "raPdtFhnV6": "TCNMPdtFhn",
+      "raPdtFashionVariant": "TCNMPdtFashionVariant",
+      "raPdtProfRef": "TCNMPdtProfRef",
+      "raPdtSrnCtrlProf": "TCNMPdtSrnCtrlProf",
+      "raPdtSrnCtrlProfLng": "TCNMPdtSrnCtrlProf_L",
+      "raPdtWtyProf": "TCNMPdtWtyProf",
+      "raPdtWtyProfLng": "TCNMPdtWtyProf_L",
+      "raPdtWtyProfRoute": "TCNMPdtWtyProfRoute",
+      "raPdtLotExpProf": "TCNMPdtLotExpProf",
+      "raPdtLotExpProfLng": "TCNMPdtLotExpProf_L",
+      "raSalePolicy": "TCNMSalPolicy",
+      "raSalePolicyLng": "TCNMSalPolicy_L",
+      "raSalePolicyCond": "TCNMSalPolCond"
+    }
+  },
+  {
+    "table": "TCNTPdtPrice4PDT",
+    "uri": "/PdtPrice/Price4Pdt/Download",
+    "mapping": {
+      "raPdtPrice4PDT": "TCNTPdtPrice4PDT",
+      "raPdtPrice4PdtStep": "TCNTPdtPrice4PDTStep",
+      "raPdtPrice4PdtScope": "TCNTPdtPrice4PDTScope",
+      "raCstPriList": "TCNMCstPriList",
+      "raPdtPriList": "TCNMPdtPriList",
+      "raPdtPriListLng": "TCNMPdtPriList_L",
+      "raChannel": "TCNSChannel",
+      "raChannelLng": "TCNSChannel_L"
+    }
+  },
+  {
+    "table": "TCNTPmtHD",
+    "uri": "/Product/Promotion/Download?pdDate={pdDate}&ptBchCode={ptBchCode}&ptAgnCode={ptAgnCode}",
+    "mapping": {
+      "raPmtHD": "TCNTPmtHD",
+      "raPmtHD_L": "TCNTPmtHD_L",
+      "raPmtGrpDT": "TCNTPmtGrpDT",
+      "raPmtCond": "TCNTPmtCond"
+    }
+  }
+]

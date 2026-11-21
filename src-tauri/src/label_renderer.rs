@@ -1,7 +1,7 @@
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::SqlitePool;
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
@@ -25,7 +25,7 @@ pub struct PrintDispatchSummary {
     pub err_msg: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedPrinterRoute {
     pub lbs_code: String,
     pub pri_type: String,
@@ -35,18 +35,6 @@ pub struct ResolvedPrinterRoute {
     pub lan_ip: Option<String>,
     pub lan_port: u16,
     pub dpi: u32,
-}
-
-#[derive(FromRow)]
-struct LanPrinterLookup {
-    #[sqlx(rename = "FTPntIP")]
-    ip: Option<String>,
-    #[sqlx(rename = "FNPntPort")]
-    port: Option<i64>,
-    #[sqlx(rename = "FTPntBrand")]
-    brand: Option<String>,
-    #[sqlx(rename = "FNPntDpi")]
-    dpi: Option<i64>,
 }
 
 fn gen_guid() -> String {
@@ -93,24 +81,19 @@ pub async fn resolve_printer_route(
         None => (default_prt, String::new(), "PDF".to_string()),
     };
 
-    // Check if printer_name points to a LAN TCP printer (e.g. from TCNMPrinter)
-    let lan: Option<LanPrinterLookup> = sqlx::query_as(
-        "SELECT FTPntIP, FNPntPort, FTPntBrand, FNPntDpi FROM TCNMPrinter WHERE (FTPntCode = ? OR FTPntName = ?) LIMIT 1",
-    )
-    .bind(&printer_name)
-    .bind(&printer_name)
-    .fetch_optional(pool)
-    .await
-    .unwrap_or(None);
-
+    // Use the same persisted printer schema and port metadata as Manual.
+    let printers = crate::routes::fetch_lan_printers(pool).await;
+    let lan = printers.iter().find(|p| {
+        p.get("id").and_then(Value::as_str) == Some(printer_name.as_str())
+            || p.get("name").and_then(Value::as_str) == Some(printer_name.as_str())
+    });
     let (lan_ip, lan_port, resolved_proto, dpi) = if let Some(lp) = lan {
-        let ip = lp.ip.unwrap_or_default();
-        let is_tcp = !ip.trim().is_empty() && !ip.eq_ignore_ascii_case("Windows");
+        let ip = lp["ip"].as_str().unwrap_or_default().to_string();
         (
-            if is_tcp { Some(ip) } else { None },
-            lp.port.unwrap_or(9100).max(1) as u16,
-            lp.brand.unwrap_or(protocol),
-            lp.dpi.unwrap_or(203) as u32,
+            if !ip.is_empty() { Some(ip) } else { None },
+            lp["port"].as_u64().and_then(|p| u16::try_from(p).ok()).unwrap_or(9100),
+            lp["brand"].as_str().unwrap_or(&protocol).to_string(),
+            lp["dpi"].as_u64().and_then(|d| u32::try_from(d).ok()).unwrap_or(203),
         )
     } else {
         (None, 9100, protocol, 203)
@@ -162,7 +145,7 @@ async fn load_template_elements(pool: &SqlitePool, lbs: Option<&TCNMLabelSize>, 
     (matched.code.clone(), matched.elements.clone())
 }
 
-async fn build_label_context(
+pub(crate) async fn build_label_context(
     pool: &SqlitePool,
     row: &TCNTLabelSchedQueue,
     pdt_name: &str,
@@ -335,7 +318,7 @@ pub async fn cancel_stale_spooler_jobs(printer_name: &str) {
 
 /// Headless Windows GDI page chunk print directly from `TemplateElement` + product `ctx` (no React UI / browser needed!).
 #[cfg(target_os = "windows")]
-async fn send_windows_headless_page(
+pub(crate) async fn send_windows_headless_page(
     route: &ResolvedPrinterRoute,
     lbs: Option<&TCNMLabelSize>,
     elements: &[TemplateElement],
@@ -518,6 +501,13 @@ $doc.add_PrintPage({
             if ($el.fill -match '^#[0-9A-Fa-f]{6}$') { $br.Dispose() }
           }
           $g.DrawRectangle([System.Drawing.Pens]::LightGray, [float]$ex, [float]$ey, [float]$ew, [float]$eh)
+        } elseif ($tp -eq 'line') {
+          $lineColor = [System.Drawing.Color]::Black
+          if ($el.color) { try { $lineColor = [System.Drawing.ColorTranslator]::FromHtml([string]$el.color) } catch {} }
+          $lineWidth = [float]($(if ($null -ne $el.lineWidth) { [double]$el.lineWidth } else { 0.2 })) * $mmToDisplay
+          $pen = New-Object System.Drawing.Pen($lineColor, [Math]::Max(0.1, $lineWidth))
+          $g.DrawLine($pen, [float]$ex, [float]$ey, [float]($ex + $ew), [float]($ey + $eh))
+          $pen.Dispose()
         } elseif ($tp -eq 'barcode') {
           $bits = [string](Get-DigStr $it 'product.bar_bits')
           $barVal = [string](Get-DigStr $it ([string]$el.field))
@@ -1113,17 +1103,26 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS TCNMPdt (FTPdtCode TEXT PRIMARY KEY)",
             "CREATE TABLE IF NOT EXISTS TCNMPdt_L (FTPdtCode TEXT, FNLngID INTEGER, FTPdtName TEXT, PRIMARY KEY (FTPdtCode, FNLngID))",
             "CREATE TABLE IF NOT EXISTS TCNMBranch_L (FTBchCode TEXT, FNLngID INTEGER, FTBchName TEXT)",
-            "CREATE TABLE IF NOT EXISTS TCNMPrinter (FTPntCode TEXT PRIMARY KEY, FTPntName TEXT, FTPntIP TEXT, FNPntPort INTEGER, FTPntBrand TEXT, FNPntDpi INTEGER)",
+            "CREATE TABLE IF NOT EXISTS TCNMPrinter (FTPrnCode TEXT PRIMARY KEY, FTPrnType TEXT, FTPrnSrcType TEXT, FTSppCode TEXT)",
+            "CREATE TABLE IF NOT EXISTS TCNMPrinter_L (FTPrnCode TEXT, FNLngID INTEGER, FTPrnName TEXT)",
+            "CREATE TABLE IF NOT EXISTS TSysPortPrn (FTSppCode TEXT, FTSppValue TEXT, FTSppRef TEXT, FTSppStaUse TEXT)",
             "CREATE TABLE IF NOT EXISTS TCNTPdtPrice4PDT (FTAgnCode TEXT, FTPdtCode TEXT, FDPghDStart TEXT, FTPplCode TEXT)",
         ] {
             sqlx::query(ddl).execute(&pool).await.unwrap();
         }
         ensure_label_schema(&pool).await.unwrap();
 
-        sqlx::query("INSERT INTO TCNMPrinter (FTPntCode, FTPntName, FTPntIP, FNPntPort, FTPntBrand, FNPntDpi) VALUES ('LAN1', 'LAN1', '192.168.1.99', 9100, 'ZEBRA', 203)")
+        sqlx::query("INSERT INTO TCNMPrinter VALUES ('LAN1', 'ZEBRA', '2', 'PORT1')")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TSysPortPrn VALUES ('PORT1', '192.168.1.99:9100', '{}', '1')")
             .execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO TCNMLabelPrinter (FTLbsCode, FTPsvCode, FTLbpPriType, FTLbpPrinter, FTLbpProtocol, FTLbpStaUse) VALUES ('ADA-100x38', 'LOCAL', '1', 'LAN1', 'ZEBRA', '1')")
             .execute(&pool).await.unwrap();
+
+        let route = resolve_printer_route(&pool, "ADA-100x38", "1").await;
+        assert_eq!(route.lan_ip.as_deref(), Some("192.168.1.99"));
+        assert_eq!(route.lan_port, 9100);
+        assert_eq!(route.protocol, "ZEBRA");
 
         let run_id = "RUN-PARTIAL-20";
         sqlx::query("INSERT INTO TCNTLabelSchedRun (FTLsrRunID, FTLscCode, FDLsrBizDate, FTLsrTriggerBy, FTLsrStatus, FDLsrStartedAt) VALUES (?, 'SCH-0400', '2026-11-19', 'TIMER', 'RUNNING', '2026-11-19 04:00:00')")
@@ -1190,7 +1189,9 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS TCNMPdt (FTPdtCode TEXT PRIMARY KEY)",
             "CREATE TABLE IF NOT EXISTS TCNMPdt_L (FTPdtCode TEXT, FNLngID INTEGER, FTPdtName TEXT, PRIMARY KEY (FTPdtCode, FNLngID))",
             "CREATE TABLE IF NOT EXISTS TCNMBranch_L (FTBchCode TEXT, FNLngID INTEGER, FTBchName TEXT)",
-            "CREATE TABLE IF NOT EXISTS TCNMPrinter (FTPntCode TEXT PRIMARY KEY, FTPntName TEXT, FTPntIP TEXT, FNPntPort INTEGER, FTPntBrand TEXT, FNPntDpi INTEGER)",
+            "CREATE TABLE IF NOT EXISTS TCNMPrinter (FTPrnCode TEXT PRIMARY KEY, FTPrnType TEXT, FTPrnSrcType TEXT, FTSppCode TEXT)",
+            "CREATE TABLE IF NOT EXISTS TCNMPrinter_L (FTPrnCode TEXT, FNLngID INTEGER, FTPrnName TEXT)",
+            "CREATE TABLE IF NOT EXISTS TSysPortPrn (FTSppCode TEXT, FTSppValue TEXT, FTSppRef TEXT, FTSppStaUse TEXT)",
             "CREATE TABLE IF NOT EXISTS TCNTPdtPrice4PDT (FTAgnCode TEXT, FTPdtCode TEXT, FDPghDStart TEXT, FTPplCode TEXT)",
         ] {
             sqlx::query(ddl).execute(&pool).await.unwrap();

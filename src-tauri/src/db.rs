@@ -1,11 +1,8 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
 use sqlx::{
-    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
     FromRow, SqlitePool,
 };
 use std::path::PathBuf;
-use std::str::FromStr;
-use std::time::Duration;
 
 use crate::templates::get_templates;
 
@@ -15,70 +12,12 @@ pub fn load_env() {
         .or_else(|_| dotenvy::from_filename("../../.env"));
 }
 
-pub fn resolve_db_path() -> PathBuf {
-    for key in ["ACC_DB_URL", "DATABASE_URL"] {
-        if let Ok(env_url) = std::env::var(key) {
-            let stripped = env_url
-                .strip_prefix("sqlite:")
-                .or_else(|| env_url.strip_prefix("file:"))
-                .unwrap_or(&env_url)
-                .split('?')
-                .next()
-                .unwrap_or(&env_url);
-            let p = PathBuf::from(stripped);
-            if p.exists() {
-                return p;
-            }
-        }
-    }
-    let candidates = [
-        PathBuf::from("db/AdaAccD.db"),
-        PathBuf::from("../db/AdaAccD.db"),
-        PathBuf::from("../../db/AdaAccD.db"),
-    ];
-    for c in &candidates {
-        if c.exists() {
-            return c.clone();
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for rel in ["db/AdaAccD.db", "../db/AdaAccD.db", "../../db/AdaAccD.db", "../../../db/AdaAccD.db"] {
-                let p = dir.join(rel);
-                if p.exists() {
-                    return p;
-                }
-            }
-        }
-    }
-    PathBuf::from("db/AdaAccD.db")
-}
+pub fn resolve_db_path() -> PathBuf { crate::storage::print_db_path() }
 
-pub fn resolve_exports_dir() -> PathBuf {
-    let db_path = resolve_db_path();
-    if let Some(db_dir) = db_path.parent() {
-        if let Some(root_dir) = db_dir.parent() {
-            if root_dir.exists() && !root_dir.as_os_str().is_empty() {
-                return root_dir.join("exports");
-            }
-        }
-    }
-    PathBuf::from("exports")
-}
+pub fn resolve_exports_dir() -> PathBuf { crate::storage::data_root().join("Exports") }
 
 pub async fn connect_db() -> Result<SqlitePool, sqlx::Error> {
-    let db_path = resolve_db_path();
-    let url = format!("sqlite:{}?mode=rwc", db_path.display());
-    println!("[DB] Connecting Read/Write (WAL) to AdaAccD: {}", url);
-    let opts = SqliteConnectOptions::from_str(&url)?
-        .create_if_missing(true)
-        .journal_mode(SqliteJournalMode::Wal)
-        .synchronous(SqliteSynchronous::Normal)
-        .busy_timeout(Duration::from_secs(5));
-    SqlitePoolOptions::new()
-        .max_connections(8)
-        .connect_with(opts)
-        .await
+    crate::storage::connect().await
 }
 
 pub async fn ensure_label_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
@@ -241,52 +180,6 @@ pub async fn ensure_label_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             "FTLastUpdBy" TEXT,
             PRIMARY KEY ("FTPdtCode", "FTBarCode", "FTLbsCode")
         )"#,
-        r#"CREATE TABLE IF NOT EXISTS "TCNMPdtPri" (
-            "FTPdtCode" TEXT NOT NULL,
-            "FTBchCode" TEXT NOT NULL,
-            "FTPpcPriType" TEXT NOT NULL,
-            "FCPpcPrice" REAL,
-            "FCPpcUnitPrice" REAL,
-            "FDPpcDStart" DATETIME,
-            "FDPpcDStop" DATETIME,
-            "FTPpcStaUse" TEXT NOT NULL DEFAULT '1',
-            "FDCreateOn" DATETIME,
-            "FTCreateBy" TEXT,
-            "FDLastUpdOn" DATETIME,
-            "FTLastUpdBy" TEXT,
-            PRIMARY KEY ("FTPdtCode", "FTBchCode", "FTPpcPriType")
-        )"#,
-        r#"CREATE TABLE IF NOT EXISTS "TCNMPmtHD" (
-            "FTPmhCode" TEXT NOT NULL PRIMARY KEY,
-            "FTPmhDocNo" TEXT,
-            "FTPmhName" TEXT,
-            "FTPmhNameSlip" TEXT,
-            "FTPmhRmk" TEXT,
-            "FDPmhDStart" DATETIME,
-            "FDPmhDStop" DATETIME,
-            "FTPmhStaApv" TEXT NOT NULL DEFAULT '1',
-            "FTPmhStaAll" TEXT NOT NULL DEFAULT '2',
-            "FTPmhStaUse" TEXT NOT NULL DEFAULT '1',
-            "FDCreateOn" DATETIME,
-            "FTCreateBy" TEXT,
-            "FDLastUpdOn" DATETIME,
-            "FTLastUpdBy" TEXT
-        )"#,
-        r#"CREATE TABLE IF NOT EXISTS "TCNMPmtDT" (
-            "FTPmhCode" TEXT NOT NULL,
-            "FNPmdSeq" INTEGER NOT NULL,
-            "FTPdtCode" TEXT,
-            "FTBarCode" TEXT,
-            "FCPmdPricePmt" REAL,
-            "FNPmdGetCond" INTEGER,
-            "FCPmdGetValue" REAL,
-            "FTPmdStaUse" TEXT NOT NULL DEFAULT '1',
-            "FDCreateOn" DATETIME,
-            "FTCreateBy" TEXT,
-            "FDLastUpdOn" DATETIME,
-            "FTLastUpdBy" TEXT,
-            PRIMARY KEY ("FTPmhCode", "FNPmdSeq")
-        )"#,
         r#"CREATE TABLE IF NOT EXISTS "TCNTLabelJob" (
             "FTLjbJobID" TEXT NOT NULL PRIMARY KEY,
             "FTLjbBchCode" TEXT,
@@ -416,71 +309,6 @@ pub async fn ensure_label_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
     // ─── V6 Promotion Tables Guard (for fresh DB) + 5 Auto-Print Tables ────
     let auto_ddls = [
-        r#"CREATE TABLE IF NOT EXISTS "TCNTPmtHD" (
-            "FTAgnCode" TEXT COLLATE NOCASE NOT NULL DEFAULT '',
-            "FTPmhDocNo" TEXT COLLATE NOCASE NOT NULL DEFAULT '',
-            "FNPmhVersion" INTEGER NOT NULL DEFAULT 0,
-            "FTPmhStaActive" TEXT COLLATE NOCASE NOT NULL DEFAULT '1',
-            "FTPmhName" TEXT COLLATE NOCASE,
-            "FTPmhRmk" TEXT COLLATE NOCASE,
-            "FTPmhStaDoc" TEXT COLLATE NOCASE,
-            "FTPmhStaPrcDoc" TEXT COLLATE NOCASE,
-            "FDPmhDStart" TEXT,
-            "FDPmhDStop" TEXT,
-            "FNPmhPriority" INTEGER NOT NULL DEFAULT 100,
-            "FTPmhStaStack" TEXT COLLATE NOCASE,
-            "FTPmhFmtCode" TEXT COLLATE NOCASE,
-            "FNPmhSchemaVer" INTEGER NOT NULL DEFAULT 1,
-            "FTPmhRuleJson" TEXT,
-            "FDLastUpdOn" TEXT,
-            "FTLastUpdBy" TEXT COLLATE NOCASE,
-            "FDCreateOn" TEXT,
-            "FTCreateBy" TEXT COLLATE NOCASE,
-            PRIMARY KEY ("FTAgnCode", "FTPmhDocNo", "FNPmhVersion")
-        )"#,
-        r#"CREATE TABLE IF NOT EXISTS "TCNTPmtHD_L" (
-            "FTAgnCode" TEXT COLLATE NOCASE NOT NULL DEFAULT '',
-            "FTPmhDocNo" TEXT COLLATE NOCASE NOT NULL DEFAULT '',
-            "FNPmhVersion" INTEGER NOT NULL DEFAULT 0,
-            "FNLngID" INTEGER NOT NULL DEFAULT 0,
-            "FTPmhName" TEXT COLLATE NOCASE,
-            "FTPmhRmk" TEXT COLLATE NOCASE,
-            "FDLastUpdOn" TEXT,
-            "FTLastUpdBy" TEXT COLLATE NOCASE,
-            "FDCreateOn" TEXT,
-            "FTCreateBy" TEXT COLLATE NOCASE,
-            PRIMARY KEY ("FTAgnCode", "FTPmhDocNo", "FNPmhVersion", "FNLngID")
-        )"#,
-        r#"CREATE TABLE IF NOT EXISTS "TCNTPmtGrpDT" (
-            "FTAgnCode" TEXT COLLATE NOCASE NOT NULL DEFAULT '',
-            "FTPmhDocNo" TEXT COLLATE NOCASE NOT NULL DEFAULT '',
-            "FTPmdGrpName" TEXT COLLATE NOCASE NOT NULL DEFAULT '',
-            "FNPmdSeqNo" INTEGER NOT NULL DEFAULT 0,
-            "FTPmdStaType" TEXT COLLATE NOCASE,
-            "FTPmdRefType" TEXT COLLATE NOCASE,
-            "FTPmdRefCode" TEXT COLLATE NOCASE,
-            "FCPmdQty" REAL,
-            "FTPmdJson" TEXT,
-            "FDLastUpdOn" TEXT,
-            "FTLastUpdBy" TEXT COLLATE NOCASE,
-            "FDCreateOn" TEXT,
-            "FTCreateBy" TEXT COLLATE NOCASE,
-            PRIMARY KEY ("FTAgnCode", "FTPmhDocNo", "FTPmdGrpName", "FNPmdSeqNo")
-        )"#,
-        r#"CREATE TABLE IF NOT EXISTS "TCNTPmtCond" (
-            "FTAgnCode" TEXT COLLATE NOCASE NOT NULL DEFAULT '',
-            "FTPmhDocNo" TEXT COLLATE NOCASE NOT NULL DEFAULT '',
-            "FNPmcSeqNo" INTEGER NOT NULL DEFAULT 0,
-            "FTPmcCondType" TEXT COLLATE NOCASE,
-            "FTPmcRefCode" TEXT COLLATE NOCASE,
-            "FCPmcValue" REAL,
-            "FTPmcJson" TEXT,
-            "FDLastUpdOn" TEXT,
-            "FTLastUpdBy" TEXT COLLATE NOCASE,
-            "FDCreateOn" TEXT,
-            "FTCreateBy" TEXT COLLATE NOCASE,
-            PRIMARY KEY ("FTAgnCode", "FTPmhDocNo", "FNPmcSeqNo")
-        )"#,
         // 1) แผนตั้งเวลาพิมพ์อัตโนมัติ
         r#"CREATE TABLE IF NOT EXISTS "TCNTLabelSchedule" (
             "FTLscCode"          TEXT NOT NULL PRIMARY KEY,
@@ -495,7 +323,7 @@ pub async fn ensure_label_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             "FTLscPplCode"       TEXT,
             "FTLscLbsCode"       TEXT NOT NULL DEFAULT 'UFM-NOR-16',
             "FNLscQtyMode"       INTEGER NOT NULL DEFAULT 1,
-            "FTLscSyncMode"      TEXT NOT NULL DEFAULT 'DIRECT_API',
+            "FTLscSyncMode"      TEXT NOT NULL DEFAULT 'STOREFRONT',
             "FNLscSyncRetry"     INTEGER NOT NULL DEFAULT 3,
             "FNLscRetryWaitSec"  INTEGER NOT NULL DEFAULT 300,
             "FTLscOnSyncFail"    TEXT NOT NULL DEFAULT 'ABORT',
@@ -565,18 +393,6 @@ pub async fn ensure_label_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             PRIMARY KEY ("FTBarCode", "FTLbsCode")
         )"#,
         // 5) Sync Checkpoint Local State
-        r#"CREATE TABLE IF NOT EXISTS "TCNTSyncLocalState" (
-            "FTSynTable"         TEXT NOT NULL PRIMARY KEY,
-            "FDSynLast"          TEXT NOT NULL,
-            "FTSynSnapshotToken" TEXT,
-            "FTSynLastChecksum"  TEXT,
-            "FDLastSyncAt"       DATETIME NOT NULL,
-            "FTSynLastStatus"    TEXT NOT NULL
-        )"#,
-        r#"CREATE INDEX IF NOT EXISTS "IX_Price4_Pdt_Start"
-            ON "TCNTPdtPrice4PDT"("FTPdtCode", "FDPghDStart")"#,
-        r#"CREATE INDEX IF NOT EXISTS "IX_PmtHD_Dates"
-            ON "TCNTPmtHD"("FTPmhStaActive", "FDPmhDStart", "FDPmhDStop")"#,
     ];
     for ddl in auto_ddls {
         let _ = sqlx::query(ddl).execute(pool).await;
@@ -664,9 +480,9 @@ pub fn promo_interval(dstart: Option<&str>, dstop: Option<&str>) -> String {
 
 pub fn apply_promo(sale_price: f64, promo: &PromoResult) -> f64 {
     match promo.get_cond {
-        1 => ((sale_price - promo.get_value) * 100.0).round() / 100.0,
+        1 => (((sale_price - promo.get_value).max(0.0)) * 100.0).round() / 100.0,
         2 => (sale_price * (1.0 - promo.get_value / 100.0) * 100.0).round() / 100.0,
-        3 => promo.price_pmt.unwrap_or(promo.get_value),
+        3 => promo.price_pmt.unwrap_or(promo.get_value).min(sale_price),
         _ => sale_price,
     }
 }
@@ -921,13 +737,8 @@ pub async fn seed_defaults(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         ("DefaultDpi", "PrintBar", "ความละเอียด DPI เริ่มต้น", "203", "ความละเอียดเครื่องพิมพ์เริ่มต้น", 4),
         ("UrlTemplate", "PrintBar", "URL Template สำหรับ QR", "", "รูปแบบ URL สินค้าใน QR Code", 5),
         ("DefaultUser", "PrintBar", "รหัสผู้ใช้งานเริ่มต้น", "ADMIN", "ชื่อผู้ใช้งานที่บันทึกลง Transaction Log", 6),
-        ("MasterApiUrl", "PrintBar", "URL ของ API2PSMaster V6", "", "ที่อยู่ API2PSMaster สำหรับซิงค์สินค้า/ราคา/โปรฯ ตรง", 10),
-        ("MasterApiKey", "PrintBar", "API Key (X-API-Key)", "", "กุญแจยืนยันตัวตน API2PSMaster", 11),
-        ("MasterAgnCode", "PrintBar", "Agency Code", "", "รหัสตัวแทน / กลุ่มธุรกิจสำหรับซิงค์", 12),
-        ("MasterBchCode", "PrintBar", "Branch Code", "", "รหัสสาขาสำหรับซิงค์ราคาและโปรโมชัน", 13),
         ("AutoPrintRetentionDays", "PrintBar", "จำนวนวันเก็บไฟล์และคิวพิมพ์", "60", "ลบประวัติคิวและไฟล์ชั่วคราวที่เก่าเกินกำหนดอัตโนมัติ", 14),
-        ("AutoPrintRetryWaitSec", "PrintBar", "หน่วงเวลาลองซิงค์ใหม่ (วินาที)", "300", "เวลารอก่อนลอง Retry เมื่อเน็ตหลุด", 15),
-        ("AutoPrintAdminPin", "PrintBar", "รหัส PIN แท็บผู้ดูแลระบบ", "1234", "PIN สำหรับล็อกแท็บตั้งค่า API URL/Key", 16),
+        ("AutoPrintAdminPin", "PrintBar", "รหัส PIN แท็บผู้ดูแลระบบ", "1234", "PIN สำหรับตั้งค่าแหล่งข้อมูล StoreFront", 16),
     ];
     for (code, app, name, val, desc, seq) in sys_opts {
         sqlx::query(
@@ -948,7 +759,7 @@ pub async fn seed_defaults(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             FNLscMisfireMin, FTLscStaCoverSheet, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy
         ) VALUES (
             'SCH-0400', 'พิมพ์ป้ายอัตโนมัติประจำวัน (04:00 น.)', '2', '04:00', 30, 900,
-            '1111111', 'PRICE_CHG,PROMO_START,PROMO_END_REVERT,NEW_PDT', 'ADA-100x38', 1, 'DIRECT_API',
+            '1111111', 'PRICE_CHG,PROMO_START,PROMO_END_REVERT,NEW_PDT', 'ADA-100x38', 1, 'STOREFRONT',
             3, 300, 'ABORT', 'WAIT_CONFIRM', 300, '1', ?, 'SYSTEM', ?, 'SYSTEM'
         )
         "#,

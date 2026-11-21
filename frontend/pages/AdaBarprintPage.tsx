@@ -1,3 +1,7 @@
+import { parseBarcodeImport } from '@/lib/printCsv';
+import {resolveTemplateRoute,manualTemplateProblem} from '@/lib/printProfile';
+import {api as printApi, purposes as printPurposes} from '@/components/autoPrintShared';
+import { MasterDatabaseSettings } from '@/components/MasterDatabaseSettings';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import {
@@ -56,7 +60,7 @@ import {
   type PrinterServerRow,
   type SysOptionRow,
 } from '@/components/SettingsPanel';
-import { MorningOpsBanner, type ManualLoadLine } from '@/components/MorningOpsBanner';
+import { type ManualLoadLine } from '@/components/MorningOpsBanner';
 import { LockScreen, LoginPage } from '@/components/LoginPage';
 import {
   fetchAuthMe,
@@ -161,6 +165,7 @@ interface WindowsPrinterInfo {
 }
 
 interface LabelPrinterMapping {
+  templateRoutes?: Record<string,{printer:string;tray:string;protocol:string}>;
   lbsCode: string;
   lbsName: string;
   lbsGroup: string;
@@ -404,14 +409,21 @@ function AdaBarprintWorkspace({
   onLogout: () => void;
 }) {
   const [loading, setLoading] = useState(true);
-  const [activeMenu, setActiveMenu] = useState<'print' | 'design' | 'settings'>('print');
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [activeMenu, setActiveMenu] = useState<'print' | 'design' | 'settings' | 'jobs'>('print');
+  const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth >= 1024);
+  useEffect(() => {
+    const narrow = window.matchMedia('(max-width: 1023px)');
+    const collapse = () => { if (narrow.matches) setSidebarOpen(false); };
+    collapse();
+    narrow.addEventListener('change', collapse);
+    return () => narrow.removeEventListener('change', collapse);
+  }, []);
   const [customLayouts, setCustomLayouts] = useState<Record<string, LabelDesignLayout>>({});
   const [allConfigSizes, setAllConfigSizes] = useState<ConfigLabelSizeRow[]>([]);
   const [sysOptions, setSysOptions] = useState<SysOptionRow[]>([]);
   const [printerServers, setPrinterServers] = useState<PrinterServerRow[]>([]);
   const [settingsEditLbsCode, setSettingsEditLbsCode] = useState<string | null>(null);
-  const [settingsSubTab, setSettingsSubTab] = useState<'sizes' | 'preprints' | 'printers' | 'devices' | 'system' | 'autoprint' | 'autoprint_history' | null>(null);
+  const [settingsSubTab, setSettingsSubTab] = useState<'sizes' | 'preprints' | 'printers' | 'devices' | 'system' | 'autoprint' | 'autoprint_history' | 'connection' | 'jobs' | null>(null);
   const [filterOpen, setFilterOpen] = useState(true);
 
   // Master data
@@ -509,12 +521,18 @@ function AdaBarprintWorkspace({
 
   // Right Print Terms (default ว่าง ให้ผู้ใช้เลือกเองตามแบบ V.5)
   const [selectedLabelCode, setSelectedLabelCode] = useState('');
+  const [selectedTemplateCode,setSelectedTemplateCode]=useState('');
+  const [manualSource,setManualSource]=useState('');
+
+  const selectedTemplate=labelSizes.flatMap(size=>(size.templates||[]).map(t=>({...t,FTLbsCode:size.FTLbsCode}))).find(t=>t.FTLtmCode===selectedTemplateCode&&t.FTLbsCode===selectedLabelCode);
+
   const [designLabelCode, setDesignLabelCode] = useState('');
   const [selectedPrinterId, setSelectedPrinterId] = useState('');
 
   // Right Main Print Table
   const [mainSearch, setMainSearch] = useState('');
   const [mainRows, setMainRows] = useState<PrintQueueRow[]>([]);
+  const [lookupFailures, setLookupFailures] = useState<Array<{ barcode: string; reason: string }>>([]);
   const [mainPage, setMainPage] = useState(1);
   const [mainPageSize, setMainPageSize] = useState(20);
   const [movingData, setMovingData] = useState(false);
@@ -559,7 +577,7 @@ function AdaBarprintWorkspace({
   const [importModalOpen, setImportModalOpen] = useState(false);
   const [importingFile, setImportingFile] = useState(false);
 
-  // Driver Mapping (ตั้งค่าไดร์เวอร์เครื่องพิมพ์ — แยกปกติ / โปรโมชัน ตามรหัสฉลาก)
+  // Driver Mapping (กำหนดเครื่องพิมพ์และถาดกระดาษ — แยกปกติ / โปรโมชัน ตามรหัสฉลาก)
   const [windowsPrinters, setWindowsPrinters] = useState<WindowsPrinterInfo[]>([]);
   const [driverMappings, setDriverMappings] = useState<LabelPrinterMapping[]>([]);
   const [driverServerCode, setDriverServerCode] = useState('LOCAL');
@@ -842,24 +860,13 @@ function AdaBarprintWorkspace({
     setImportingFile(true);
     try {
       const text = await file.text();
-      const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-      if (lines.length === 0) {
-        toast.error('ไม่พบข้อมูลในไฟล์');
-        return;
-      }
+      const importedRows = parseBarcodeImport(text);
 
       const bchCode = resolveDefaultBranch();
       const pass: PrintQueueRow[] = [];
       const fail: Array<{ pdtCode: string; barCode: string; pdtName: string; reason: string }> = [];
 
-      for (let i = 0; i < lines.length; i++) {
-        const cols = lines[i].split(/[,\t;]/).map(c => c.replace(/^"|"$/g, '').trim());
-        const first = cols[0] || '';
-        if (i === 0 && /barcode|ftbarcode|ftpdtcode/i.test(first)) continue; // skip header row
-        const bar = first;
-        const qty = Math.max(1, parseInt(cols[1] || '1') || 1);
-        if (!bar) continue;
-
+      for (const {barcode: bar, quantity: qty} of importedRows) {
         const res = await fetch('/api/print/build-line', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -906,8 +913,8 @@ function AdaBarprintWorkspace({
       setPreviewPass(pass);
       setPreviewFail(fail);
       setImportPreviewOpen(true);
-    } catch {
-      toast.error('อ่านไฟล์ CSV/TXT ไม่สำเร็จ');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'อ่านไฟล์ CSV/TXT ไม่สำเร็จ');
     } finally {
       setImportingFile(false);
     }
@@ -942,6 +949,13 @@ function AdaBarprintWorkspace({
   const handleMoveDataIntoTable = async () => {
     setMovingData(true);
     try {
+      if(manualSource){
+        if(!selectedLabelCode)throw new Error('กรุณาเลือกแบบป้ายก่อนแสดงข้อมูล');
+        if(!selectedLabelCode)throw new Error('เลือกแบบป้ายก่อนค้นหารายการ');
+        const data=await printApi('/api/print-center/manual-candidates',{source:manualSource,date:effectiveDate,size:selectedLabelCode,quantity:Math.max(1,defaultQty)});
+        setMainRows(data.lines.map((line:any)=>({rowKey:nextQueueRowKey(line.pdtCode,line.barcode,line.isPromo?'2':'1'),pdtCode:line.pdtCode,pdtName:line.pdtName,barCode:line.barcode,price:line.setPrice??0,priType:line.isPromo?'2':'1',qty:Math.max(1,defaultQty),selected:true,lbsCode:selectedLabelCode,tmplCode:selectedTemplateCode||line.tmplCode,ctx:line.ctx,promoName:line.promo?.name,statusText:printPurposes[manualSource].title})));
+        setMainPage(1);toast.success(`พบสินค้า ${data.lines.length} รายการ`);return;
+      }
       const params = new URLSearchParams({ limit: '100' });
       if (pdtFrom.trim()) params.set('pdtFrom', pdtFrom.trim());
       if (pdtTo.trim()) params.set('pdtTo', pdtTo.trim());
@@ -966,12 +980,14 @@ function AdaBarprintWorkspace({
 
       const res = await fetch(`/api/products?${params.toString()}`);
       const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'โหลดรายการสินค้าไม่สำเร็จ');
       const list: ProductItem[] = data.products || [];
       const bchCode = resolveDefaultBranch();
 
       const targets = list.slice(0, 100);
       const qtyVal = Math.max(1, defaultQty);
       const built: PrintQueueRow[] = [];
+      const failures: Array<{ barcode: string; reason: string }> = [];
       const CONCURRENCY = 10;
       for (let i = 0; i < targets.length; i += CONCURRENCY) {
         const chunk = targets.slice(i, i + CONCURRENCY);
@@ -993,8 +1009,11 @@ function AdaBarprintWorkspace({
                 priceGroup: priceGroupCode || undefined,
               }),
             });
-            if (!bRes.ok) return null;
             const line = await bRes.json();
+            if (!bRes.ok) {
+              failures.push({ barcode: bar, reason: line.error || 'ตรวจสอบข้อมูลป้ายไม่สำเร็จ' });
+              return null;
+            }
             const isPromo = Boolean(line.isPromo);
             if (sheetPriceType === 'Promotion' && !isPromo) return null;
             const priType: '1' | '2' = isPromo ? '2' : '1';
@@ -1020,8 +1039,10 @@ function AdaBarprintWorkspace({
         }
       }
       setMainRows(built);
+      setLookupFailures(failures);
       setMainPage(1);
-      toast.success(
+      (failures.length ? toast.warning : toast.success)(
+        failures.length ? `พร้อม ${built.length} รายการ · ไม่พร้อม ${failures.length} รายการ ดูเหตุผลเหนือตาราง` :
         list.length > 100
           ? `แสดงข้อมูลสินค้า ${built.length} รายการ (จำกัดสูงสุด 100 รายการแรก)`
           : `แสดงข้อมูลสินค้า ${built.length} รายการ`
@@ -1082,12 +1103,14 @@ function AdaBarprintWorkspace({
     [mainRows]
   );
 
-  const normalRows = useMemo(() => mainRows.filter(r => r.selected && r.priType === '1'), [mainRows]);
-  const promoRows = useMemo(() => mainRows.filter(r => r.selected && r.priType === '2'), [mainRows]);
-  const activeDriverMapping = useMemo(
-    () => driverMappings.find(m => m.lbsCode === selectedLabelCode) || null,
-    [driverMappings, selectedLabelCode]
-  );
+  const normalRows = useMemo(() => mainRows.filter(r => r.selected && (selectedTemplateCode || r.priType === '1')), [mainRows,selectedTemplateCode]);
+  const promoRows = useMemo(() => selectedTemplateCode ? [] : mainRows.filter(r => r.selected && r.priType === '2'), [mainRows,selectedTemplateCode]);
+  const activeDriverMapping = useMemo(()=>{
+    const mapping=driverMappings.find(m=>m.lbsCode===selectedLabelCode);
+    if(!mapping||!selectedTemplate)return mapping||null;
+    const route=resolveTemplateRoute(mapping,selectedTemplate.FTLtmCode,selectedTemplate.FTLtmPriType);
+    return {...mapping,normalPrinter:route.printer,normalTray:route.tray,normalProtocol:route.protocol,promoPrinter:route.printer,promoTray:route.tray,promoProtocol:route.protocol};
+  },[driverMappings,selectedLabelCode,selectedTemplate]);
 
   // Sync Printer dropdown with Tab 3 driver mapping when configured; otherwise keep '-- ยังไม่เลือก --'
   useEffect(() => {
@@ -1174,6 +1197,7 @@ function AdaBarprintWorkspace({
   };
 
   const handleConfirmSendPrint = async () => {
+    if(selectedTemplateCode&&!selectedTemplate){toast.error('ไม่พบแบบป้ายที่เลือก กรุณาเลือกแบบป้ายใหม่');return;}
     const selected = mainRows.filter(r => r.selected);
     if (selected.length === 0) {
       toast.error('ไม่มีรายการที่เลือกพิมพ์');
@@ -1190,7 +1214,7 @@ function AdaBarprintWorkspace({
       const pmtPrtDesc = activeDriverMapping?.promoPrinter
         ? `${activeDriverMapping.promoPrinter}${activeDriverMapping.promoTray ? ` (${activeDriverMapping.promoTray})` : ''}`
         : fallbackPrinterName;
-      await fetch('/api/print/create-job', {
+      const jobResponse = await fetch('/api/print/create-job', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1202,8 +1226,8 @@ function AdaBarprintWorkspace({
             lbsCode: selectedLabelCode || r.lbsCode,
             salePrice: r.price,
             setPrice: r.price,
-            promo: null,
-            tmplCode: r.tmplCode,
+            promo: r.ctx?.promotion ?? null,
+            tmplCode: selectedTemplateCode || r.tmplCode,
             pdtCode: r.pdtCode,
           })),
           bchCode,
@@ -1217,6 +1241,12 @@ function AdaBarprintWorkspace({
         }),
       });
 
+      const savedJob = await jobResponse.json();
+      if (!jobResponse.ok || !savedJob.jobId) {
+        throw new Error(savedJob.error || 'บันทึกงานพิมพ์ไม่สำเร็จ ยังไม่ได้ส่งพิมพ์');
+      }
+
+      const queueUnits: Array<{ kind: string; payload: Record<string, unknown> }> = [];
       const hasSplitMapping = Boolean(
         (normalRows.length > 0 && activeDriverMapping?.normalPrinter) ||
         (promoRows.length > 0 && activeDriverMapping?.promoPrinter)
@@ -1230,7 +1260,7 @@ function AdaBarprintWorkspace({
           const pName = activeDriverMapping.normalPrinter || fallbackWin;
           if (!pName) throw new Error('ยังไม่ได้ตั้งค่าเครื่องพิมพ์ราคาปกติ');
           dispatches.push({
-            label: 'ราคาปกติ',
+            label: selectedTemplate?.FTLtmName||'ราคาปกติ',
             rowsCount: normalRows.length,
             printer: pName,
             tray: activeDriverMapping.normalTray || '',
@@ -1254,70 +1284,54 @@ function AdaBarprintWorkspace({
           requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 180)))
         );
 
-        const messages: string[] = [];
         for (let idx = 0; idx < dispatches.length; idx++) {
           const d = dispatches[idx];
           if (idx > 0) {
             await new Promise(r => setTimeout(r, 900));
+          }
+          const lan = printers.find(p => p.name === d.printer && p.enabled && p.ip !== 'Windows' && p.brand !== 'WINDOWS' && p.brand !== 'SAMSUNG');
+          if (lan) {
+            const rows = d.containerId === 'v5-capture-normal' ? normalRows : promoRows;
+            queueUnits.push({kind:'LAN',payload:{printerIp:lan.ip,printerPort:lan.port,brand:lan.brand,
+              lines:rows.map(r=>({...r,barcode:r.barCode,lbsCode:selectedLabelCode||r.lbsCode,tmplCode:selectedTemplateCode||r.tmplCode,selected:true})),
+              options:{dpi:lan.dpi,speed:lan.speed,darkness:lan.darkness}}});
+            continue;
           }
           const pageImages = await capturePagesToPngBase64(
             d.containerId,
             a4Layout.paperWidthMm,
             a4Layout.paperHeightMm
           );
-          const wRes = await fetch('/api/print/windows-direct', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              printerName: d.printer,
-              trayName: d.tray,
-              lbsCode: selectedLabelCode,
-              lbsName: activeDriverMapping.lbsName,
-              priTypeLabel: d.label,
-              testMode: false,
-              pageImages,
-              paperSize: a4Layout.paperSize,
-              paperWidthMm: a4Layout.paperWidthMm,
-              paperHeightMm: a4Layout.paperHeightMm,
-            }),
-          });
-          const wData = await wRes.json();
-          if (!wRes.ok) throw new Error(wData.error || 'ส่งพิมพ์ล้มเหลว');
-          messages.push(
-            wData.outputFile
-              ? `${d.label} (${d.rowsCount}): บันทึก PDF ที่ ${wData.outputFile}`
-              : `${d.label} (${d.rowsCount}): ${d.printer}${d.tray ? ` [ถาด ${d.tray}]` : ''}`
-          );
+          queueUnits.push({ kind: 'WINDOWS', payload: {
+              printerName: d.printer, trayName: d.tray, lbsCode: selectedLabelCode,
+              lbsName: activeDriverMapping.lbsName, priTypeLabel: d.label, testMode: false,
+              pageImages, paperSize: a4Layout.paperSize,
+              paperWidthMm: a4Layout.paperWidthMm, paperHeightMm: a4Layout.paperHeightMm,
+          }});
         }
-        toast.success(`ส่งพิมพ์แยกปลายทางสำเร็จ — ${messages.join(' | ')}`);
-        setSendPrintOpen(false);
-        return;
-      }
-
-      if (printer && printer.brand !== 'WINDOWS' && printer.brand !== 'SAMSUNG') {
-        const res = await fetch('/api/print/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            printerIp: printer.ip,
-            printerPort: printer.port,
-            brand: printer.brand,
-            lines: selected.map(r => ({ ...r, barcode: r.barCode, lbsCode: selectedLabelCode || r.lbsCode, selected: true })),
-            options: { dpi: printer.dpi, speed: printer.speed, darkness: printer.darkness },
-          }),
-        });
-        const data = await res.json();
-        toast.success(data.message || `ส่งพิมพ์ ${selected.length} รายการสำเร็จ`);
+      } else if (printer && printer.brand !== 'WINDOWS' && printer.brand !== 'SAMSUNG') {
+        queueUnits.push({ kind: 'LAN', payload: {
+          printerIp: printer.ip, printerPort: printer.port, brand: printer.brand,
+          lines: selected.map(r => ({ ...r, barcode: r.barCode, lbsCode: selectedLabelCode || r.lbsCode, tmplCode:selectedTemplateCode||r.tmplCode, selected: true })),
+          options: { dpi: printer.dpi, speed: printer.speed, darkness: printer.darkness },
+        }});
       } else {
-        setBrowserPrintMounted(true);
-        toast.success(`บันทึกงานพิมพ์ ${selected.length} รายการแล้ว (เปิดหน้าต่างพิมพ์ ${a4Layout.paperLabel})`);
-        setSendPrintOpen(false);
-        setTimeout(() => {
-          window.print();
-          setTimeout(() => setBrowserPrintMounted(false), 1000);
-        }, 350);
-        return;
+        const name = printer?.name;
+        if (!name) throw new Error('กรุณาเลือกเครื่องพิมพ์ Windows หรือกำหนดเครื่องพิมพ์ตามประเภทก่อนเข้าคิว');
+        setCaptureDomMounted(true);
+        await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 180))));
+        for (const [containerId, rows, label] of [['v5-capture-normal', normalRows, 'ราคาปกติ'], ['v5-capture-promo', promoRows, 'โปรโมชั่น']] as const) {
+          if (!rows.length) continue;
+          const pageImages = await capturePagesToPngBase64(containerId, a4Layout.paperWidthMm, a4Layout.paperHeightMm);
+          queueUnits.push({kind:'WINDOWS',payload:{printerName:name, trayName:printer?.tray||'', lbsCode:selectedLabelCode,
+            priTypeLabel:label,pageImages,paperSize:a4Layout.paperSize,paperWidthMm:a4Layout.paperWidthMm,paperHeightMm:a4Layout.paperHeightMm}});
+        }
       }
+      const queued = await fetch('/api/print-center/manual', {method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({requestId:savedJob.jobId,jobId:savedJob.jobId,name:`สั่งพิมพ์เอง ${selected.length} รายการ`,units:queueUnits})});
+      const result = await queued.json();
+      if (!queued.ok) throw new Error(result.error || 'บันทึกคิวไม่สำเร็จ');
+      toast.success('เพิ่มงานพิมพ์แล้ว ดูสถานะที่ งานพิมพ์');
       setSendPrintOpen(false);
     } catch (err: any) {
       toast.error(err?.message || 'ส่งคำสั่งพิมพ์ไม่สำเร็จ');
@@ -1345,14 +1359,19 @@ function AdaBarprintWorkspace({
       return;
     }
     const header = 'FTPdtCode,FTPdtName,FTBarCode,FCPdtPrice,FTPlbPriType,FNPlbQty,FTLbsCode\n';
+    const csvCell = (value: unknown) => {
+      const text = String(value ?? '');
+      const safe = /^[\s]*[=+@-]/.test(text) ? `'${text}` : text;
+      return `"${safe.replace(/"/g, '""')}"`;
+    };
     const body = selected
-      .map(r => `"${r.pdtCode}","${r.pdtName}","${r.barCode}",${r.price},"${r.priType}",${r.qty},"${r.lbsCode}"`)
+      .map(r => [r.pdtCode,r.pdtName,r.barCode,r.price,r.priType,r.qty,r.lbsCode].map(csvCell).join(','))
       .join('\n');
-    const blob = new Blob([header + body], { type: 'text/csv;charset=utf-8;' });
+    const blob = new Blob(['\uFEFF' + header + body], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `PrintBar_V5_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `AdaBarprint_${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
     toast.success('ส่งออกไฟล์ CSV เรียบร้อย');
@@ -1483,8 +1502,8 @@ function AdaBarprintWorkspace({
       return { exp, pg };
     };
     const all = paginate(mainRows.filter((r) => r.selected));
-    const nor = paginate(mainRows.filter((r) => r.selected && r.priType === '1'));
-    const pmt = paginate(mainRows.filter((r) => r.selected && r.priType === '2'));
+    const nor = paginate(mainRows.filter((r) => r.selected && (selectedTemplateCode || r.priType === '1')));
+    const pmt = paginate(selectedTemplateCode ? [] : mainRows.filter((r) => r.selected && r.priType === '2'));
     return {
       lbsGroup: ls?.FTLbsGroup,
       savedPaperSize,
@@ -1514,7 +1533,7 @@ function AdaBarprintWorkspace({
       promoPages: pmt.pg,
       promoLabelsCount: pmt.exp.length,
     };
-  }, [selectedLabelSizeObj, paperSizes, previewMedia, mainRows]);
+  }, [selectedLabelSizeObj, paperSizes, previewMedia, mainRows, selectedTemplateCode]);
 
   useEffect(() => {
     setPrintOffsetX(a4Layout.offsetX);
@@ -1697,6 +1716,11 @@ function AdaBarprintWorkspace({
   };
 
   const resolveCustomLayout = (lbsCode: string, priType: string) => {
+    if(selectedTemplate && selectedTemplate.FTLbsCode===lbsCode){
+      try {const layout=JSON.parse(selectedTemplate.FTLtmLayout||'null');if(layout?.elements?.length)return {...layout,customDesign:true,width:layout.width||selectedLabelSizeObj?.FCLbsWidth,height:layout.height||selectedLabelSizeObj?.FCLbsHeight,elements:layout.elements.map((el:any,i:number)=>({...el,id:el.id||`element-${i}`,x:el.x??0,y:el.y??0,width:el.width??1,height:el.height??1}))} as LabelDesignLayout;}catch { /* validated before selection */ }
+      return null;
+    }
+
     const t = priType === '2' ? '2' : '1';
     return (
       customLayouts[`${lbsCode}:${t}`] ||
@@ -2022,7 +2046,7 @@ function AdaBarprintWorkspace({
           <button
             type="button"
             onClick={() => setActiveMenu('print')}
-            className={`w-full flex items-center gap-2.5 px-2.5 py-2.5 rounded-md text-xs font-medium transition-colors ${
+            className={`w-full flex items-center gap-2.5 px-2.5 py-2.5 rounded-md text-sm font-medium transition-colors ${
               activeMenu === 'print'
                 ? 'bg-[#007a87] text-white shadow-xs'
                 : 'text-slate-300 hover:bg-slate-700/50 hover:text-white'
@@ -2030,29 +2054,12 @@ function AdaBarprintWorkspace({
             title="พิมพ์ป้ายราคา / บาร์โค้ด"
           >
             <Printer className="h-4 w-4 shrink-0" />
-            {sidebarOpen && <span className="truncate">พิมพ์ป้ายราคา</span>}
+            {sidebarOpen && <span className="truncate">พิมพ์ป้าย</span>}
           </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              setDesignLabelCode('');
-              setActiveMenu('design');
-            }}
-            className={`w-full flex items-center gap-2.5 px-2.5 py-2.5 rounded-md text-xs font-medium transition-colors ${
-              activeMenu === 'design'
-                ? 'bg-[#007a87] text-white shadow-xs'
-                : 'text-slate-300 hover:bg-slate-700/50 hover:text-white'
-            }`}
-            title="Design Studio — ออกแบบป้ายสไตล์ Figma / Canva"
-          >
-            <Palette className="h-4 w-4 shrink-0" />
-            {sidebarOpen && (
-              <span className="truncate flex items-center justify-between flex-1">
-                <span>Design (ออกแบบป้าย)</span>
-              </span>
-            )}
-          </button>
+          <button type="button" onClick={()=>{setDesignLabelCode('');setActiveMenu('design');}} title="Design (ออกแบบป้าย)" className={`w-full flex items-center gap-2.5 px-2.5 py-2.5 rounded-md text-sm font-medium ${activeMenu==='design'?'bg-[#007a87] text-white':'text-slate-300 hover:bg-slate-700/50'}`}><Palette className="h-4 w-4 shrink-0"/>{sidebarOpen&&<span>Design (ออกแบบป้าย)</span>}</button>
+
+          <button type="button" onClick={()=>{setSettingsSubTab('jobs');setActiveMenu('jobs');}} title="ประวัติการพิมพ์" className={`w-full flex items-center gap-2.5 px-2.5 py-2.5 rounded-md text-sm font-medium ${activeMenu==='jobs'?'bg-[#007a87] text-white':'text-slate-300 hover:bg-slate-700/50'}`}><Calendar className="h-4 w-4 shrink-0"/>{sidebarOpen&&<span>ประวัติการพิมพ์</span>}</button>
 
           <div className="my-2 border-t border-slate-700/60" />
 
@@ -2060,9 +2067,10 @@ function AdaBarprintWorkspace({
             type="button"
             onClick={() => {
               setSettingsEditLbsCode(null);
+              setSettingsSubTab('devices');
               setActiveMenu('settings');
             }}
-            className={`w-full flex items-center gap-2.5 px-2.5 py-2.5 rounded-md text-xs font-medium transition-colors ${
+            className={`w-full flex items-center gap-2.5 px-2.5 py-2.5 rounded-md text-sm font-medium transition-colors ${
               activeMenu === 'settings'
                 ? 'bg-[#007a87] text-white shadow-xs'
                 : 'text-slate-300 hover:bg-slate-700/50 hover:text-white'
@@ -2146,30 +2154,22 @@ function AdaBarprintWorkspace({
       <div className="flex-1 min-w-0 flex flex-col">
       {/* Header Menu Bar */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-40 shadow-xs">
-        <div className="max-w-[1600px] mx-auto px-4 py-2 flex items-center justify-between gap-3">
+        <div className="max-w-[1600px] mx-auto px-3 sm:px-4 py-2 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-base font-bold text-[#007a87]">
-                  {activeMenu === 'design'
-                    ? 'ออกแบบป้ายราคา (Design Studio)'
-                    : activeMenu === 'settings'
-                      ? 'ตั้งค่าระบบและขนาดป้าย'
-                      : 'พิมพ์ป้ายราคา / บาร์โค้ด'}
+                  {{print:'พิมพ์ป้าย',auto:'ตั้งเวลาพิมพ์',jobs:'ประวัติการพิมพ์',design:'ออกแบบป้าย',labels:'แบบป้าย',settings:'ตั้งค่า'}[activeMenu]}
                 </h1>
                 <Badge variant="outline" className="text-[11px] border-[#007a87] text-[#007a87]">AdaBarprint</Badge>
               </div>
               <p className="text-[11px] text-slate-500">
-                {activeMenu === 'design'
-                  ? 'ลากจัดวางองค์ประกอบ ปรับสี ไอคอน และ Preview เทียบกระดาษ A4'
-                  : activeMenu === 'settings'
-                    ? 'จัดการขนาดรูปแบบป้าย ระยะขอบ เครื่องพิมพ์ ถาดกระดาษ และค่าเริ่มต้นระบบ'
-                    : 'เลือกสินค้า สแกนบาร์โค้ด ตรวจสอบราคา และส่งพิมพ์ป้าย'}
+                {{print:'เลือกสินค้า แบบป้าย และตรวจสอบก่อนพิมพ์',auto:'กำหนดงานที่จะพิมพ์และเวลาเริ่มงาน',jobs:'ติดตามงานที่สั่งเองและงานตามตาราง',design:'ออกแบบหน้าตาและจัดวางข้อมูลบนป้าย',labels:'จัดการกระดาษและเครื่องพิมพ์ของแบบป้าย',settings:'จัดการเครื่องพิมพ์ แหล่งข้อมูล และค่าเริ่มต้น'}[activeMenu]}
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {activeMenu === 'print' && (
               <>
                 <Button
@@ -2177,11 +2177,11 @@ function AdaBarprintWorkspace({
                   size="sm"
                   className="border-[#007a87] text-[#007a87] hover:bg-teal-50/70"
                   onClick={() => {
-                    setDriverEditRow(null);
-                    setDriverModalOpen(true);
+                    setSettingsSubTab('printers');
+                    setActiveMenu('settings');
                   }}
                 >
-                  <Settings2 className="h-3.5 w-3.5 mr-1" />ตั้งค่าไดร์เวอร์เครื่องพิมพ์
+                  <Settings2 className="h-3.5 w-3.5 mr-1" />กำหนดเครื่องพิมพ์และถาดกระดาษ
                 </Button>
                 <Button
                   size="sm"
@@ -2230,8 +2230,11 @@ function AdaBarprintWorkspace({
           onDeleteCustomFormat={handleDeleteCustomFormat}
           onResetLayout={handleResetCustomLayout}
         />
-      ) : activeMenu === 'settings' ? (
+      ) : ['settings','jobs'].includes(activeMenu) ? (
         <SettingsPanel
+          key={activeMenu}
+          workspace={activeMenu==='jobs'?'jobs':'settings'}
+          authUser={authUser}
           allLabelSizes={
             allConfigSizes.length > 0
               ? allConfigSizes
@@ -2257,15 +2260,6 @@ function AdaBarprintWorkspace({
         />
       ) : (
       <main className="max-w-[1600px] w-full mx-auto p-4 space-y-4">
-        {ENABLE_AUTO_PRINT_UI && (
-          <MorningOpsBanner
-            onOpenScheduleSettings={() => {
-              setSettingsSubTab('autoprint');
-              setActiveMenu('settings');
-            }}
-            onLoadManualRows={(lines) => handleLoadManualScheduleRows(lines, false)}
-          />
-        )}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
           {/* Left Panel (4 cols): กำหนดเงื่อนไข */}
           <div className="lg:col-span-4">
@@ -2286,11 +2280,12 @@ function AdaBarprintWorkspace({
                       handleMoveDataIntoTable();
                     }}
                   >
+                  <div className="space-y-2 mb-3"><Label className="text-xs">เลือกรายการสินค้า</Label><select aria-label="วิธีเลือกรายการสินค้า" className="h-9 w-full rounded-md border px-2 text-sm" value={manualSource} onChange={e=>{setManualSource(e.target.value);if(e.target.value){setUseEffectiveDate(true);setSheetPriceType('All');}}}><option value="">เลือกสินค้าเอง</option>{['PRICE_CHG','PROMO_START','PROMO_END_REVERT','NEW_PDT'].map(code=><option key={code} value={code}>{printPurposes[code].title}</option>)}</select>{manualSource&&<p className="text-xs text-slate-500">เลือกวันที่และแบบป้าย แล้วกดแสดงข้อมูล ใช้เครื่องพิมพ์ตามแบบป้ายที่เลือก</p>}</div>
                   {/* Row 1: Price Type + Total Print */}
                   <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-1">
                       <Label className="text-xs font-medium">ประเภทราคา</Label>
-                      <Select value={sheetPriceType} onValueChange={(v: any) => setSheetPriceType(v)}>
+                      <Select disabled={Boolean(manualSource)} value={sheetPriceType} onValueChange={(v: any) => setSheetPriceType(v)}>
                         <SelectTrigger className="w-full h-8 text-xs"><SelectValue /></SelectTrigger>
                         <SelectContent>
                           <SelectItem value="Normal">ราคาปกติ</SelectItem>
@@ -2312,6 +2307,7 @@ function AdaBarprintWorkspace({
                   </div>
 
                   {/* Row 2: Product From - To (Upfront — used frequently) */}
+                  {!manualSource&&<>
                   <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-1">
                       <Label className="text-xs font-medium">จากสินค้า</Label>
@@ -2371,17 +2367,18 @@ function AdaBarprintWorkspace({
                     </div>
                   </div>
 
+                  </>}
                   {/* Row 3: Effective Date */}
                   <div className="space-y-1">
                     <label className="inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer select-none">
-                      <Checkbox checked={useEffectiveDate} onCheckedChange={v => setUseEffectiveDate(!!v)} />
-                      <span>{useEffectiveDate ? 'กรองวันที่เริ่มมีผล' : 'กรองตามวันที่มีผล (ปิดอยู่ — แสดงทุกวัน)'}</span>
+                      <Checkbox disabled={Boolean(manualSource)} checked={useEffectiveDate} onCheckedChange={v => setUseEffectiveDate(!!v)} />
+                      <span>{manualSource ? 'วันที่เกิดเหตุการณ์' : useEffectiveDate ? 'กรองวันที่เริ่มมีผล' : 'กรองตามวันที่มีผล (ปิดอยู่ — แสดงทุกวัน)'}</span>
                     </label>
-                    <DateField value={effectiveDate} onChange={setEffectiveDate} disabled={!useEffectiveDate} />
+                    <DateField value={effectiveDate} onChange={setEffectiveDate} disabled={!manualSource&&!useEffectiveDate} />
                   </div>
 
                   {/* Collapsible Secondary Range Filters */}
-                  {(() => {
+                  {!manualSource&&(() => {
                     const activeExtraCount = [
                       bchFrom, bchTo, docDateFrom, docDateTo, docNoFrom, docNoTo,
                       pdtGrpFilter, pdtGrpTo, pdtTypeFrom, pdtTypeTo,
@@ -2582,35 +2579,15 @@ function AdaBarprintWorkspace({
                       )}
                     </div>
                     <SearchableSelect
-                      value={selectedLabelCode}
-                      onValueChange={setSelectedLabelCode}
-                      placeholder="เลือกรูปแบบป้าย..."
-                      searchPlaceholder="ค้นหารหัสหรือชื่อรูปแบบป้าย..."
+                      value={selectedTemplateCode|| (selectedLabelCode?`legacy:${selectedLabelCode}`:'')}
+                      onValueChange={value=>{if(value.startsWith('legacy:')){setSelectedTemplateCode('');setSelectedLabelCode(value.slice(7));}else{const size=labelSizes.find(s=>s.templates?.some(t=>t.FTLtmCode===value));if(size){const template=size.templates?.find(t=>t.FTLtmCode===value);const problem=manualTemplateProblem(template?.FTLtmLayout);if(problem){toast.error(problem);return;}setSelectedLabelCode(size.FTLbsCode);setSelectedTemplateCode(value);}}}}
+                      placeholder="เลือกแบบป้ายที่จะพิมพ์..."
+                      searchPlaceholder="ค้นหาชื่อแบบป้ายหรือขนาด..."
                       className="h-9 text-xs"
-                      options={labelSizes
-                        .filter((l) => l.FTLbsStaUse === '1')
-                        .map((l) => {
-                          const saved = customLayouts[`${l.FTLbsCode}:1`] || customLayouts[`${l.FTLbsCode}:2`];
-                          const badge =
-                            saved?.designMode === 'preprint'
-                              ? 'Pre-Print'
-                              : saved || l.FTLbsGroup === '2'
-                                ? 'ออกแบบเอง'
-                                : 'STD';
-                          const badgeClassName =
-                            badge === 'Pre-Print'
-                              ? 'bg-amber-100 text-amber-800'
-                              : badge === 'ออกแบบเอง'
-                                ? 'bg-sky-100 text-sky-800'
-                                : 'bg-slate-100 text-slate-600';
-                          return {
-                            value: l.FTLbsCode,
-                            label: `${l.FTLbsCode} — ${l.FTLbsName} (${l.FCLbsWidth}×${l.FCLbsHeight}mm)`,
-                            keywords: `${l.FTLbsCode} ${l.FTLbsName || ''} ${l.FCLbsWidth}x${l.FCLbsHeight}`,
-                            badge,
-                            badgeClassName,
-                          };
-                        })}
+                      options={labelSizes.filter(l=>l.FTLbsStaUse==='1').flatMap(l=>{
+                        const templates=(l.templates||[]).filter(t=>{try{return JSON.parse(t.FTLtmLayout||'null')?.elements?.length>0;}catch{return false;}});
+                        return templates.length?templates.map(t=>({value:t.FTLtmCode,label:t.FTLtmName,keywords:`${t.FTLtmCode} ${l.FTLbsName}`,badge:`${l.FCLbsWidth}×${l.FCLbsHeight} มม.`})):[{value:`legacy:${l.FTLbsCode}`,label:l.FTLbsName||l.FTLbsCode,keywords:l.FTLbsCode,badge:'แบบเดิม'}];
+                      })}
                     />
                   </div>
                   <div className="space-y-1">
@@ -2642,18 +2619,18 @@ function AdaBarprintWorkspace({
                   <div className="mt-3 pt-2.5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs">
                     <div className="flex flex-wrap items-center gap-3 text-slate-600">
                       <span>
-                        <strong className="text-slate-800">ราคาปกติ:</strong>{' '}
+                        <strong className="text-slate-800">{selectedTemplateCode?'เครื่องพิมพ์ของแบบป้าย:':'ราคาปกติ:'}</strong>{' '}
                         {activeDriverMapping?.normalPrinter
                           ? `${activeDriverMapping.normalPrinter}${activeDriverMapping.normalTray ? ` (${activeDriverMapping.normalTray})` : ''}`
                           : <span className="text-slate-400">ใช้เครื่องพิมพ์ที่เลือกด้านบน</span>}
                       </span>
-                      <span className="text-slate-300">|</span>
+                      {!selectedTemplateCode&&<><span className="text-slate-300">|</span>
                       <span>
                         <strong className="text-red-700">ราคาโปรโมชัน:</strong>{' '}
                         {activeDriverMapping?.promoPrinter
                           ? `${activeDriverMapping.promoPrinter}${activeDriverMapping.promoTray ? ` (${activeDriverMapping.promoTray})` : ''}`
                           : <span className="text-slate-400">ใช้เครื่องพิมพ์ที่เลือกด้านบน</span>}
-                      </span>
+                      </span></>}
                     </div>
                     <Button
                       type="button"
@@ -2661,9 +2638,9 @@ function AdaBarprintWorkspace({
                       size="sm"
                       className="h-auto p-0 text-xs text-[#007a87] hover:text-[#00606b]"
                       onClick={() => {
-                        const row = driverMappings.find(m => m.lbsCode === selectedLabelCode);
-                        if (row) setDriverEditRow({ ...row });
-                        setDriverModalOpen(true);
+                        setSettingsEditLbsCode(selectedLabelCode);
+                        setSettingsSubTab('printers');
+                        setActiveMenu('settings');
                       }}
                     >
                       ตั้งค่าเครื่อง/ถาดของป้ายนี้
@@ -2676,6 +2653,16 @@ function AdaBarprintWorkspace({
             {/* Bottom Card: ตารางรายการพิมพ์ */}
             <Card className="border-slate-200 shadow-xs bg-white py-0 gap-0">
               <CardContent className="p-4 space-y-3">
+                {lookupFailures.length > 0 && (
+                  <details className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm">
+                    <summary className="cursor-pointer font-medium">รายการที่ไม่เพิ่มในตารางพิมพ์ ({lookupFailures.length})</summary>
+                    <p className="mt-2">รายการเหล่านี้จะไม่ถูกส่งพิมพ์ กรุณาตรวจสอบข้อมูลตามเหตุผลด้านล่าง</p>
+                    <ul className="mt-2 max-h-48 overflow-auto space-y-2">
+                      {lookupFailures.map((failure, index) => <li key={`${failure.barcode}-${index}`} className="break-words"><strong>{failure.barcode}</strong> — {failure.reason}</li>)}
+                    </ul>
+                    <Button variant="ghost" size="sm" onClick={() => setLookupFailures([])}>ปิดรายละเอียด</Button>
+                  </details>
+                )}
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <Label className="text-xs font-semibold text-slate-700">
                     ค้นหาข้อมูลสินค้า ({filteredMainRows.length} รายการ{selectedMainCount > 0 ? ` · เลือกพิมพ์ ${selectedMainCount}` : ''})
@@ -3193,7 +3180,7 @@ function AdaBarprintWorkspace({
               Preview {a4Layout.isRoll ? 'ม้วน Thermal (Roll)' : a4Layout.isSingle ? 'ป้ายเดี่ยว 1:1' : `แผ่นกระดาษ ${a4Layout.paperLabel}`} ({previewSheetCount} {a4Layout.isRoll ? 'แถวตัด' : a4Layout.isSingle ? 'หน้า' : 'แผ่น'} · {a4Layout.totalLabels} ดวง)
             </DialogTitle>
             <DialogDescription className="text-xs">
-              รูปแบบป้าย: {selectedLabelCode} ({a4Layout.widthMm}×{a4Layout.heightMm} mm{' '}
+              รูปแบบป้าย: {selectedTemplate?.FTLtmName||selectedLabelCode} ({a4Layout.widthMm}×{a4Layout.heightMm} mm{' '}
               {a4Layout.isRoll
                 ? `บนม้วนกว้าง ${a4Layout.paperWidthMm} mm · แถวละ ${a4Layout.cols} ดวง · Gap ${a4Layout.gapVMm} mm`
                 : `บนกระดาษ ${a4Layout.paperWidthMm}×${a4Layout.paperHeightMm} mm · จัดเรียง ${a4Layout.cols}×${a4Layout.rows} = ${a4Layout.perPage} ดวง/แผ่น`}
@@ -3205,8 +3192,8 @@ function AdaBarprintWorkspace({
               <TabsTrigger value="preview">
                 Preview {a4Layout.isRoll ? `ม้วน (${a4Layout.totalLabels} ดวง)` : `(${previewSheetCount})`}
               </TabsTrigger>
-              <TabsTrigger value="normal">ราคาปกติ ({normalRows.length})</TabsTrigger>
-              <TabsTrigger value="promo">ราคาโปรโมชัน ({promoRows.length})</TabsTrigger>
+              <TabsTrigger value="normal">{selectedTemplate?.FTLtmName||'ราคาปกติ'} ({normalRows.length})</TabsTrigger>
+              {!selectedTemplateCode&&<TabsTrigger value="promo">ราคาโปรโมชัน ({promoRows.length})</TabsTrigger>}
             </TabsList>
             <TabsContent value="preview" className="border rounded p-2 flex-1 min-h-0 overflow-hidden flex flex-col gap-2">
               <PreviewMediaToolbar
@@ -3328,7 +3315,7 @@ function AdaBarprintWorkspace({
                         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-teal-100 pb-2">
                           <span className="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
                             <span className="inline-block w-2 h-2 rounded-full bg-[#007a87]" />
-                            ชุดราคาปกติ ({a4Layout.normalLabelsCount} ดวง · {a4Layout.normalPages.length} แผ่น)
+                            {selectedTemplate?.FTLtmName||'ชุดราคาปกติ'} ({a4Layout.normalLabelsCount} ดวง · {a4Layout.normalPages.length} แผ่น)
                           </span>
                           <span className="text-[11px] font-medium text-[#007a87] bg-white border border-teal-200 rounded px-2 py-0.5">
                             {activeDriverMapping?.normalPrinter || printers.find(p => p.id === selectedPrinterId)?.name || 'Default'}
@@ -3423,7 +3410,7 @@ function AdaBarprintWorkspace({
               <div className="w-full text-[11px] bg-teal-50/80 border border-teal-200 rounded px-2.5 py-1.5 text-slate-800 flex flex-wrap gap-x-4 gap-y-1">
                 {normalRows.length > 0 && (
                   <span>
-                    <strong>ราคาปกติ ({normalRows.length} รายการ · {a4Layout.normalLabelsCount} ดวง):</strong>{' '}
+                    <strong>{selectedTemplate?.FTLtmName||'ราคาปกติ'} ({normalRows.length} รายการ · {a4Layout.normalLabelsCount} ดวง):</strong>{' '}
                     {activeDriverMapping?.normalPrinter || 'ใช้เครื่องด้านบน'}
                     {activeDriverMapping?.normalTray ? ` · ถาด: ${activeDriverMapping.normalTray}` : ''}
                   </span>
@@ -3457,7 +3444,7 @@ function AdaBarprintWorkspace({
       <Dialog open={importModalOpen} onOpenChange={setImportModalOpen}>
         <DialogContent className="w-[95vw] sm:max-w-md">
           <DialogHeader>
-            <DialogTitle className="text-base">นำเข้าข้อมูลสินค้า (CSV / TXT)</DialogTitle>
+            <DialogTitle className="text-base">นำเข้ารายการพิมพ์ (CSV / TXT)</DialogTitle>
             <DialogDescription className="text-xs">
               รองรับไฟล์ .csv หรือ .txt ที่มีคอลัมน์ บาร์โค้ด, จำนวน (เช่น 7622201755638, 2)
             </DialogDescription>
@@ -3632,7 +3619,7 @@ function AdaBarprintWorkspace({
         </DialogContent>
       </Dialog>
 
-      {/* ===== Modal เดียวรวม List + Edit: ตั้งค่าไดร์เวอร์เครื่องพิมพ์ (ธีม /AdaBarprint) ===== */}
+      {/* ===== Modal เดียวรวม List + Edit: กำหนดเครื่องพิมพ์และถาดกระดาษ (ธีม /AdaBarprint) ===== */}
       <Dialog
         open={driverModalOpen}
         onOpenChange={(o) => {
@@ -3662,7 +3649,7 @@ function AdaBarprintWorkspace({
                 </Button>
               )}
               <DialogTitle className="text-base font-semibold">
-                {driverEditRow ? 'กำหนดเครื่องพิมพ์และถาดกระดาษ' : 'ตั้งค่าไดร์เวอร์เครื่องพิมพ์'}
+                {driverEditRow ? 'กำหนดเครื่องพิมพ์และถาดกระดาษ' : 'กำหนดเครื่องพิมพ์และถาดกระดาษ'}
               </DialogTitle>
             </div>
             <DialogDescription className="text-slate-300 text-xs">
@@ -4047,7 +4034,14 @@ function AdaBarprintWorkspace({
 
 export default function AdaBarprintPage() {
   const [authChecked, setAuthChecked] = useState(false);
+  const [storageSetup,setStorageSetup]=useState(false);
   const [authUser, setAuthUser] = useState<AuthSessionUser | null>(null);
+
+  useEffect(() => {
+    const refreshSession = () => { void fetchAuthMe().then(setAuthUser).catch(() => setAuthUser(null)); };
+    window.addEventListener('adabarprint-session-changed', refreshSession);
+    return () => window.removeEventListener('adabarprint-session-changed', refreshSession);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -4091,7 +4085,7 @@ export default function AdaBarprintPage() {
   }
 
   if (!authUser) {
-    return <LoginPage onLoginSuccess={(user) => setAuthUser(user)} />;
+    return <><div className="fixed right-3 top-3 z-50"><button className="rounded-lg border bg-white px-3 py-2 text-sm text-teal-800 shadow" onClick={()=>setStorageSetup(!storageSetup)}>{storageSetup?'กลับเข้าสู่ระบบ':'ตั้งค่าแหล่งข้อมูล'}</button></div>{storageSetup?<div className="min-h-screen bg-slate-100 p-4 pt-20"><div className="mx-auto max-w-3xl"><MasterDatabaseSettings onSaved={()=>window.location.reload()}/></div></div>:<LoginPage onLoginSuccess={(user) => setAuthUser(user)} />}</>;
   }
 
   if (authUser.locked) {

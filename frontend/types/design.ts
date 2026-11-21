@@ -27,6 +27,7 @@ export type DesignIconName =
   | 'megaphone';
 
 export interface DesignElement {
+  when?: {path:string;eq:boolean};
   id: string;
   type: DesignElementType;
   label: string;

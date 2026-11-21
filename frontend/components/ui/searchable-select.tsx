@@ -24,6 +24,7 @@ interface SearchableSelectProps {
   className?: string;
   dropdownMinWidth?: number;
   title?: string;
+  ariaLabel?: string;
 }
 
 export function SearchableSelect({
@@ -37,6 +38,7 @@ export function SearchableSelect({
   className,
   dropdownMinWidth = 260,
   title,
+  ariaLabel,
 }: SearchableSelectProps) {
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState('');
@@ -70,7 +72,7 @@ export function SearchableSelect({
     setPortalHost(host);
 
     const rect = trigger.getBoundingClientRect();
-    const width = Math.max(rect.width, dropdownMinWidth);
+    const width = Math.min(Math.max(rect.width, dropdownMinWidth), Math.max(0, window.innerWidth - 16));
     const estHeight = 320;
     const spaceBelow = window.innerHeight - rect.bottom;
     const openUpward = spaceBelow < estHeight && rect.top > spaceBelow;
@@ -173,6 +175,9 @@ export function SearchableSelect({
     <>
       <button
         ref={triggerRef}
+        aria-label={ariaLabel}
+        aria-expanded={open}
+        aria-haspopup="listbox"
         type="button"
         disabled={disabled}
         title={title ?? (selectedOption ? `${selectedOption.badge ? `${selectedOption.badge} ` : ''}${selectedOption.label}` : placeholder)}

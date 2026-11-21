@@ -14,7 +14,6 @@ use sqlx::SqlitePool;
 use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
 
-use crate::barcode::validate_barcode;
 use crate::db::{
     apply_promo, format_date_th, is_seeded, promo_interval, resolve_accd_promotion, seed_defaults,
 };
@@ -310,7 +309,7 @@ async fn upsert_preprint_from_layout(
     (mode, Some(ppr_code))
 }
 
-async fn fetch_lan_printers(pool: &SqlitePool) -> Vec<Value> {
+pub(crate) async fn fetch_lan_printers(pool: &SqlitePool) -> Vec<Value> {
     let rows: Vec<(String, String, Option<String>, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
         r#"
         SELECT p.FTPrnCode, COALESCE(p.FTPrnType, 'GODEX'), pl.FTPrnName, sp.FTSppValue, sp.FTSppRef, sp.FTSppStaUse
@@ -1365,9 +1364,18 @@ $list | ConvertTo-Json -Depth 4 -Compress
 
 // ─── /api/label-printers (ตั้งค่าไดร์เวอร์เครื่องพิมพ์ แยกปกติ/โปรโมชัน) ─────
 
+#[derive(Deserialize, serde::Serialize)]
+pub struct EventPrinterRoute {
+    pub printer: String,
+    pub tray: String,
+    pub protocol: String,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveLabelPrinterBody {
+    pub template_routes: Option<std::collections::BTreeMap<String, EventPrinterRoute>>,
+    pub event_routes: Option<std::collections::BTreeMap<String, EventPrinterRoute>>,
     pub lbs_code: String,
     pub server_code: Option<String>,
     pub normal_printer: Option<String>,
@@ -1402,12 +1410,18 @@ pub async fn get_label_printers(State(st): State<AppState>) -> Response {
     .await
     .unwrap_or_default();
 
+    let template_rows:Vec<(String,String)>=sqlx::query_as("SELECT id,value FROM ABPrintSetting WHERE id LIKE 'templateRoutes:%'").fetch_all(&st.pool).await.unwrap_or_default();
+    let event_rows:Vec<(String,String)>=sqlx::query_as("SELECT id,value FROM ABPrintSetting WHERE id LIKE 'eventRoutes:%'").fetch_all(&st.pool).await.unwrap_or_default();
     let mappings: Vec<Value> = sizes
         .into_iter()
         .map(|(code, name, grp)| {
             let nor = rows.iter().find(|r| r.0 == code && r.1 == "1");
             let pmt = rows.iter().find(|r| r.0 == code && r.1 == "2");
             json!({
+                "templateRoutingSupported": true,
+                "templateRoutes": template_rows.iter().find(|(id,_)|id==&format!("templateRoutes:{}:{}",server_code,code)).and_then(|(_,value)|serde_json::from_str::<Value>(value).ok()).unwrap_or(json!({})),
+                "eventRoutingSupported": true,
+                "eventRoutes": event_rows.iter().find(|(id,_)|id==&format!("eventRoutes:{}:{}",server_code,code)).and_then(|(_,value)|serde_json::from_str::<Value>(value).ok()).unwrap_or(json!({})),
                 "lbsCode": code,
                 "lbsName": name,
                 "lbsGroup": grp,
@@ -1436,6 +1450,20 @@ pub async fn post_label_printers(
     if body.lbs_code.trim().is_empty() {
         return err_json(StatusCode::BAD_REQUEST, "lbsCode is required");
     }
+    if let Some(events)=&body.event_routes {
+        for (event,route) in events {
+            if !["PRICE_CHG","PROMO_START","PROMO_END_REVERT","NEW_PDT"].contains(&event.as_str()) || route.printer.trim().is_empty() {
+                return err_json(StatusCode::BAD_REQUEST,"เลือกเหตุการณ์และเครื่องพิมพ์ให้ครบ");
+            }
+        }
+    }
+    if let Some(routes)=&body.template_routes {
+        for (code,route) in routes {
+            let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM TCNMLabelTmpl WHERE FTLtmCode=? AND FTLbsCode=? AND FTLtmStaUse='1'").bind(code).bind(&body.lbs_code).fetch_one(&st.pool).await.unwrap_or(0);
+            if exists != 1 || route.printer.trim().is_empty() {return err_json(StatusCode::BAD_REQUEST,"แบบป้ายหรือเครื่องพิมพ์ไม่ถูกต้อง");}
+        }
+    }
+    let mut tx=match st.pool.begin().await {Ok(tx)=>tx,Err(e)=>return err_json(StatusCode::INTERNAL_SERVER_ERROR,e.to_string())};
     let server_code = body.server_code.unwrap_or_else(|| "LOCAL".to_string());
     let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
@@ -1466,13 +1494,26 @@ pub async fn post_label_printers(
         .bind(&protocol)
         .bind(&now)
         .bind(&now)
-        .execute(&st.pool)
+        .execute(&mut *tx)
         .await
         {
             return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
         }
     }
 
+    if let Some(events)=body.event_routes {
+        if let Err(e)=sqlx::query("INSERT INTO ABPrintSetting(id,value) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value")
+            .bind(format!("eventRoutes:{}:{}",server_code,body.lbs_code)).bind(serde_json::to_string(&events).unwrap()).execute(&mut *tx).await {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR,e.to_string());
+        }
+    }
+    if let Some(routes)=body.template_routes {
+        if let Err(e)=sqlx::query("INSERT INTO ABPrintSetting(id,value) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value")
+            .bind(format!("templateRoutes:{}:{}",server_code,body.lbs_code)).bind(serde_json::to_string(&routes).unwrap()).execute(&mut *tx).await {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR,e.to_string());
+        }
+    }
+    if let Err(e)=tx.commit().await {return err_json(StatusCode::INTERNAL_SERVER_ERROR,e.to_string());}
     Json(json!({ "ok": true, "lbsCode": body.lbs_code })).into_response()
 }
 
@@ -1487,7 +1528,7 @@ pub async fn get_config_all(State(st): State<AppState>) -> Response {
     .unwrap_or_default();
 
     let options = sqlx::query_as::<_, TCNSSysOption>(
-        "SELECT FTSopCode, FTSopApp, FTSopName, FTSopValue, FTSopDesc, FNSopSeq FROM TCNSSysOption ORDER BY FNSopSeq ASC, FTSopCode ASC",
+        "SELECT FTSopCode, FTSopApp, FTSopName, FTSopValue, FTSopDesc, FNSopSeq FROM TCNSSysOption WHERE FTSopCode <> 'AutoPrintAdminPin' AND FTSopCode NOT LIKE 'Master%' ORDER BY FNSopSeq ASC, FTSopCode ASC",
     )
     .fetch_all(&st.pool)
     .await
@@ -1766,8 +1807,17 @@ pub async fn post_save_config_options(
     let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     for item in body.options {
         let code = item.code.trim();
+        if code == "AutoPrintAdminPin" {
+            return err_json(StatusCode::FORBIDDEN, "ไม่สามารถเปลี่ยน PIN ผ่านค่าตั้งค่าทั่วไปได้");
+        }
         if code.is_empty() {
             continue;
+        }
+        if code.starts_with("Master") || code == "DefaultBranch" {
+            if code == "DefaultBranch" && item.value.trim() == crate::storage::configured_branch(&st.pool).await {
+                continue;
+            }
+            return err_json(StatusCode::BAD_REQUEST, "เปลี่ยนแหล่งข้อมูลและสาขาได้จากหน้าตั้งค่าแหล่งข้อมูล StoreFront เท่านั้น");
         }
         if let Err(e) = sqlx::query(
             r#"
@@ -2385,7 +2435,7 @@ pub async fn get_products(
                    gl.FTPgpName AS FTPdtCgyName,
                    ps.FTPdtUnitDim AS FTPdtDim,
                    COALESCE(b.FTBarStaUse, '1') AS FTBarStaUse,
-                   COALESCE((SELECT CAST(pr.FCPgdPriceRet AS REAL) FROM TCNTPdtPrice4PDT pr WHERE pr.FTPdtCode = b.FTPdtCode AND pr.FTPghDocType = '1'
+                   COALESCE((SELECT CAST(pr.FCPgdPriceRet AS REAL) FROM TCNTPdtPrice4PDT pr WHERE pr.FTPdtCode = b.FTPdtCode AND pr.FTPghDocType = '1' AND (pr.FTPunCode = b.FTPunCode OR COALESCE(pr.FTPunCode, '') = '')
             "#,
         );
         if !price_group.is_empty() {
@@ -2400,7 +2450,7 @@ pub async fn get_products(
         }
         qb.push(
             r#"
-                    ORDER BY pr.FDPghDStart DESC, pr.FDCreateOn DESC LIMIT 1), 0.0) AS FCPdtPrice
+                    ORDER BY CASE WHEN COALESCE(pr.FTPunCode, '') = '' THEN 1 ELSE 0 END, pr.FDPghDStart DESC, pr.FDCreateOn DESC LIMIT 1), 0.0) AS FCPdtPrice
             FROM TCNMPdtBar b
             LEFT JOIN TCNMPdt p ON p.FTPdtCode = b.FTPdtCode
             LEFT JOIN TCNMPdt_L pl ON pl.FTPdtCode = b.FTPdtCode AND pl.FNLngID = 1
@@ -2527,14 +2577,6 @@ pub async fn get_products(
         .unwrap_or_default();
         let size_map: HashMap<String, TCNMLabelSize> = sizes.into_iter().map(|s| (s.FTLbsCode.clone(), s)).collect();
 
-        let mock_prices: Vec<(String, f64)> = sqlx::query_as(
-            "SELECT FTPdtCode, FCPpcPrice FROM TCNMPdtPri WHERE FTPpcPriType = '1' AND FTPpcStaUse = '1'",
-        )
-        .fetch_all(&st.pool)
-        .await
-        .unwrap_or_default();
-        let mock_price_map: HashMap<String, f64> = mock_prices.into_iter().collect();
-
         let img_rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT FTImgRefID, FTImgObj FROM TCNMImgPdt WHERE FTImgTable = 'TCNMPdt' AND COALESCE(FTImgObj, '') != '' AND FTImgObj NOT LIKE '#%' ORDER BY FNImgSeq ASC",
         )
@@ -2573,11 +2615,7 @@ pub async fn get_products(
                     .collect();
 
                 let p = r.FCPdtPrice.unwrap_or(0.0);
-                let retail_price = if p > 0.0 {
-                    p
-                } else {
-                    mock_price_map.get(&r.FTPdtCode).copied().unwrap_or(0.0)
-                };
+                let retail_price = p;
                 let pdt_image = img_map.get(&r.FTPdtCode).cloned().unwrap_or_default();
 
                 json!({
@@ -2742,9 +2780,16 @@ pub async fn post_build_line(
     Json(body): Json<BuildLineBody>,
 ) -> Response {
     if body.barcode.is_empty() {
-        return err_json(StatusCode::BAD_REQUEST, "barcode is required");
+        return err_json(StatusCode::BAD_REQUEST, "กรุณาระบุบาร์โค้ดสินค้า");
+    }
+    let source_branch = crate::storage::configured_branch(&st.pool).await;
+    if source_branch.is_empty() || body.bch_code.trim() != source_branch {
+        return err_json(StatusCode::BAD_REQUEST, "สาขาของรายการพิมพ์ต้องตรงกับแหล่งข้อมูล StoreFront ที่ตั้งไว้");
     }
     let qty = body.qty.unwrap_or(1);
+    if !(1..=10000).contains(&qty) {
+        return err_json(StatusCode::BAD_REQUEST, "จำนวนป้ายต้องอยู่ระหว่าง 1 ถึง 10000");
+    }
     let verify = body.verify.unwrap_or(true);
     let on_date = body
         .effective_date
@@ -2811,10 +2856,10 @@ pub async fn post_build_line(
         .unwrap_or(None);
 
         let Some(item) = bar_pdt else {
-            return err_json(StatusCode::NOT_FOUND, format!("Barcode not found in AdaAccD: {}", body.barcode));
+            return err_json(StatusCode::NOT_FOUND, format!("ไม่พบสินค้าสำหรับบาร์โค้ด {}", body.barcode));
         };
 
-        // Price lookup: TCNTPdtPrice4PDT -> TCNMPdtPackSize -> 0.0
+        // A missing price must remain distinct from an explicit zero price.
         #[derive(sqlx::FromRow)]
         struct AccdPriceRow {
             FCPgdPriceRet: Option<f64>,
@@ -2839,10 +2884,13 @@ pub async fn post_build_line(
                    CAST(FCPgdPriceWhs AS REAL) AS FCPgdPriceWhs
             FROM TCNTPdtPrice4PDT
             WHERE FTPdtCode = ? AND (FTPunCode = ? OR FTPunCode = '')
+              AND FTPghDocType = '1'
               AND (FTPplCode = ? OR FTPplCode = '')
               AND (COALESCE(FDPghDStart, '') = '' OR substr(FDPghDStart, 1, 10) <= ?)
               AND (COALESCE(FDPghDStop, '') = '' OR substr(FDPghDStop, 1, 10) >= ?)
-            ORDER BY CASE WHEN FTPplCode = ? THEN 0 ELSE 1 END, FDPghDStart DESC, FTPghTStart DESC
+            ORDER BY CASE WHEN FTPplCode = ? THEN 0 ELSE 1 END,
+                     CASE WHEN COALESCE(FTPunCode, '') = '' THEN 1 ELSE 0 END,
+                     FDPghDStart DESC, FTPghTStart DESC
             LIMIT 1
             "#,
         )
@@ -2856,44 +2904,17 @@ pub async fn post_build_line(
         .await
         .unwrap_or(None);
 
-        let mut sale_price = if body.pri_type == "2" {
-            p4.as_ref()
-                .and_then(|r| r.FCPgdPriceWhs)
-                .or(item.FCPdtPriceWHS)
-                .or_else(|| p4.as_ref().and_then(|r| r.FCPgdPriceRet))
-                .or(item.FCPdtPriceRET)
-                .unwrap_or(0.0)
-        } else {
-            p4.as_ref()
-                .and_then(|r| r.FCPgdPriceRet)
-                .or(item.FCPdtPriceRET)
-                .unwrap_or(0.0)
+        // pri_type selects the label's normal/promotion layout, not wholesale pricing.
+        let sale_price = p4.as_ref().and_then(|r| r.FCPgdPriceRet).or(item.FCPdtPriceRET);
+        let Some(sale_price) = sale_price.filter(|p|p.is_finite() && *p>=0.0) else {
+            return err_json(StatusCode::UNPROCESSABLE_ENTITY, "ไม่พบราคาขายที่ใช้ได้ กรุณาดาวน์โหลดข้อมูลหรือตรวจสอบราคาสินค้าก่อนพิมพ์");
         };
-        if sale_price <= 0.0 {
-            let mock_pri: Option<(f64,)> = sqlx::query_as(
-                "SELECT FCPpcPrice FROM TCNMPdtPri WHERE FTPdtCode = ? AND FTPpcStaUse = '1' ORDER BY CASE WHEN FTBchCode = ? THEN 0 ELSE 1 END LIMIT 1",
-            )
-            .bind(&item.FTPdtCode)
-            .bind(&body.bch_code)
-            .fetch_optional(&st.pool)
-            .await
-            .unwrap_or(None);
-            if let Some((mp,)) = mock_pri {
-                sale_price = mp;
-            }
-        }
         let unit_price = sale_price;
 
-        let mut promo = resolve_accd_promotion(accd, &body.barcode, &item.FTPdtCode, on_date, verify)
-            .await
-            .unwrap_or(None);
-        if promo.is_none() {
-            if let Ok(Some(local_promo)) = crate::db::resolve_promotion(&st.pool, &body.barcode, on_date, verify).await {
-                promo = Some(local_promo);
-            } else if let Ok(Some(local_promo_by_code)) = crate::db::resolve_promotion(&st.pool, &item.FTPdtCode, on_date, verify).await {
-                promo = Some(local_promo_by_code);
-            }
-        }
+        let promo = match resolve_accd_promotion(accd, &body.barcode, &item.FTPdtCode, on_date, verify).await {
+            Ok(promo)=>promo,
+            Err(error)=>return err_json(StatusCode::UNPROCESSABLE_ENTITY,error.to_string()),
+        };
         let is_promo = promo.as_ref().map(|p| p.is_discount || p.is_gift).unwrap_or(false);
         let final_price = match &promo {
             Some(p) if p.is_discount => apply_promo(sale_price, p),
@@ -2946,7 +2967,7 @@ pub async fn post_build_line(
 
         let print_date = Utc::now().format("%d/%m/%Y").to_string();
         let pri_status = if is_promo { "2" } else { "1" };
-        let pri_type_name = if body.pri_type == "2" { "ขายส่ง" } else { "ปกติ" };
+        let pri_type_name = if is_promo { "โปรโมชั่น" } else { "ปกติ" };
         let promo_interval_str = promo
             .as_ref()
             .map(|p| promo_interval(p.dstart.as_deref(), p.dstop.as_deref()))
@@ -3110,12 +3131,17 @@ pub async fn post_create_job(
     };
     let first_pri_type = body.lines[0].pri_type.clone();
 
+    let mut tx = match st.pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+
     if let Err(e) = sqlx::query(
-        "INSERT INTO TCNTLabelJob (FTLjbJobID, FTLjbBchCode, FTLjbSource, FTLjbPriType, FDLjbFrom, FTLjbStaVfy, FTLjbLbsOvr, FTLjbStatus, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy) VALUES (?, ?, ?, ?, ?, '1', ?, '4', ?, ?, ?, ?)",
+        "INSERT INTO TCNTLabelJob (FTLjbJobID, FTLjbBchCode, FTLjbSource, FTLjbPriType, FDLjbFrom, FTLjbStaVfy, FTLjbLbsOvr, FTLjbStatus, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy) VALUES (?, ?, ?, ?, ?, '1', ?, '1', ?, ?, ?, ?)",
     )
     .bind(&job_id).bind(&body.bch_code).bind(body.source.as_deref().unwrap_or("1")).bind(&first_pri_type)
     .bind(&now).bind(&body.r#override).bind(&now).bind(&created_by).bind(&now).bind(&created_by)
-    .execute(&st.pool)
+    .execute(&mut *tx)
     .await
     {
         return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
@@ -3126,7 +3152,7 @@ pub async fn post_create_job(
 
     for line in &body.lines {
         let qty = line.qty.unwrap_or(1).max(1);
-        let is_promo = line.promo.as_ref().map(|p| {
+        let is_promo = line.pri_type == "2" || line.promo.as_ref().map(|p| {
             p.get("is_discount").and_then(|v| v.as_bool()).unwrap_or(false)
                 || p.get("is_gift").and_then(|v| v.as_bool()).unwrap_or(false)
         }).unwrap_or(false);
@@ -3141,7 +3167,7 @@ pub async fn post_create_job(
             "SELECT FTLbsCode, FTLbsGroup, FTLbsName, FCLbsWidth, FCLbsHeight, FNLbsCol, FNLbsRow, FCLbsMagTop, FCLbsMagLeft, FCLbsMagBottom, FCLbsMagRight, FCLbsGapH, FCLbsGapV, FNLbsQtyPageNor, FNLbsQtyPagePmt, FTLbsTmplNor, FTLbsTmplPmt, FTLbsHhtCode, FTLbsStaUse, FTLbsPaperSize, FCLbsPaperWidth, FCLbsPaperHeight, FCLbsOffsetX, FCLbsOffsetY, FTPprCode, FTLbsStdTmplNor, FTLbsStdTmplPmt FROM TCNMLabelSize WHERE FTLbsCode = ?",
         )
         .bind(&line.lbs_code)
-        .fetch_optional(&st.pool)
+        .fetch_optional(&mut *tx)
         .await
         .unwrap_or(None);
 
@@ -3162,7 +3188,7 @@ pub async fn post_create_job(
             let bar_seq = ((body.start_col.unwrap_or(0) + (seq - 1)) % cols) + 1;
             let page_num = ((seq - 1) / per_page) + 1;
 
-            let _ = sqlx::query(
+            if let Err(e) = sqlx::query(
                 r#"
                 INSERT INTO TCNTLabelJobDt (
                     FTLjbJobID, FNLjdSeq, FTLjdBarCode, FTLjdPdtCode, FTLjdName, FTLjdNameOth,
@@ -3200,8 +3226,10 @@ pub async fn post_create_job(
             .bind(&line.pri_type)
             .bind(&line.tmpl_code)
             .bind(&now).bind(&created_by).bind(&now).bind(&created_by)
-            .execute(&st.pool)
-            .await;
+            .execute(&mut *tx)
+            .await {
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+            }
         }
     }
 
@@ -3211,7 +3239,7 @@ pub async fn post_create_job(
             "SELECT FTLbsCode, FTLbsGroup, FTLbsName, FCLbsWidth, FCLbsHeight, FNLbsCol, FNLbsRow, FCLbsMagTop, FCLbsMagLeft, FCLbsMagBottom, FCLbsMagRight, FCLbsGapH, FCLbsGapV, FNLbsQtyPageNor, FNLbsQtyPagePmt, FTLbsTmplNor, FTLbsTmplPmt, FTLbsHhtCode, FTLbsStaUse, FTLbsPaperSize, FCLbsPaperWidth, FCLbsPaperHeight, FCLbsOffsetX, FCLbsOffsetY, FTPprCode, FTLbsStdTmplNor, FTLbsStdTmplPmt FROM TCNMLabelSize WHERE FTLbsCode = ?",
         )
         .bind(&lbs_code)
-        .fetch_optional(&st.pool)
+        .fetch_optional(&mut *tx)
         .await
         .unwrap_or(None);
 
@@ -3233,14 +3261,16 @@ pub async fn post_create_job(
             body.normal_printer.as_deref().filter(|s| !s.is_empty()).unwrap_or(fallback_prt)
         };
 
-        let _ = sqlx::query(
-            "INSERT INTO TCNTLabelLog (FTLlgLogID, FTLjbJobID, FTLlgLbsCode, FTLlgPriTyp, FTLlgPsvCode, FTLlgPrinter, FNLlgQtyLabel, FNLlgQtyPage, FDLlgPriOn, FTLlgPriBy, FTLlgStatus, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '4', ?, ?, ?, ?)",
+        if let Err(e) = sqlx::query(
+            "INSERT INTO TCNTLabelLog (FTLlgLogID, FTLjbJobID, FTLlgLbsCode, FTLlgPriTyp, FTLlgPsvCode, FTLlgPrinter, FNLlgQtyLabel, FNLlgQtyPage, FDLlgPriOn, FTLlgPriBy, FTLlgStatus, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '1', ?, ?, ?, ?)",
         )
         .bind(&log_id).bind(&job_id).bind(&lbs_code).bind(&pri_type)
         .bind(psv_code).bind(target_prt)
         .bind(total_qty).bind(qty_page).bind(&now).bind(&created_by).bind(&now).bind(&created_by).bind(&now).bind(&created_by)
-        .execute(&st.pool)
-        .await;
+        .execute(&mut *tx)
+        .await {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
 
         log_entries.push(json!({
             "lbsCode": lbs_code,
@@ -3250,11 +3280,9 @@ pub async fn post_create_job(
         }));
     }
 
-    let job_end = Utc::now().to_rfc3339();
-    let _ = sqlx::query("UPDATE TCNTLabelJob SET FDLjbTo = ? WHERE FTLjbJobID = ?")
-        .bind(&job_end).bind(&job_id)
-        .execute(&st.pool)
-        .await;
+    if let Err(e) = tx.commit().await {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
 
     Json(json!({
         "jobId": job_id,
@@ -3312,7 +3340,7 @@ pub async fn post_print_send(
         let h = options.and_then(|o| o.get("labelHeight")).and_then(|v| v.as_f64()).unwrap_or(38.0);
         generate_test_pattern(brand, dpi, w, h)
     } else if let Some(lines) = body.get("lines").and_then(|v| v.as_array()) {
-        let mut groups: BTreeMap<String, Vec<(Value, u32)>> = BTreeMap::new();
+        let mut groups: BTreeMap<(String,String,String), Vec<(Value, u32)>> = BTreeMap::new();
         for l in lines {
             if !l.get("selected").and_then(|v| v.as_bool()).unwrap_or(false) {
                 continue;
@@ -3321,28 +3349,32 @@ pub async fn post_print_send(
             let pri = l.get("priType").and_then(|v| v.as_str()).unwrap_or("1");
             let qty = l.get("qty").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
             let ctx = l.get("ctx").cloned().unwrap_or(json!({}));
-            groups.entry(format!("{}_{}", lbs, pri)).or_default().push((ctx, qty));
+            groups.entry((lbs.to_string(),pri.to_string(),l.get("tmplCode").and_then(Value::as_str).unwrap_or("").to_string())).or_default().push((ctx, qty));
         }
 
         let templates = get_templates();
         let mut parts = Vec::new();
-        for (key, lbls) in groups {
-            let (lbs_code, pri_type) = key.split_once('_').unwrap_or(("SH-100x38", "1"));
+        for ((lbs_code, pri_type, explicit_template), lbls) in groups {
             let group_lbs = sqlx::query_as::<_, TCNMLabelSize>(
                 "SELECT FTLbsCode, FTLbsGroup, FTLbsName, FCLbsWidth, FCLbsHeight, FNLbsCol, FNLbsRow, FCLbsMagTop, FCLbsMagLeft, FCLbsMagBottom, FCLbsMagRight, FCLbsGapH, FCLbsGapV, FNLbsQtyPageNor, FNLbsQtyPagePmt, FTLbsTmplNor, FTLbsTmplPmt, FTLbsHhtCode, FTLbsStaUse, FTLbsPaperSize, FCLbsPaperWidth, FCLbsPaperHeight, FCLbsOffsetX, FCLbsOffsetY, FTPprCode, FTLbsStdTmplNor, FTLbsStdTmplPmt FROM TCNMLabelSize WHERE FTLbsCode = ?",
             )
-            .bind(lbs_code)
+            .bind(&lbs_code)
             .fetch_optional(&st.pool)
             .await
             .unwrap_or(None);
 
             let Some(group_lbs) = group_lbs else { continue };
-            let tmpl_code = if pri_type == "2" {
+            let tmpl_code = if !explicit_template.is_empty() { explicit_template } else if pri_type == "2" {
                 group_lbs.FTLbsTmplPmt.unwrap_or_else(|| "SH-100x38-PMT".to_string())
             } else {
                 group_lbs.FTLbsTmplNor.unwrap_or_else(|| "SH-100x38-NOR".to_string())
             };
-            let tmpl = templates.iter().find(|t| t.code == tmpl_code).unwrap_or(&templates[0]);
+            let layout: Option<String> = sqlx::query_scalar("SELECT FTLtmLayout FROM TCNMLabelTmpl WHERE FTLtmCode=? AND FTLbsCode=? AND FTLtmStaUse='1'")
+                .bind(&tmpl_code).bind(&lbs_code).fetch_optional(&st.pool).await.ok().flatten().flatten();
+            let elements = layout.and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                .and_then(|v| serde_json::from_value::<Vec<crate::templates::TemplateElement>>(v["elements"].clone()).ok())
+                .or_else(||templates.iter().find(|t|t.code==tmpl_code).map(|t|t.elements.clone()));
+            let Some(elements)=elements else{return err_json(StatusCode::BAD_REQUEST,format!("ไม่พบแบบพิมพ์ {}",tmpl_code));};
             let opts = DriverOptions {
                 dpi,
                 label_width_mm: group_lbs.FCLbsWidth,
@@ -3352,7 +3384,7 @@ pub async fn post_print_send(
                 darkness,
                 copies: 1,
             };
-            parts.push(generate_commands(brand, &lbls, &tmpl.elements, &opts));
+            parts.push(generate_commands(brand, &lbls, &elements, &opts));
         }
         parts.join("\r\n\r\n")
     } else {
@@ -3551,173 +3583,13 @@ pub async fn post_godex_print(
     if let Some(obj) = body.as_object_mut() {
         obj.insert("brand".to_string(), json!("GODEX"));
     }
-    post_print_send(State(st), Json(body)).await
+    crate::print_center::enqueue_lan(State(st), Json(body)).await
 }
 
 // ─── /api/import ─────────────────────────────────────────────────────────────
 
-pub async fn post_import(
-    State(st): State<AppState>,
-    mut multipart: Multipart,
-) -> Response {
-    let mut csv_bytes: Option<Vec<u8>> = None;
-    let mut table = String::new();
-
-    while let Ok(Some(field)) = multipart.next_field().await {
-        let name = field.name().unwrap_or("").to_string();
-        if name == "file" {
-            if let Ok(data) = field.bytes().await {
-                csv_bytes = Some(data.to_vec());
-            }
-        } else if name == "table" {
-            if let Ok(txt) = field.text().await {
-                table = txt;
-            }
-        }
-    }
-
-    let Some(bytes) = csv_bytes else {
-        return err_json(StatusCode::BAD_REQUEST, "file is required");
-    };
-    let supported = [
-        "TCNMBranch", "TCNMPdt", "TCNMPdtBar", "TCNMPdtPri",
-        "TCNMPmtHD", "TCNMPmtDT", "TCNMPdtLabel", "TCNMLabelSize",
-    ];
-    if !supported.contains(&table.as_str()) {
-        return err_json(
-            StatusCode::BAD_REQUEST,
-            format!("Unsupported table. Supported: {}", supported.join(", ")),
-        );
-    }
-
-    let mut rdr = csv::ReaderBuilder::new().trim(csv::Trim::All).from_reader(bytes.as_slice());
-    let headers: Vec<String> = match rdr.headers() {
-        Ok(h) => h.iter().map(|s| s.to_string()).collect(),
-        Err(e) => return err_json(StatusCode::BAD_REQUEST, format!("Invalid CSV: {}", e)),
-    };
-
-    let now = Utc::now().to_rfc3339();
-    let mut ok = 0i64;
-    let mut fail = 0i64;
-    let mut errors: Vec<String> = Vec::new();
-
-    let default_bch_code: String = sqlx::query_scalar::<_, String>(
-        "SELECT COALESCE(NULLIF((SELECT FTSopValue FROM TCNSSysOption WHERE FTSopCode = 'DefaultBranch' LIMIT 1), ''), (SELECT FTBchCode FROM TCNMBranch ORDER BY FTBchCode ASC LIMIT 1), '')",
-    )
-    .fetch_one(&st.pool)
-    .await
-    .unwrap_or_default();
-
-    for (idx, rec_res) in rdr.records().enumerate() {
-        let row_num = idx + 2;
-        let record = match rec_res {
-            Ok(r) => r,
-            Err(e) => {
-                fail += 1;
-                errors.push(format!("Row {}: {}", row_num, e));
-                continue;
-            }
-        };
-
-        let mut map: HashMap<String, String> = HashMap::new();
-        for (i, h) in headers.iter().enumerate() {
-            if let Some(val) = record.get(i) {
-                if !val.is_empty() {
-                    map.insert(h.clone(), val.to_string());
-                }
-            }
-        }
-
-        if table == "TCNMPdtBar" {
-            if let Some(bc) = map.get("FTPdbBarCode") {
-                let sym = map.get("FTPdbSymbology").map(|s| s.as_str()).unwrap_or("EAN13");
-                if let Err(e) = validate_barcode(bc, sym) {
-                    fail += 1;
-                    errors.push(format!("Row {}: {} (barcode: {})", row_num, e, bc));
-                    continue;
-                }
-            }
-        }
-
-        if table == "TCNMPmtDT" {
-            if let Some(bc) = map.get("FTBarCode").filter(|s| s.as_str() != "*") {
-                if let Err(e) = validate_barcode(bc, "EAN13") {
-                    fail += 1;
-                    errors.push(format!("Row {}: Barcode invalid in promotion detail: {}", row_num, e));
-                    continue;
-                }
-            }
-        }
-
-        let res = match table.as_str() {
-            "TCNMBranch" => {
-                sqlx::query(
-                    "INSERT INTO TCNMBranch (FTBchCode, FTBchName, FTBchStaUse, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy) VALUES (?, ?, ?, ?, 'IMPORT', ?, 'IMPORT') ON CONFLICT(FTBchCode) DO UPDATE SET FTBchName = COALESCE(excluded.FTBchName, FTBchName), FTBchStaUse = excluded.FTBchStaUse, FDLastUpdOn = excluded.FDLastUpdOn, FTLastUpdBy = 'IMPORT'"
-                )
-                .bind(map.get("FTBchCode").map(|s| s.as_str()).unwrap_or(""))
-                .bind(map.get("FTBchName"))
-                .bind(map.get("FTBchStaUse").map(|s| s.as_str()).unwrap_or("1"))
-                .bind(&now).bind(&now)
-                .execute(&st.pool).await
-            }
-            "TCNMPdt" => {
-                sqlx::query(
-                    "INSERT INTO TCNMPdt (FTPdtCode, FTPdtName, FTPdtNameOth, FTPdtSku, FTPdtBrand, FTPdtCgyName, FTPdtUnit, FTPdtDim, FTPdtStaUse, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'IMPORT', ?, 'IMPORT') ON CONFLICT(FTPdtCode) DO UPDATE SET FTPdtName = COALESCE(excluded.FTPdtName, FTPdtName), FTPdtNameOth = COALESCE(excluded.FTPdtNameOth, FTPdtNameOth), FTPdtSku = COALESCE(excluded.FTPdtSku, FTPdtSku), FTPdtBrand = COALESCE(excluded.FTPdtBrand, FTPdtBrand), FTPdtCgyName = COALESCE(excluded.FTPdtCgyName, FTPdtCgyName), FTPdtUnit = COALESCE(excluded.FTPdtUnit, FTPdtUnit), FTPdtDim = COALESCE(excluded.FTPdtDim, FTPdtDim), FDLastUpdOn = excluded.FDLastUpdOn"
-                )
-                .bind(map.get("FTPdtCode").map(|s| s.as_str()).unwrap_or(""))
-                .bind(map.get("FTPdtName").map(|s| s.as_str()).unwrap_or(""))
-                .bind(map.get("FTPdtNameOth"))
-                .bind(map.get("FTPdtSku"))
-                .bind(map.get("FTPdtBrand"))
-                .bind(map.get("FTPdtCgyName"))
-                .bind(map.get("FTPdtUnit"))
-                .bind(map.get("FTPdtDim"))
-                .bind(map.get("FTPdtStaUse").map(|s| s.as_str()).unwrap_or("1"))
-                .bind(&now).bind(&now)
-                .execute(&st.pool).await
-            }
-            "TCNMPdtBar" => {
-                sqlx::query(
-                    "INSERT INTO TCNMPdtBar (FTPdbBarCode, FTPdtCode, FTPdbSymbology, FTPdbStaPri, FTPdbStaUse, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy) VALUES (?, ?, ?, ?, ?, ?, 'IMPORT', ?, 'IMPORT') ON CONFLICT(FTPdbBarCode) DO UPDATE SET FTPdtCode = excluded.FTPdtCode, FTPdbSymbology = excluded.FTPdbSymbology, FTPdbStaPri = excluded.FTPdbStaPri, FDLastUpdOn = excluded.FDLastUpdOn"
-                )
-                .bind(map.get("FTPdbBarCode").map(|s| s.as_str()).unwrap_or(""))
-                .bind(map.get("FTPdtCode").map(|s| s.as_str()).unwrap_or(""))
-                .bind(map.get("FTPdbSymbology").map(|s| s.as_str()).unwrap_or("EAN13"))
-                .bind(map.get("FTPdbStaPri").map(|s| s.as_str()).unwrap_or("1"))
-                .bind(map.get("FTPdbStaUse").map(|s| s.as_str()).unwrap_or("1"))
-                .bind(&now).bind(&now)
-                .execute(&st.pool).await
-            }
-            "TCNMPdtPri" => {
-                let price: f64 = map.get("FCPpcPrice").and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                let unit_price: Option<f64> = map.get("FCPpcUnitPrice").and_then(|s| s.parse().ok());
-                sqlx::query(
-                    "INSERT INTO TCNMPdtPri (FTPdtCode, FTBchCode, FTPpcPriType, FCPpcPrice, FCPpcUnitPrice, FTPpcStaUse, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy) VALUES (?, ?, ?, ?, ?, ?, ?, 'IMPORT', ?, 'IMPORT') ON CONFLICT(FTPdtCode, FTBchCode, FTPpcPriType) DO UPDATE SET FCPpcPrice = excluded.FCPpcPrice, FCPpcUnitPrice = excluded.FCPpcUnitPrice, FDLastUpdOn = excluded.FDLastUpdOn"
-                )
-                .bind(map.get("FTPdtCode").map(|s| s.as_str()).unwrap_or(""))
-                .bind(map.get("FTBchCode").map(|s| s.as_str()).unwrap_or(default_bch_code.as_str()))
-                .bind(map.get("FTPpcPriType").map(|s| s.as_str()).unwrap_or("1"))
-                .bind(price).bind(unit_price)
-                .bind(map.get("FTPpcStaUse").map(|s| s.as_str()).unwrap_or("1"))
-                .bind(&now).bind(&now)
-                .execute(&st.pool).await
-            }
-            _ => {
-                // Other supported tables fallback
-                sqlx::query("SELECT 1").execute(&st.pool).await
-            }
-        };
-
-        match res {
-            Ok(_) => ok += 1,
-            Err(e) => {
-                fail += 1;
-                errors.push(format!("Row {}: {}", row_num, e));
-            }
-        }
-    }
-
-    Json(json!({ "ok": ok, "fail": fail, "errors": errors })).into_response()
+pub async fn post_import(State(_st): State<AppState>, _multipart: Multipart) -> Response {
+    err_json(StatusCode::CONFLICT, "ไม่รองรับการนำเข้าข้อมูลสินค้าจากไฟล์ กรุณาอัปเดตข้อมูลจากแหล่งข้อมูลที่ตั้งไว้")
 }
 
 // ─── /api/paper-sizes, /api/preprints, /api/label-fields, /api/lan-printers ─
@@ -4262,7 +4134,7 @@ pub async fn post_save_schedule(
     .bind(&body.ppl_code)
     .bind(body.lbs_code.trim())
     .bind(body.qty_mode.unwrap_or(1))
-    .bind(body.sync_mode.as_deref().unwrap_or("DIRECT_API"))
+    .bind(body.sync_mode.as_deref().unwrap_or("STOREFRONT"))
     .bind(body.sync_retry.unwrap_or(3).clamp(1, 5))
     .bind(body.retry_wait_sec.unwrap_or(300).clamp(5, 1800))
     .bind(on_sync_fail)
@@ -4526,41 +4398,10 @@ pub async fn post_load_failed_to_manual(
 }
 
 pub async fn get_sync_status(State(st): State<AppState>) -> Response {
-    let states = sqlx::query_as::<_, TCNTSyncLocalState>(
-        "SELECT FTSynTable, FDSynLast, FTSynSnapshotToken, FTSynLastChecksum, FDLastSyncAt, FTSynLastStatus FROM TCNTSyncLocalState ORDER BY FTSynTable ASC",
-    )
-    .fetch_all(&st.pool)
-    .await
-    .unwrap_or_default();
-
-    let cfg = crate::sync_master::load_sync_config(&st.pool, 3, None).await;
-    Json(json!({
-        "ok": true,
-        "configured": !cfg.api_url.is_empty(),
-        "apiUrl": cfg.api_url,
-        "hasApiKey": !cfg.api_key.is_empty(),
-        "agnCode": cfg.agn_code,
-        "bchCode": cfg.bch_code,
-        "states": states,
-    }))
-    .into_response()
+    Json(crate::storage::status(&st.pool).await).into_response()
 }
-
 pub async fn post_sync_trigger(State(st): State<AppState>) -> Response {
-    let cfg = crate::sync_master::load_sync_config(&st.pool, 3, Some(5)).await;
-    match crate::sync_master::sync_master_with_retry(&st.pool, &cfg).await {
-        Ok(proof) => Json(json!(proof)).into_response(),
-        Err(err) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({
-                "ok": false,
-                "code": err.code,
-                "attempts": err.attempts,
-                "message": err.message
-            })),
-        )
-            .into_response(),
-    }
+    crate::print_center::request_sync(State(st)).await
 }
 
 #[derive(Deserialize)]
@@ -4571,26 +4412,123 @@ pub struct VerifyAdminPinBody {
 
 pub async fn post_verify_admin_pin(
     State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<VerifyAdminPinBody>,
 ) -> Response {
-    let saved_pin: String = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT FTSopValue FROM TCNSSysOption WHERE FTSopCode = 'AutoPrintAdminPin' LIMIT 1",
-    )
-    .fetch_optional(&st.pool)
-    .await
-    .ok()
-    .flatten()
-    .flatten()
-    .filter(|s| !s.trim().is_empty())
-    .unwrap_or_else(|| "1234".to_string());
-
-    let ok = body.pin.trim() == saved_pin.trim();
+    if crate::storage::admin_pin_change_required(&st.pool).await {
+        return err_json(StatusCode::BAD_REQUEST,"กรุณาตั้ง PIN ผู้ดูแลใหม่ในแท็บแหล่งข้อมูลก่อนแก้ไขการตั้งค่า");
+    }
+    let ok = crate::storage::valid_pin(&st.pool, &body.pin).await;
     if !ok {
         return (
-            StatusCode::UNAUTHORIZED,
+                StatusCode::BAD_REQUEST,
             Json(json!({ "ok": false, "error": "รหัส PIN ผู้ดูแลระบบไม่ถูกต้อง" })),
         )
             .into_response();
     }
-    Json(json!({ "ok": true })).into_response()
+    match crate::auth::grant_admin(&st.pool,&headers).await {
+        Ok(())=>Json(json!({ "ok": true })).into_response(),
+        Err(e)=>err_json(StatusCode::UNAUTHORIZED,e),
+    }
+}
+
+#[cfg(test)]
+mod manual_job_tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn fixture() -> SqlitePool {
+        let pool = SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        crate::db::ensure_label_schema(&pool).await.unwrap();
+        pool
+    }
+
+    fn request() -> CreateJobBody {
+        serde_json::from_value(json!({
+            "bchCode": "00001", "user": "TEST", "lines": [{
+                "barcode": "885000000001", "pdtCode": "P1", "qty": 2,
+                "ctx": {"product": {"name": "Test"}}, "priType": "2",
+                "lbsCode": "CUSTOM", "tmplCode": "CUSTOM-PMT", "salePrice": 10,
+                "promo": null
+            }]
+        })).unwrap()
+    }
+
+    #[tokio::test]
+    async fn manual_job_preserves_promo_type_without_optional_promo_object() {
+        let pool = fixture().await;
+        let response = post_create_job(State(AppState { pool: pool.clone() }), Json(request())).await;
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT FTLjdPriStat, FNLjdLabQty FROM TCNTLabelJobDt ORDER BY FNLjdSeq"
+        ).fetch_all(&pool).await.unwrap();
+        assert_eq!(rows, vec![("2".into(), 1), ("2".into(), 1)]);
+    }
+
+    #[tokio::test]
+    async fn manual_job_rolls_back_header_and_details_on_log_failure() {
+        let pool = fixture().await;
+        sqlx::query("CREATE TRIGGER fail_log BEFORE INSERT ON TCNTLabelLog BEGIN SELECT RAISE(ABORT, 'simulated log failure'); END")
+            .execute(&pool).await.unwrap();
+        let response = post_create_job(State(AppState { pool: pool.clone() }), Json(request())).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("simulated log failure"));
+        for table in ["TCNTLabelJob", "TCNTLabelJobDt", "TCNTLabelLog"] {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(&pool).await.unwrap();
+            assert_eq!(count, 0, "{table} must roll back");
+        }
+    }
+}
+
+#[cfg(test)]
+mod event_printer_mapping_tests {
+    use super::*;
+    async fn fixture() -> SqlitePool {
+        let p=sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        crate::print_center::ensure_schema(&p).await.unwrap();
+        sqlx::raw_sql("CREATE TABLE TCNMLabelPrinter(FTLbsCode TEXT,FTPsvCode TEXT,FTLbpPriType TEXT,FTLbpPrinter TEXT,FTLbpTray TEXT,FTLbpProtocol TEXT,FTLbpStaUse TEXT,FDCreateOn TEXT,FTCreateBy TEXT,FDLastUpdOn TEXT,FTLastUpdBy TEXT,PRIMARY KEY(FTLbsCode,FTPsvCode,FTLbpPriType));").execute(&p).await.unwrap();
+        p
+    }
+    fn payload(events:bool) -> SaveLabelPrinterBody {
+        let mut v=json!({"lbsCode":"L1","normalPrinter":"Normal","promoPrinter":"Promo"});
+        if events {v["eventRoutes"]=json!({"NEW_PDT":{"printer":"New","tray":"Tray 2","protocol":"WINDOWS"},"PROMO_END_REVERT":{"printer":"Return","tray":"Tray 1","protocol":"WINDOWS"}});}
+        serde_json::from_value(v).unwrap()
+    }
+    #[tokio::test]
+    async fn template_routes_are_isolated_and_survive_legacy_saves() {
+        let p=fixture().await;
+        sqlx::raw_sql("CREATE TABLE TCNMLabelTmpl(FTLtmCode TEXT,FTLbsCode TEXT,FTLtmStaUse TEXT); INSERT INTO TCNMLabelTmpl VALUES('BAR','L1','1'),('PRICE','L1','1');").execute(&p).await.unwrap();
+        let body:SaveLabelPrinterBody=serde_json::from_value(json!({"lbsCode":"L1","normalPrinter":"Normal","promoPrinter":"Promo","templateRoutes":{"BAR":{"printer":"Sticker","tray":"Roll","protocol":"TSPL"},"PRICE":{"printer":"Laser","tray":"Tray 2","protocol":"WINDOWS"}}})).unwrap();
+        assert!(post_label_printers(State(AppState{pool:p.clone()}),Json(body)).await.status().is_success());
+        assert!(post_label_printers(State(AppState{pool:p.clone()}),Json(payload(false))).await.status().is_success());
+        let saved:String=sqlx::query_scalar("SELECT value FROM ABPrintSetting WHERE id='templateRoutes:LOCAL:L1'").fetch_one(&p).await.unwrap();
+        let v:Value=serde_json::from_str(&saved).unwrap();
+        assert_eq!(v["BAR"]["printer"],"Sticker");assert_eq!(v["PRICE"]["tray"],"Tray 2");
+        let invalid:SaveLabelPrinterBody=serde_json::from_value(json!({"lbsCode":"L1","templateRoutes":{"OTHER":{"printer":"Wrong","tray":"","protocol":"WINDOWS"}}})).unwrap();
+        assert_eq!(post_label_printers(State(AppState{pool:p.clone()}),Json(invalid)).await.status(),StatusCode::BAD_REQUEST);
+        assert_eq!(sqlx::query_scalar::<_,String>("SELECT FTLbpPrinter FROM TCNMLabelPrinter WHERE FTLbpPriType='1'").fetch_one(&p).await.unwrap(),"Normal");
+    }
+    #[tokio::test]
+    async fn event_routes_survive_legacy_manual_settings_save() {
+        let p=fixture().await;
+        assert!(post_label_printers(State(AppState{pool:p.clone()}),Json(payload(true))).await.status().is_success());
+        assert!(post_label_printers(State(AppState{pool:p.clone()}),Json(payload(false))).await.status().is_success());
+        let saved:String=sqlx::query_scalar("SELECT value FROM ABPrintSetting WHERE id='eventRoutes:LOCAL:L1'").fetch_one(&p).await.unwrap();
+        let v:Value=serde_json::from_str(&saved).unwrap();
+        assert_eq!(v["NEW_PDT"]["printer"],"New");
+        assert_eq!(v["PROMO_END_REVERT"]["tray"],"Tray 1");
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNMLabelPrinter").fetch_one(&p).await.unwrap(),2);
+    }
+    #[tokio::test]
+    async fn event_routes_failure_rolls_back_manual_mappings_too() {
+        let p=fixture().await;
+        sqlx::raw_sql("CREATE TRIGGER fail_routes BEFORE INSERT ON ABPrintSetting BEGIN SELECT RAISE(ABORT,'test'); END;").execute(&p).await.unwrap();
+        assert!(!post_label_printers(State(AppState{pool:p.clone()}),Json(payload(true))).await.status().is_success());
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNMLabelPrinter").fetch_one(&p).await.unwrap(),0);
+    }
 }

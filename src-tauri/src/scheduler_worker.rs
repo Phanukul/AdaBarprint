@@ -1,19 +1,16 @@
-use chrono::{Datelike, Local, NaiveDateTime, NaiveTime};
+use chrono::Local;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 use uuid::Uuid;
 
 use crate::delta_engine::{compute_delta_candidates, DeltaSummary};
 use crate::label_renderer::{
-    check_printer_ready, cleanup_old_autoprint_data, default_chunk_sender, dispatch_run_queue,
-    print_cover_sheet, resolve_printer_route, CoverSheetInfo,
+    default_chunk_sender, dispatch_run_queue,
+    print_cover_sheet, CoverSheetInfo,
 };
-use crate::models::{TCNTLabelSchedQueue, TCNTLabelSchedRun, TCNTLabelSchedule};
-use crate::sync_master::{load_sync_config, sync_master_with_retry};
+use crate::models::{TCNTLabelSchedRun, TCNTLabelSchedule};
+
 
 static SCHEDULER_BUSY: AtomicBool = AtomicBool::new(false);
 
@@ -50,24 +47,6 @@ pub struct TriggerRunResult {
     pub fail_qty: i64,
     pub err_msg: Option<String>,
     pub dry_run_delta: Option<DeltaSummary>,
-}
-
-fn day_allowed(days_mask: &str, local_now: &chrono::DateTime<Local>) -> bool {
-    let idx = local_now.weekday().num_days_from_monday() as usize; // 0=Mon..6=Sun
-    days_mask
-        .as_bytes()
-        .get(idx)
-        .map(|b| *b == b'1')
-        .unwrap_or(true)
-}
-
-fn compute_branch_jitter_sec(bch_code: &str, max_jitter_sec: i64) -> i64 {
-    if max_jitter_sec <= 0 {
-        return 0;
-    }
-    let mut h = DefaultHasher::new();
-    bch_code.hash(&mut h);
-    (h.finish() % (max_jitter_sec as u64)) as i64
 }
 
 pub async fn get_schedule(pool: &SqlitePool, code: &str) -> Result<Option<TCNTLabelSchedule>, sqlx::Error> {
@@ -204,65 +183,10 @@ pub async fn execute_schedule_run_with_overrides(
     .await
     .map_err(|e| format!("ไม่สามารถสร้าง Run Record: {}", e))?;
 
-    // Step 1: Sync Direct against API2PSMaster V6 (if configured / enabled)
-    let mut sync_attempts = 0i64;
-    let mut sync_proof_json: Option<String> = None;
-    let mut synced_at: Option<String> = None;
-
-    if sched.FTLscSyncMode.eq_ignore_ascii_case("DIRECT_API") {
-        // Keep MANUAL button responsive (<= 3s retry delay), while TIMER/MISFIRE honors FNLscRetryWaitSec
-        let wait_sec = if trigger_by == "MANUAL" {
-            sched.FNLscRetryWaitSec.clamp(0, 3) as u64
-        } else {
-            sched.FNLscRetryWaitSec.max(0) as u64
-        };
-        let sync_cfg = load_sync_config(
-            pool,
-            sched.FNLscSyncRetry.max(1) as u32,
-            Some(wait_sec),
-        )
-        .await;
-
-        if !sync_cfg.api_url.is_empty() {
-            match sync_master_with_retry(pool, &sync_cfg).await {
-                Ok(proof) => {
-                    sync_attempts = proof.attempts as i64;
-                    synced_at = Some(proof.synced_at.clone());
-                    sync_proof_json = serde_json::to_string(&proof).ok();
-                }
-                Err(sync_err) => {
-                    sync_attempts = sync_err.attempts as i64;
-                    if sched.FTLscOnSyncFail.eq_ignore_ascii_case("ABORT") {
-                        let finished_at = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-                        let msg = format!("{}: {}", sync_err.code, sync_err.message);
-                        let _ = sqlx::query(
-                            "UPDATE TCNTLabelSchedRun SET FTLsrStatus = 'SYNC_FAILED', FNLsrSyncAttempts = ?, FTLsrErrMsg = ?, FDLsrFinishedAt = ? WHERE FTLsrRunID = ?",
-                        )
-                        .bind(sync_attempts)
-                        .bind(&msg)
-                        .bind(&finished_at)
-                        .bind(&run_id)
-                        .execute(pool)
-                        .await;
-                        return Ok(TriggerRunResult {
-                            ok: false,
-                            mode: trigger_by.to_string(),
-                            run_id: Some(run_id),
-                            status: "SYNC_FAILED".to_string(),
-                            biz_date,
-                            total_candidates: 0,
-                            skipped_dup: 0,
-                            nor_qty: 0,
-                            pmt_qty: 0,
-                            fail_qty: 0,
-                            err_msg: Some(msg),
-                            dry_run_delta: None,
-                        });
-                    }
-                }
-            }
-        }
-    }
+    // Master is owned by StoreFront. Legacy dispatch never downloads data.
+    let sync_attempts = 0i64;
+    let sync_proof_json: Option<String> = None;
+    let synced_at: Option<String> = None;
 
     // Step 2: Delta Engine (4 cases + PriceHash duplicate skip)
     let delta = compute_delta_candidates(pool, &sched, &biz_date)
@@ -499,158 +423,8 @@ pub async fn reprint_failed_run(pool: &SqlitePool, run_id: &str) -> Result<Trigg
     })
 }
 
-fn elapsed_seconds_since(ts_str: Option<&str>, now_local: &chrono::DateTime<Local>) -> Option<i64> {
-    let raw = ts_str?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    let naive = NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S").ok()?;
-    let diff = now_local.naive_local() - naive;
-    Some(diff.num_seconds())
-}
-
-/// 24/7 Background Worker Loop: Pre-Sync with Jitter + 04:00 Execution + Misfire Catch-up + AUTO_RESUME + Cleanup.
 pub fn spawn_scheduler_loop(pool: SqlitePool) {
-    tokio::spawn(async move {
-        let mut last_presync_day = String::new();
-        let mut last_cleanup_day = String::new();
-
-        loop {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-
-            let local_now = Local::now();
-            let biz_date = local_now.format("%Y-%m-%d").to_string();
-
-            // Periodic retention cleanup + stale RUNNING recovery once per loop check
-            if last_cleanup_day != biz_date {
-                let retention_days: i64 = sqlx::query_scalar::<_, Option<String>>(
-                    "SELECT FTSopValue FROM TCNSSysOption WHERE FTSopCode = 'AutoPrintRetentionDays' LIMIT 1",
-                )
-                .fetch_optional(&pool)
-                .await
-                .ok()
-                .flatten()
-                .flatten()
-                .and_then(|s| s.trim().parse().ok())
-                .unwrap_or(60);
-                cleanup_old_autoprint_data(&pool, retention_days).await;
-                last_cleanup_day = biz_date.clone();
-            }
-
-            if !SCHEDULER_BUSY.load(Ordering::SeqCst) {
-                let stale_cutoff = (local_now - chrono::Duration::minutes(15))
-                    .format("%Y-%m-%d %H:%M:%S")
-                    .to_string();
-                let finish_ts = local_now.format("%Y-%m-%d %H:%M:%S").to_string();
-                let _ = sqlx::query(
-                    "UPDATE TCNTLabelSchedRun SET FTLsrStatus = 'FAILED', FTLsrErrMsg = COALESCE(FTLsrErrMsg, 'E-SYS-001: งานถูกขัดจังหวะกลางคัน (ไฟดับ/ปิดโปรแกรม)'), FDLsrFinishedAt = ? WHERE FTLsrStatus = 'RUNNING' AND FDLsrStartedAt < ?",
-                )
-                .bind(&finish_ts)
-                .bind(&stale_cutoff)
-                .execute(&pool)
-                .await;
-            }
-
-            let schedules = sqlx::query_as::<_, TCNTLabelSchedule>(
-                r#"
-                SELECT FTLscCode, FTLscName, FTLscStaUse, FTLscRunTime, FNLscPreSyncMin, FNLscJitterSec,
-                       FTLscDaysMask, FTLscTriggerRules, FTLscBchCode, FTLscPplCode, FTLscLbsCode,
-                       FNLscQtyMode, FTLscSyncMode, FNLscSyncRetry, FNLscRetryWaitSec, FTLscOnSyncFail,
-                       FTLscOnPrinterBack, FNLscMisfireMin, FTLscStaCoverSheet, FDLscLastRunAt,
-                       FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy
-                FROM TCNTLabelSchedule
-                WHERE FTLscStaUse = '1'
-                "#,
-            )
-            .fetch_all(&pool)
-            .await
-            .unwrap_or_default();
-
-            for sched in schedules {
-                if !day_allowed(&sched.FTLscDaysMask, &local_now) {
-                    continue;
-                }
-                let Ok(run_t) = NaiveTime::parse_from_str(sched.FTLscRunTime.trim(), "%H:%M") else {
-                    continue;
-                };
-                let now_t = local_now.time();
-                let diff_sec = (now_t - run_t).num_seconds();
-
-                // 1) Staggered Pre-Sync Window (e.g., 03:15 - 03:45 + Branch Jitter)
-                let fallback_bch: String = if let Some(ref b) = sched.FTLscBchCode {
-                    if !b.trim().is_empty() { b.clone() } else { "00001".to_string() }
-                } else {
-                    sqlx::query_scalar::<_, Option<String>>(
-                        "SELECT FTSopValue FROM TCNSSysOption WHERE FTSopCode IN ('MasterBchCode', 'DefaultBranch') AND COALESCE(FTSopValue, '') != '' LIMIT 1",
-                    )
-                    .fetch_optional(&pool)
-                    .await
-                    .ok()
-                    .flatten()
-                    .flatten()
-                    .unwrap_or_else(|| "00001".to_string())
-                };
-                let jitter_min = compute_branch_jitter_sec(&fallback_bch, sched.FNLscJitterSec) / 60;
-                let presync_offset_sec = (-(sched.FNLscPreSyncMin.max(5)) + jitter_min.min(sched.FNLscPreSyncMin - 2).max(0)) * 60;
-                if diff_sec >= presync_offset_sec && diff_sec < 0 && last_presync_day != biz_date {
-                    let sync_cfg = load_sync_config(&pool, 2, Some(30)).await;
-                    if !sync_cfg.api_url.is_empty() {
-                        let _ = sync_master_with_retry(&pool, &sync_cfg).await;
-                    }
-                    last_presync_day = biz_date.clone();
-                }
-
-                // 2) Target time / Misfire Catch-up window (strictly at or after run_t: 0 <= diff_sec <= FNLscMisfireMin*60)
-                if diff_sec >= 0 && diff_sec <= sched.FNLscMisfireMin * 60 {
-                    let existing: Option<(String, String, Option<String>)> = sqlx::query_as(
-                        "SELECT FTLsrRunID, FTLsrStatus, COALESCE(FDLsrFinishedAt, FDLsrStartedAt) FROM TCNTLabelSchedRun WHERE FTLscCode = ? AND FDLsrBizDate = ? AND FTLsrTriggerBy IN ('TIMER','MISFIRE') ORDER BY FDLsrStartedAt DESC LIMIT 1",
-                    )
-                    .bind(&sched.FTLscCode)
-                    .bind(&biz_date)
-                    .fetch_optional(&pool)
-                    .await
-                    .unwrap_or(None);
-
-                    match existing {
-                        None => {
-                            let trig = if diff_sec <= 120 { "TIMER" } else { "MISFIRE" };
-                            let _ = execute_schedule_run(&pool, &sched.FTLscCode, trig, false, Some(&biz_date)).await;
-                        }
-                        Some((_run_id, status, last_ts)) if status == "SYNC_FAILED" => {
-                            // If network recovered later inside misfire window (>= 15 min after failed attempt), retry automatically
-                            if elapsed_seconds_since(last_ts.as_deref(), &local_now).unwrap_or(9999) >= 900 {
-                                let _ = execute_schedule_run(&pool, &sched.FTLscCode, "MISFIRE", false, Some(&biz_date)).await;
-                            }
-                        }
-                        Some((run_id, status, last_ts))
-                            if (status == "PARTIAL" || status == "FAILED")
-                                && sched.FTLscOnPrinterBack.eq_ignore_ascii_case("AUTO_RESUME") =>
-                        {
-                            // Wait >= 5 minutes between AUTO_RESUME attempts to avoid spooler spam if paper tray stays empty
-                            if elapsed_seconds_since(last_ts.as_deref(), &local_now).unwrap_or(9999) < 300 {
-                                continue;
-                            }
-                            let first_fail: Option<TCNTLabelSchedQueue> = sqlx::query_as(
-                                "SELECT FTLsrRunID, FNLsqSeq, FTPdtCode, FTBarCode, FTLsqTriggerSrc, FTLsqPriType, FTLbsCode, FCLsqOldPrice, FCLsqSalePrice, FTLsqPromoDocNo, FTLsqPriceHash, FNLsqQty, FNLsqBatchPage, FTLsqStatus, FTLsqErrMsg FROM TCNTLabelSchedQueue WHERE FTLsrRunID = ? AND FTLsqStatus = 'FAILED' ORDER BY FNLsqSeq ASC LIMIT 1",
-                            )
-                            .bind(&run_id)
-                            .fetch_optional(&pool)
-                            .await
-                            .unwrap_or(None);
-
-                            if let Some(q_item) = first_fail {
-                                let route = resolve_printer_route(&pool, &q_item.FTLbsCode, &q_item.FTLsqPriType).await;
-                                if check_printer_ready(&route).await.is_ok() {
-                                    let _ = reprint_failed_run(&pool, &run_id).await;
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-    });
+    crate::print_center::spawn(pool);
 }
 
 #[cfg(test)]

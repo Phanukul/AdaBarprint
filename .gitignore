@@ -51,6 +51,7 @@ prompt
 *.db-wal
 *.db-shm
 *.db-journal
+*.print-agent.lock
 
 server.log
 # Skills directory
@@ -67,3 +68,9 @@ target/
 # Legacy tool logs
 tool-results/
 
+
+# Machine data and migration backups must never ship with the application
+/db/
+/src-tauri/bundle-agent/
+/storage-migration/
+*.sqlite.bak

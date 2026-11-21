@@ -118,6 +118,17 @@ pub async fn ensure_auth_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .execute(pool)
     .await?;
+    sqlx::query("CREATE TABLE IF NOT EXISTS ABAdminGrant(token_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL)").execute(pool).await?;
+    Ok(())
+}
+
+pub async fn grant_admin(pool: &SqlitePool, headers: &HeaderMap) -> Result<(), String> {
+    let token=bearer_token(headers).ok_or("กรุณาเข้าสู่ระบบก่อนยืนยันสิทธิ์ผู้ดูแล")?;
+    let session=load_valid_session(pool,&token).await.map_err(|(_,m)|m)?;
+    if session.FTSesLocked!=0 {return Err("กรุณาปลดล็อกก่อนยืนยันสิทธิ์ผู้ดูแล".into());}
+    sqlx::query("DELETE FROM ABAdminGrant WHERE expires < unixepoch()").execute(pool).await.map_err(|e|e.to_string())?;
+    sqlx::query("INSERT INTO ABAdminGrant(token_hash,expires) VALUES(?,unixepoch()+600) ON CONFLICT(token_hash) DO UPDATE SET expires=excluded.expires")
+        .bind(session.FTSesTokenHash).execute(pool).await.map_err(|e|e.to_string())?;
     Ok(())
 }
 
@@ -228,6 +239,53 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
         }
     }
     None
+}
+
+/// Enforce sessions on business APIs, including requests made outside the UI.
+/// Source setup remains available before login; its writes require the admin PIN.
+pub async fn require_api_session(
+    State(pool): State<SqlitePool>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = request.uri().path();
+    if let Some(origin) = request.headers().get("origin") {
+        let origin = origin.to_str().unwrap_or("");
+        let host = request.headers().get("host").and_then(|v| v.to_str().ok()).unwrap_or("");
+        let same_origin = origin == format!("http://{host}") || origin == format!("https://{host}");
+        let dev_origin = cfg!(debug_assertions) && matches!(origin, "http://localhost:5173" | "http://127.0.0.1:5173");
+        if !same_origin && !dev_origin {
+            return (StatusCode::FORBIDDEN, Json(json!({"error":"ไม่อนุญาตให้เรียกบริการจากเว็บไซต์อื่น"}))).into_response();
+        }
+    }
+    let public = matches!(path,
+        "/api/auth/login-options" | "/api/auth/users" | "/api/auth/login" |
+        "/api/auth/me" | "/api/auth/lock" | "/api/auth/unlock" | "/api/auth/logout" |
+        "/api/storage" | "/api/storage/check" | "/api/storage/sync");
+    if path.starts_with("/api/") && !public {
+        let Some(token) = bearer_token(request.headers()) else {
+            return (StatusCode::UNAUTHORIZED, Json(json!({"error":"กรุณาเข้าสู่ระบบก่อนใช้งาน"}))).into_response();
+        };
+        match load_valid_session(&pool, &token).await {
+            Ok(session) if session.FTSesLocked == 0 => {
+                if session.FTBchCode != crate::storage::configured_branch(&pool).await {
+                    return (StatusCode::UNAUTHORIZED, Json(json!({"error":"แหล่งข้อมูลเปลี่ยนแล้ว กรุณาเข้าสู่ระบบใหม่"}))).into_response();
+                }
+                let changes_settings=request.method()!=axum::http::Method::GET && (
+                    path.starts_with("/api/config/") && path!="/api/config/admin-verify"
+                    || ["/api/paper-sizes/","/api/preprints/","/api/lan-printers/","/api/label-sizes/","/api/templates/","/api/schedules/"].iter().any(|prefix|path.starts_with(prefix))
+                    || matches!(path,"/api/seed"|"/api/printers"|"/api/agent/register"|"/api/print-center/rule"|"/api/print-center/rules"|"/api/print-center/sync"|"/api/print-center/action"));
+                if changes_settings {
+                    let granted=sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM ABAdminGrant WHERE token_hash=? AND expires>unixepoch()")
+                        .bind(&session.FTSesTokenHash).fetch_one(&pool).await.unwrap_or(0)>0;
+                    if !granted {return (StatusCode::FORBIDDEN,Json(json!({"code":"ADMIN_REQUIRED","error":"กรุณายืนยัน PIN ผู้ดูแลก่อนแก้ไขการตั้งค่า"}))).into_response();}
+                }
+            }
+            Ok(_) => return (StatusCode::LOCKED, Json(json!({"error":"กรุณาปลดล็อกหน้าจอก่อนใช้งาน"}))).into_response(),
+            Err((status, message)) => return (status, Json(json!({"error":message}))).into_response(),
+        }
+    }
+    next.run(request).await
 }
 
 async fn resolve_user_display_name(pool: &SqlitePool, usr_code: &str, fallback_login: Option<&str>) -> String {
@@ -629,6 +687,9 @@ pub async fn post_auth_lock(State(st): State<AppState>, headers: HeaderMap) -> R
         Ok(s) => s,
         Err((status, msg)) => return err_json(status, msg),
     };
+    if let Err(e)=sqlx::query("DELETE FROM ABAdminGrant WHERE token_hash=?").bind(&session.FTSesTokenHash).execute(&st.pool).await {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR,e.to_string());
+    }
 
     if let Err(e) = sqlx::query("UPDATE TCNTLabelAuthSession SET FTSesLocked = 1 WHERE FTSesTokenHash = ?")
         .bind(&session.FTSesTokenHash)
@@ -760,6 +821,49 @@ mod tests {
             .await
             .unwrap();
         pool
+    }
+
+    #[tokio::test]
+    async fn business_routes_reject_missing_session_and_foreign_origin() {
+        let pool = setup_auth_test_db().await;
+        let app = Router::new()
+            .route("/api/protected", get(|| async { StatusCode::OK }))
+            .layer(axum::middleware::from_fn_with_state(pool, require_api_session));
+        let anonymous = app.clone().oneshot(Request::builder().uri("/api/protected").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+        let cross_site = app.oneshot(Request::builder().uri("/api/protected")
+            .header("host", "localhost:3000").header("origin", "https://untrusted.example")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(cross_site.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn settings_require_admin_grant_and_lock_revokes_it() {
+        let pool=setup_auth_test_db().await;
+        sqlx::raw_sql("CREATE TABLE ABStorage(id INTEGER PRIMARY KEY,branch TEXT); INSERT INTO ABStorage VALUES(1,'00001')").execute(&pool).await.unwrap();
+        let app=Router::new()
+            .route("/api/auth/login",post(post_auth_login))
+            .route("/api/auth/lock",post(post_auth_lock))
+            .route("/api/config/options",post(||async{StatusCode::OK}))
+            .with_state(AppState{pool:pool.clone()})
+            .layer(axum::middleware::from_fn_with_state(pool.clone(),require_api_session));
+        let login=app.clone().oneshot(Request::builder().method("POST").uri("/api/auth/login")
+            .header("content-type","application/json")
+            .body(Body::from(r#"{"userId":"00033","credential":"1234","credentialType":"2"}"#)).unwrap()).await.unwrap();
+        assert_eq!(login.status(),StatusCode::OK);
+        let bytes=axum::body::to_bytes(login.into_body(),65536).await.unwrap();
+        let response:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+        let token=response["sessionToken"].as_str().unwrap();
+        let request=|path:&str|Request::builder().method("POST").uri(path)
+            .header("authorization",format!("Bearer {token}")).body(Body::empty()).unwrap();
+        assert_eq!(app.clone().oneshot(request("/api/config/options")).await.unwrap().status(),StatusCode::FORBIDDEN);
+        let mut headers=HeaderMap::new();headers.insert("authorization",format!("Bearer {token}").parse().unwrap());
+        grant_admin(&pool,&headers).await.unwrap();
+        assert_eq!(app.clone().oneshot(request("/api/config/options")).await.unwrap().status(),StatusCode::OK);
+        assert_eq!(app.clone().oneshot(request("/api/auth/lock")).await.unwrap().status(),StatusCode::OK);
+        assert_eq!(app.oneshot(request("/api/config/options")).await.unwrap().status(),StatusCode::LOCKED);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM ABAdminGrant").fetch_one(&pool).await.unwrap(),0);
+        pool.close().await;
     }
 
     #[tokio::test]

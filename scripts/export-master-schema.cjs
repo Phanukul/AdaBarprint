@@ -1,0 +1,16 @@
+const fs=require('fs'),path=require('path'),ts=require('typescript');
+const root='D:/POS6/POS6/AdaPos6.0StoreFront/ada-gateway';
+require.extensions['.ts']=(m,f)=>m._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,f);
+const DB=require(root+'/node_modules/better-sqlite3');
+const d=new DB('db/AdaAccD.db');
+require(root+'/src/db/accd-sync-schema.ts').ensureAccdSyncSchema(d);
+const maps=require(root+'/src/sync/roitem-task-map.generated.ts').ROITEM_ARRAY_TO_TABLE_BY_PRIMARY;
+const extra=require(root+'/src/sync/roitem-table-map.ts');
+const tasks=['TCNMBranch','TCNMUser','TCNMVatRate','TCNMPdtGrp','TCNMPdtBrand','TCNMPdt','TCNTPdtPrice4PDT','TCNTPmtHD'];
+let manifest=tasks.map(table=>({table,uri:d.prepare('SELECT FTSynUriDwn FROM TSysSyncData WHERE FTSynTable=?').get(table).FTSynUriDwn,mapping:table==='TCNMPdt'?extra.PRODUCT_AGGREGATE_ARRAY_TO_TABLE:table==='TCNTPmtHD'?extra.PROMOTION_AGGREGATE_ARRAY_TO_TABLE:maps[table]}));
+manifest.find(t=>t.table==='TCNTPdtPrice4PDT').mapping={"raPdtPrice4PDT": "TCNTPdtPrice4PDT", "raPdtPrice4PdtStep": "TCNTPdtPrice4PDTStep", "raPdtPrice4PdtScope": "TCNTPdtPrice4PDTScope", "raCstPriList": "TCNMCstPriList", "raPdtPriList": "TCNMPdtPriList", "raPdtPriListLng": "TCNMPdtPriList_L", "raChannel": "TCNSChannel", "raChannelLng": "TCNSChannel_L"};
+fs.mkdirSync('src-tauri/resources',{recursive:true});
+fs.writeFileSync('src-tauri/resources/master-tasks.json',JSON.stringify(manifest,null,2));
+const ddl=d.prepare("select sql from sqlite_master where type='table' and name not like 'sqlite_%' and sql is not null").all().map(x=>x.sql.replace(/^CREATE TABLE /i,'CREATE TABLE IF NOT EXISTS ')+';').join('\n');
+fs.writeFileSync('src-tauri/resources/master-schema.sql',"-- Schema only; generated from StoreFront DB + ensureAccdSyncSchema. No customer rows.\n"+ddl);
+d.close();console.log('Exported schema and '+manifest.length+' sync tasks');

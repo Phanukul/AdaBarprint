@@ -1,3 +1,6 @@
+import { LabelPrinterRoutesEditor } from './LabelPrinterRoutesEditor';
+import { MasterDatabaseSettings } from './MasterDatabaseSettings';
+import type { AuthSessionUser } from '@/lib/auth';
 import React, { useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import {
@@ -8,19 +11,15 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
-  Clock,
   Edit3,
   FileText,
-  History,
   Loader2,
   Network,
   Plus,
   Printer,
-  Ruler,
   Save,
   Search,
   Settings,
-  Sliders,
   Trash2,
   Wifi,
 } from 'lucide-react';
@@ -60,7 +59,7 @@ import type { ManualLoadLine } from '@/components/MorningOpsBanner';
 import type { PrinterBrand, PrinterConfig } from '@/types/printer';
 
 /** Toggle visibility of Auto-Print setup tab & banner while keeping read-only History tab visible. */
-export const ENABLE_AUTO_PRINT_UI = false;
+export const ENABLE_AUTO_PRINT_UI = true;
 export const ENABLE_AUTO_PRINT_HISTORY_TAB = true;
 import {
   mergePaperSizeOptions,
@@ -113,6 +112,10 @@ export interface PrinterServerRow {
 }
 
 export interface SettingsDriverMapping {
+  templateRoutingSupported?: boolean;
+  templateRoutes?: Record<string, {printer:string;tray:string;protocol:string}>;
+  eventRoutingSupported?: boolean;
+  eventRoutes?: Record<string, {printer:string;tray:string;protocol:string}>;
   lbsCode: string;
   lbsName: string;
   lbsGroup: string;
@@ -131,6 +134,9 @@ export interface SettingsWindowsPrinter {
 }
 
 interface SettingsPanelProps {
+  workspace?: 'settings' | 'jobs';
+
+  authUser: AuthSessionUser;
   allLabelSizes: ConfigLabelSizeRow[];
   paperSizes: PaperSizeRecord[];
   preprints: PreprintRecord[];
@@ -146,7 +152,7 @@ interface SettingsPanelProps {
   formatTrayLabel: (tray: string) => string;
   initialEditLbsCode?: string | null;
   onClearInitialEdit?: () => void;
-  initialSubTab?: 'sizes' | 'preprints' | 'printers' | 'devices' | 'system' | 'autoprint' | 'autoprint_history' | null;
+  initialSubTab?: 'sizes' | 'preprints' | 'printers' | 'devices' | 'system' | 'autoprint' | 'autoprint_history' | 'connection' | 'jobs' | null;
   onClearInitialSubTab?: () => void;
   onLoadManualRows?: (lines: ManualLoadLine[]) => void;
 }
@@ -245,6 +251,8 @@ function TablePagination({
 }
 
 export function SettingsPanel({
+  workspace = 'settings',
+  authUser,
   allLabelSizes,
   paperSizes,
   preprints,
@@ -264,7 +272,7 @@ export function SettingsPanel({
   onClearInitialSubTab,
   onLoadManualRows,
 }: SettingsPanelProps) {
-  const [subTab, setSubTab] = useState<'sizes' | 'preprints' | 'printers' | 'devices' | 'system' | 'autoprint' | 'autoprint_history'>(() => {
+  const [subTab, setSubTab] = useState<'sizes' | 'preprints' | 'printers' | 'devices' | 'system' | 'autoprint' | 'autoprint_history' | 'connection' | 'jobs'>(() => {
     if (initialEditLbsCode) return 'printers';
     if (!ENABLE_AUTO_PRINT_UI && initialSubTab === 'autoprint') {
       return 'sizes';
@@ -272,7 +280,8 @@ export function SettingsPanel({
     if (!ENABLE_AUTO_PRINT_HISTORY_TAB && initialSubTab === 'autoprint_history') {
       return 'sizes';
     }
-    return initialSubTab || 'sizes';
+    if(workspace==='jobs')return 'jobs';
+    return initialSubTab || 'devices';
   });
 
   // ── Tab 1: Label Sizes State ───────────────────────────────────────────────
@@ -312,6 +321,7 @@ export function SettingsPanel({
     return found ? { ...found } : null;
   });
   const [savingDriver, setSavingDriver] = useState(false);
+  const [driverEditorReady,setDriverEditorReady]=useState(false);
   const [testingDriver, setTestingDriver] = useState<'normal' | 'promo' | null>(null);
 
   const [lanFormOpen, setLanFormOpen] = useState(false);
@@ -642,7 +652,10 @@ export function SettingsPanel({
 
   // ── Handlers: Tab 2 (Driver Mapping & LAN Printers) ────────────────────────
   const handleSaveDriverRow = async () => {
-    if (!driverEditRow) return;
+    if (!driverEditRow || !driverEditorReady) return;
+    if (driverEditRow.templateRoutes && !driverEditRow.templateRoutingSupported) {
+      toast.error('บริการรุ่นเดิมยังบันทึกเครื่องพิมพ์รายแบบไม่ได้ กรุณาอัปเดตบริการก่อน');return;
+    }
     setSavingDriver(true);
     try {
       const res = await fetch('/api/label-printers', {
@@ -650,6 +663,7 @@ export function SettingsPanel({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           lbsCode: driverEditRow.lbsCode,
+          templateRoutes: driverEditRow.templateRoutes,
           serverCode: driverServerCode,
           normalPrinter: driverEditRow.normalPrinter,
           normalTray: driverEditRow.normalTray,
@@ -883,7 +897,6 @@ export function SettingsPanel({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           options: [
-            { code: 'DefaultBranch', value: optBranch },
             { code: 'DefaultTemplate', value: optTemplate },
             { code: 'DefaultPrinter', value: optPrinter },
             { code: 'DefaultDpi', value: optDpi },
@@ -909,51 +922,20 @@ export function SettingsPanel({
   };
 
   return (
-    <main className="max-w-[1600px] w-full mx-auto p-4 space-y-4">
+    <main className="max-w-[1600px] min-w-0 w-full mx-auto p-2 sm:p-4 space-y-4">
       <Tabs value={subTab} onValueChange={(v) => setSubTab(v as typeof subTab)} className="space-y-4">
-        <TabsList className="bg-white border border-slate-200 p-1 h-auto min-h-11 w-fit max-w-full flex-wrap justify-start gap-1">
-          <TabsTrigger value="sizes" className="flex-none h-9 text-xs px-2.5 gap-1.5">
-            <Ruler className="h-4 w-4 text-[#007a87]" />
-            <span>1. ขนาดป้ายและระยะขอบ</span>
-            <Badge variant="secondary" className="h-4 px-1.5 text-[10px] bg-slate-100 text-slate-700">
-              {allLabelSizes.length}
-            </Badge>
-          </TabsTrigger>
-          <TabsTrigger value="preprints" className="flex-none h-9 text-xs px-2.5 gap-1.5">
-            <FileText className="h-4 w-4 text-amber-600" />
-            <span>2. คลังฟอร์ม Pre-Print</span>
-            <Badge variant="secondary" className="h-4 px-1.5 text-[10px] bg-amber-100 text-amber-800">
-              {preprints.length}
-            </Badge>
-          </TabsTrigger>
-          <TabsTrigger value="printers" className="flex-none h-9 text-xs px-2.5 gap-1.5">
-            <Printer className="h-4 w-4 text-[#007a87]" />
-            <span>3. เครื่องพิมพ์และถาดตามป้าย</span>
-          </TabsTrigger>
-          <TabsTrigger value="devices" className="flex-none h-9 text-xs px-2.5 gap-1.5">
-            <Network className="h-4 w-4 text-[#007a87]" />
-            <span>4. เครื่องพิมพ์ LAN &amp; รายชื่อเครื่อง</span>
-            <Badge variant="secondary" className="h-4 px-1.5 text-[10px] bg-slate-100 text-slate-700">
-              {printers.length}
-            </Badge>
-          </TabsTrigger>
-          <TabsTrigger value="system" className="flex-none h-9 text-xs px-2.5 gap-1.5">
-            <Sliders className="h-4 w-4 text-[#007a87]" />
-            <span>5. ค่าเริ่มต้นระบบ</span>
-          </TabsTrigger>
-          {ENABLE_AUTO_PRINT_UI && (
-            <TabsTrigger value="autoprint" className="flex-none h-9 text-xs px-2.5 gap-1.5">
-              <Clock className="h-4 w-4 text-emerald-600" />
-              <span>6. พิมพ์อัตโนมัติ</span>
-            </TabsTrigger>
-          )}
-          {ENABLE_AUTO_PRINT_HISTORY_TAB && (
-            <TabsTrigger value="autoprint_history" className="flex-none h-9 text-xs px-2.5 gap-1.5">
-              <History className="h-4 w-4 text-sky-600" />
-              <span>{ENABLE_AUTO_PRINT_UI ? '7' : '6'}. ประวัติพิมพ์อัตโนมัติ</span>
-            </TabsTrigger>
-          )}
-        </TabsList>
+        <div className="space-y-3">
+          {workspace==='jobs'?<TabsList className="bg-white border p-1 h-auto w-full justify-start overflow-x-auto"><TabsTrigger value="jobs" className="min-h-10">งานพิมพ์</TabsTrigger>{ENABLE_AUTO_PRINT_HISTORY_TAB&&<TabsTrigger value="autoprint_history" className="min-h-10">ประวัติก่อนย้ายระบบ</TabsTrigger>}</TabsList>:<>
+            <label className="block sm:hidden text-sm space-y-2"><span className="font-medium">หมวดการตั้งค่า</span><select className="w-full rounded-lg border bg-white p-3" value={subTab==='printers'?'devices':subTab} onChange={e=>setSubTab(e.target.value as typeof subTab)}>{[['sizes','ขนาดและกระดาษ'],['preprints','กระดาษพิมพ์พื้นหลัง'],['devices','เครื่องพิมพ์'],['connection','แหล่งข้อมูล'],['system','ค่าเริ่มต้น'],...(ENABLE_AUTO_PRINT_UI?[['autoprint','ตั้งเวลาพิมพ์']]:[])].map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>
+            <div className="hidden sm:block"><TabsList className="bg-white border border-slate-200 p-1 h-auto min-h-11 w-full max-w-full flex-nowrap overflow-x-auto justify-start gap-1">
+              {([['sizes','ขนาดและกระดาษ'],['preprints','กระดาษพิมพ์พื้นหลัง'],['devices','เครื่องพิมพ์'],['connection','แหล่งข้อมูล'],['system','ค่าเริ่มต้น'],...(ENABLE_AUTO_PRINT_UI?[['autoprint','ตั้งเวลาพิมพ์']]:[])]).map(([value,label])=><TabsTrigger key={value} value={value==='devices'&&subTab==='printers'?'printers':value} className="flex-none min-h-10 text-sm px-3">{label}</TabsTrigger>)}
+            </TabsList></div>
+            {(subTab==='devices'||subTab==='printers')&&<div className="flex flex-wrap gap-2"><Button variant={subTab==='devices'?'default':'outline'} className={subTab==='devices'?'bg-teal-700 hover:bg-teal-800':''} onClick={()=>setSubTab('devices')}>รายชื่อเครื่องพิมพ์</Button><Button variant={subTab==='printers'?'default':'outline'} className={subTab==='printers'?'bg-teal-700 hover:bg-teal-800':''} onClick={()=>setSubTab('printers')}>เครื่องพิมพ์ตามแบบป้าย</Button></div>}
+          </>}
+        </div>
+        <TabsContent value="connection"><MasterDatabaseSettings onSaved={()=>window.location.reload()}/></TabsContent>
+        <TabsContent value="jobs"><AutoScheduleSettings mode="jobs" authUser={authUser} allLabelSizes={allLabelSizes} sysOptions={sysOptions} branches={branches} windowsPrinters={windowsPrinters} printers={printers} driverMappings={driverMappings} driverServerCode={driverServerCode} formatTrayLabel={formatTrayLabel} onRefreshAll={onRefreshAll}/></TabsContent>
+
 
         {/* ══════════════════ TAB 1: LABEL SIZES & MARGINS ══════════════════ */}
         <TabsContent value="sizes" className="space-y-4 mt-0">
@@ -961,7 +943,7 @@ export function SettingsPanel({
             <CardHeader className="bg-[#3d4a57] text-white py-2.5 px-4 flex flex-row flex-wrap items-center justify-between gap-2">
               <div>
                 <CardTitle className="text-sm font-semibold">
-                  จัดการขนาดรูปแบบป้าย, ระยะขอบกระดาษ (Margin) และช่องว่าง (Gap)
+                  ขนาดป้ายและการจัดวางบนกระดาษ
                 </CardTitle>
                 <p className="text-[11px] text-slate-300 mt-0.5">
                   ค่า Margin Top/Left และ Gap H/V ที่ตั้งไว้ในตารางนี้ จะนำไปใช้จัดหน้า A4 Preview และส่งพิมพ์จริงโดยตรง
@@ -1239,235 +1221,34 @@ export function SettingsPanel({
 
         {/* ══════════════════ TAB 2: PRINTERS & TRAYS ═══════════════════════ */}
         <TabsContent value="printers" className="space-y-4 mt-0">
-          {/* Card A: Mapping Label -> Printer & Tray */}
-          <Card className="border-slate-200 shadow-xs bg-white py-0 gap-0">
-            <CardHeader className="bg-[#3d4a57] text-white py-2.5 px-4 flex flex-row flex-wrap items-center justify-between gap-2">
-              <div>
-                <CardTitle className="text-sm font-semibold">
-                  จับคู่เครื่องพิมพ์และถาดกระดาษแยกตามรหัสป้าย (ปกติ vs โปรโมชัน)
-                </CardTitle>
-                <p className="text-[11px] text-slate-300 mt-0.5">
-                  กำหนดเครื่องพิมพ์และถาดกระดาษเริ่มต้นสำหรับแต่ละรูปแบบป้าย
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <Select
-                  value={driverStatusFilter}
-                  onValueChange={(v) => setDriverStatusFilter(v as 'active' | 'all')}
-                >
-                  <SelectTrigger className="h-8 w-36 text-xs bg-white text-slate-800">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="active">เฉพาะที่เปิดใช้งาน</SelectItem>
-                    <SelectItem value="all">ทั้งหมด ({driverMappings.length})</SelectItem>
-                  </SelectContent>
-                </Select>
-                <div className="relative w-60">
-                  <Search className="h-3.5 w-3.5 absolute left-2.5 top-2.5 text-slate-400" />
-                  <Input
-                    placeholder="ค้นหารหัสป้าย / เครื่องพิมพ์..."
-                    value={driverSearch}
-                    onChange={(e) => setDriverSearch(e.target.value)}
-                    className="pl-8 h-8 text-xs bg-white text-slate-800"
-                  />
-                </div>
-              </div>
-            </CardHeader>
-            <CardContent className="p-4 space-y-3">
-              {/* Quick Batch Assignment Bar */}
-              <div className="border border-teal-200 rounded-md overflow-hidden bg-teal-50/40">
-                <button
-                  type="button"
-                  onClick={() => setBulkPrinterOpen((o) => !o)}
-                  className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-[#00606b] hover:bg-teal-50 transition-colors"
-                >
-                  <span>ตั้งค่าเครื่องพิมพ์/ถาดรวดเดียว (ใช้กับป้ายที่เปิดใช้งานทั้งหมด {allLabelSizes.filter((s) => s.FTLbsStaUse === '1').length} แบบ)</span>
-                  {bulkPrinterOpen ? (
-                    <ChevronUp className="h-3.5 w-3.5" />
-                  ) : (
-                    <ChevronDown className="h-3.5 w-3.5" />
-                  )}
-                </button>
-                {bulkPrinterOpen && (
-                  <div className="p-3 border-t border-teal-200 bg-white space-y-3">
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
-                      <div className="space-y-1">
-                        <Label className="text-[11px] font-medium">เครื่องพิมพ์ (ราคาปกติ)</Label>
-                        <SearchableSelect
-                          value={bulkNormalPrinter || '__NONE__'}
-                          onValueChange={(v) => {
-                            setBulkNormalPrinter(v === '__NONE__' ? '' : v);
-                            setBulkNormalTray('');
-                          }}
-                          placeholder="-- ไม่เปลี่ยน --"
-                          searchPlaceholder="ค้นหาชื่อเครื่องพิมพ์..."
-                          className="h-8 text-xs"
-                          options={[
-                            { value: '__NONE__', label: '-- ไม่เปลี่ยน --' },
-                            ...windowsPrinters.map((w) => ({
-                              value: w.name,
-                              label: w.name,
-                              keywords: w.name,
-                            })),
-                          ]}
-                        />
-                      </div>
+          <section className="rounded-xl border bg-white p-4 space-y-4">
+            <div><h2 className="font-semibold">เครื่องพิมพ์ตามแบบป้าย — พิมพ์เอง</h2><p className="text-sm text-slate-500 mt-1">เลือกขนาดและแบบป้ายเพื่อกำหนดเครื่องพิมพ์และถาด การตั้งค่านี้ไม่เปลี่ยนงานพิมพ์อัตโนมัติ</p></div>
+            <Input aria-label="ค้นหาแบบป้าย" placeholder="ค้นหารหัสหรือชื่อป้าย…" value={driverSearch} onChange={e=>setDriverSearch(e.target.value)} className="max-w-md"/>
+            <div className="overflow-x-auto rounded-lg border border-slate-200">
+              <table className="w-full min-w-[560px] table-fixed text-left text-sm">
+                <thead className="bg-[#344b60] text-white"><tr>
+                  <th scope="col" className="w-14 px-3 py-3 text-center font-medium">ลำดับ</th>
+                  <th scope="col" className="px-3 py-3 font-medium">แบบป้าย</th>
+                  <th scope="col" className="w-32 px-3 py-3 font-medium">ขนาด (มม.)</th>
+                  <th scope="col" className="w-24 px-3 py-3 font-medium">กระดาษ</th>
+                  <th scope="col" className="w-24 px-3 py-3 text-center font-medium">จัดการ</th>
+                </tr></thead>
+                <tbody className="divide-y divide-slate-200">{pagedMappings.map((m,index)=>{
+                  const size=allLabelSizes.find(s=>s.FTLbsCode===m.lbsCode);
+                  const page=Math.min(driverPage,Math.max(1,Math.ceil(filteredMappings.length/driverPageSize)));
+                  return <tr key={m.lbsCode} className="even:bg-slate-50/60 hover:bg-teal-50/50">
+                    <td className="px-3 py-3 text-center text-slate-500">{(page-1)*driverPageSize+index+1}</td>
+                    <td className="px-3 py-3"><p className="font-medium break-words">{m.lbsName}</p><p className="mt-1 text-xs text-slate-500 break-all">{m.lbsCode}</p></td>
+                    <td className="px-3 py-3">{size?`${size.FCLbsWidth} × ${size.FCLbsHeight}`:'—'}</td>
+                    <td className="px-3 py-3 break-words">{size?.FTLbsPaperSize||'—'}</td>
+                    <td className="px-3 py-3 text-center"><Button size="sm" variant="outline" aria-label={`ตั้งค่า ${m.lbsName}`} onClick={()=>setDriverEditRow({...m})}>ตั้งค่า</Button></td>
+                  </tr>;
+                })}{!pagedMappings.length&&<tr><td colSpan={5} className="px-3 py-8 text-center text-slate-500">ไม่พบแบบป้ายที่ค้นหา</td></tr>}</tbody>
+              </table>
+            </div>
+            <TablePagination total={filteredMappings.length} page={driverPage} pageSize={driverPageSize} onPageChange={setDriverPage} onPageSizeChange={s=>{setDriverPageSize(s);setDriverPage(1);}}/>
 
-                      <div className="space-y-1">
-                        <Label className="text-[11px] font-medium">ถาดกระดาษ (ปกติ)</Label>
-                        <Select
-                          value={bulkNormalTray || '__AUTO__'}
-                          disabled={!bulkNormalPrinter}
-                          onValueChange={(v) => setBulkNormalTray(v === '__AUTO__' ? '' : v)}
-                        >
-                          <SelectTrigger className="h-8 text-xs">
-                            <SelectValue placeholder="อัตโนมัติ" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="__AUTO__">เลือกอัตโนมัติ</SelectItem>
-                            {(windowsPrinters.find((w) => w.name === bulkNormalPrinter)?.trays ?? []).map((tr) => (
-                              <SelectItem key={tr} value={tr}>
-                                {formatTrayLabel(tr)}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-
-                      <div className="space-y-1">
-                        <Label className="text-[11px] font-medium">เครื่องพิมพ์ (ราคาโปรโมชัน)</Label>
-                        <SearchableSelect
-                          value={bulkPromoPrinter || '__NONE__'}
-                          onValueChange={(v) => {
-                            setBulkPromoPrinter(v === '__NONE__' ? '' : v);
-                            setBulkPromoTray('');
-                          }}
-                          placeholder="-- ไม่เปลี่ยน --"
-                          searchPlaceholder="ค้นหาชื่อเครื่องพิมพ์..."
-                          className="h-8 text-xs"
-                          options={[
-                            { value: '__NONE__', label: '-- ไม่เปลี่ยน --' },
-                            ...windowsPrinters.map((w) => ({
-                              value: w.name,
-                              label: w.name,
-                              keywords: w.name,
-                            })),
-                          ]}
-                        />
-                      </div>
-
-                      <div className="space-y-1">
-                        <Label className="text-[11px] font-medium">ถาดกระดาษ (โปรโมชัน)</Label>
-                        <Select
-                          value={bulkPromoTray || '__AUTO__'}
-                          disabled={!bulkPromoPrinter}
-                          onValueChange={(v) => setBulkPromoTray(v === '__AUTO__' ? '' : v)}
-                        >
-                          <SelectTrigger className="h-8 text-xs">
-                            <SelectValue placeholder="อัตโนมัติ" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="__AUTO__">เลือกอัตโนมัติ</SelectItem>
-                            {(windowsPrinters.find((w) => w.name === bulkPromoPrinter)?.trays ?? []).map((tr) => (
-                              <SelectItem key={tr} value={tr}>
-                                {formatTrayLabel(tr)}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                    </div>
-
-                    <div className="flex justify-end">
-                      <Button
-                        type="button"
-                        size="sm"
-                        className="h-8 text-xs bg-[#007a87] hover:bg-[#00606b] text-white"
-                        disabled={savingBulkDriver || (!bulkNormalPrinter && !bulkPromoPrinter)}
-                        onClick={handleBulkApplyPrinters}
-                      >
-                        {savingBulkDriver && <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />}
-                        นำไปใช้กับทุกป้ายที่เปิดใช้งาน
-                      </Button>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <div className="border border-slate-200 rounded-md overflow-x-auto">
-                <Table>
-                  <TableHeader className="bg-[#34495e]">
-                    <TableRow className="bg-[#34495e] hover:bg-[#34495e]">
-                      <TableHead className="text-white text-xs text-center w-14">ลำดับ</TableHead>
-                      <TableHead className="text-white text-xs">รหัสฉลาก</TableHead>
-                      <TableHead className="text-white text-xs">ชื่อฉลาก</TableHead>
-                      <TableHead className="text-white text-xs">เครื่องพิมพ์ (ปกติ)</TableHead>
-                      <TableHead className="text-white text-xs">ถาดกระดาษ (ปกติ)</TableHead>
-                      <TableHead className="text-white text-xs">เครื่องพิมพ์ (โปรฯ)</TableHead>
-                      <TableHead className="text-white text-xs">ถาดกระดาษ (โปรฯ)</TableHead>
-                      <TableHead className="text-white text-xs text-center w-24">จัดการ</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {pagedMappings.length === 0 ? (
-                      <TableRow>
-                        <TableCell colSpan={8} className="text-center text-xs text-slate-400 py-8">
-                          ไม่พบรายการตั้งค่าเครื่องพิมพ์ตามเงื่อนไขที่ค้นหา
-                        </TableCell>
-                      </TableRow>
-                    ) : (
-                    pagedMappings.map((m, idx) => {
-                      const curDrvPage = Math.min(driverPage, Math.max(1, Math.ceil(filteredMappings.length / driverPageSize)));
-                      const rowNum = (curDrvPage - 1) * driverPageSize + idx + 1;
-                      return (
-                      <TableRow key={m.lbsCode}>
-                        <TableCell className="text-xs text-center font-mono text-slate-500">{rowNum}</TableCell>
-                        <TableCell className="text-xs font-mono font-semibold">{m.lbsCode}</TableCell>
-                        <TableCell className="text-xs">{m.lbsName}</TableCell>
-                        <TableCell className="text-xs">{m.normalPrinter || <span className="text-slate-400">-</span>}</TableCell>
-                        <TableCell className="text-xs">
-                          {m.normalTray ? formatTrayLabel(m.normalTray) : <span className="text-slate-400">อัตโนมัติ</span>}
-                          {m.normalProtocol && m.normalProtocol !== 'WINDOWS' && (
-                            <span className="text-[10px] text-slate-400 ml-1">({m.normalProtocol})</span>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-xs">{m.promoPrinter || <span className="text-slate-400">-</span>}</TableCell>
-                        <TableCell className="text-xs">
-                          {m.promoTray ? formatTrayLabel(m.promoTray) : <span className="text-slate-400">อัตโนมัติ</span>}
-                          {m.promoProtocol && m.promoProtocol !== 'WINDOWS' && (
-                            <span className="text-[10px] text-slate-400 ml-1">({m.promoProtocol})</span>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-center">
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="h-7 text-xs border-[#007a87] text-[#007a87]"
-                            onClick={() => setDriverEditRow({ ...m })}
-                          >
-                            ตั้งค่า
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                      );
-                    })
-                    )}
-                  </TableBody>
-                </Table>
-              </div>
-              <TablePagination
-                total={filteredMappings.length}
-                page={driverPage}
-                pageSize={driverPageSize}
-                onPageChange={setDriverPage}
-                onPageSizeChange={(s) => {
-                  setDriverPageSize(s);
-                  setDriverPage(1);
-                }}
-              />
-            </CardContent>
-          </Card>
+          </section>
         </TabsContent>
 
         {/* ══════════════════ TAB 4: PRINTER DEVICES & LAN ══════════════════ */}
@@ -1615,8 +1396,9 @@ export function SettingsPanel({
             <CardContent className="p-5 space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="space-y-1.5">
-                  <Label className="text-xs font-medium">สาขาเริ่มต้น</Label>
+                  <Label className="text-xs font-medium">สาขาของแหล่งข้อมูล StoreFront</Label>
                   <SearchableSelect
+                    disabled
                     value={optBranch || '__NONE__'}
                     onValueChange={(v) => setOptBranch(v === '__NONE__' ? '' : v)}
                     placeholder="-- ไม่กำหนด --"
@@ -1755,6 +1537,8 @@ export function SettingsPanel({
         {ENABLE_AUTO_PRINT_UI && (
           <TabsContent value="autoprint" className="space-y-4 mt-0">
             <AutoScheduleSettings
+              onOpenConnection={()=>setSubTab('connection')}
+              authUser={authUser}
               allLabelSizes={allLabelSizes}
               sysOptions={sysOptions}
               branches={branches}
@@ -1773,7 +1557,7 @@ export function SettingsPanel({
             <AutoScheduleHistory
               onLoadManualRows={onLoadManualRows}
               onOpenAutoPrintTab={ENABLE_AUTO_PRINT_UI ? () => setSubTab('autoprint') : undefined}
-              readOnly={!ENABLE_AUTO_PRINT_UI}
+              readOnly={true}
             />
           </TabsContent>
         )}
@@ -2234,8 +2018,8 @@ export function SettingsPanel({
 
       {/* ════════════ MODAL: EDIT DRIVER & TRAY MAPPING ══════════════════════ */}
       <Dialog open={Boolean(driverEditRow)} onOpenChange={(o) => { if (!o) setDriverEditRow(null); }}>
-        <DialogContent className="sm:max-w-3xl">
-          <DialogHeader className="bg-[#3d4a57] text-white -mx-6 -mt-6 px-6 py-3.5 rounded-t-lg">
+        <DialogContent className="sm:max-w-3xl max-h-[90dvh] flex flex-col overflow-hidden p-0 gap-0">
+          <DialogHeader className="bg-[#3d4a57] text-white px-5 py-4 shrink-0">
             <div className="flex items-center gap-2 pr-6">
               <Button
                 type="button"
@@ -2248,7 +2032,7 @@ export function SettingsPanel({
                 ปิด
               </Button>
               <DialogTitle className="text-base font-semibold">
-                กำหนดเครื่องพิมพ์, ถาดกระดาษ และโปรโตคอล
+                เครื่องพิมพ์และกระดาษของแบบป้าย
               </DialogTitle>
             </div>
             <DialogDescription className="text-slate-300 text-xs">
@@ -2256,146 +2040,15 @@ export function SettingsPanel({
             </DialogDescription>
           </DialogHeader>
 
-          {driverEditRow && (
-            <div className="space-y-4 py-2">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {(['normal', 'promo'] as const).map((kind) => {
-                  const isPromo = kind === 'promo';
-                  const printerVal = isPromo ? driverEditRow.promoPrinter : driverEditRow.normalPrinter;
-                  const trayVal = isPromo ? driverEditRow.promoTray : driverEditRow.normalTray;
-                  const protoVal = isPromo ? driverEditRow.promoProtocol : driverEditRow.normalProtocol;
-                  const availableTrays = windowsPrinters.find((w) => w.name === printerVal)?.trays || [];
-                  const invalidSaved = Boolean(printerVal && trayVal && !availableTrays.includes(trayVal));
+          <div className="min-h-0 overflow-y-auto px-5 py-4">{driverEditRow && <LabelPrinterRoutesEditor key={driverEditRow.lbsCode} onReadyChange={setDriverEditorReady} value={driverEditRow} onChange={setDriverEditRow} windowsPrinters={windowsPrinters} printers={printers} formatTrayLabel={formatTrayLabel} paper={allLabelSizes.find(s=>s.FTLbsCode===driverEditRow.lbsCode)} disabled={savingDriver}/>}</div>
 
-                  return (
-                    <div
-                      key={kind}
-                      className={`rounded-lg border p-3.5 space-y-3 ${
-                        isPromo ? 'border-red-200 bg-red-50/20' : 'border-slate-200 bg-white'
-                      }`}
-                    >
-                      <div className="text-xs font-semibold flex items-center gap-1.5 border-b pb-2">
-                        <span
-                          className={`inline-block w-2 h-2 rounded-full ${
-                            isPromo ? 'bg-red-600' : 'bg-[#007a87]'
-                          }`}
-                        />
-                        {isPromo ? 'ราคาโปรโมชัน (Promotion Price)' : 'ราคาปกติ (Normal Price)'}
-                      </div>
-
-                      <div className="space-y-1">
-                        <Label className="text-xs font-medium">โปรโตคอลการพิมพ์</Label>
-                        <Select
-                          value={protoVal || 'WINDOWS'}
-                          onValueChange={(v) =>
-                            setDriverEditRow(
-                              isPromo
-                                ? { ...driverEditRow, promoProtocol: v }
-                                : { ...driverEditRow, normalProtocol: v }
-                            )
-                          }
-                        >
-                          <SelectTrigger className="h-8 text-xs bg-white">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="WINDOWS">WINDOWS (GDI Driver / ถาดกระดาษ)</SelectItem>
-                            <SelectItem value="PDF">PDF / ส่งออกไฟล์</SelectItem>
-                            <SelectItem value="EZPL">EZPL / TSPL (LAN สติ๊กเกอร์ม้วน)</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-
-                      <div className="space-y-1">
-                        <Label className="text-xs font-medium">เครื่องพิมพ์</Label>
-                        <SearchableSelect
-                          value={printerVal || '__NONE__'}
-                          onValueChange={(v) => {
-                            const pName = v === '__NONE__' ? '' : v;
-                            const wp = windowsPrinters.find((w) => w.name === pName);
-                            const nextTray = wp?.trays?.[0] || '';
-                            setDriverEditRow(
-                              isPromo
-                                ? { ...driverEditRow, promoPrinter: pName, promoTray: nextTray }
-                                : { ...driverEditRow, normalPrinter: pName, normalTray: nextTray }
-                            );
-                          }}
-                          placeholder="เลือกเครื่องพิมพ์..."
-                          searchPlaceholder="ค้นหาชื่อเครื่องพิมพ์..."
-                          className="h-8 text-xs bg-white"
-                          options={[
-                            { value: '__NONE__', label: '-- ไม่กำหนด --' },
-                            ...windowsPrinters.map((w) => ({
-                              value: w.name,
-                              label: w.name,
-                              keywords: w.name,
-                            })),
-                          ]}
-                        />
-                      </div>
-
-                      <div className="space-y-1">
-                        <Label className="text-xs font-medium">ถาดกระดาษ (Tray)</Label>
-                        <Select
-                          value={trayVal || '__AUTO__'}
-                          onValueChange={(v) => {
-                            const nextTray = v === '__AUTO__' ? '' : v;
-                            setDriverEditRow(
-                              isPromo
-                                ? { ...driverEditRow, promoTray: nextTray }
-                                : { ...driverEditRow, normalTray: nextTray }
-                            );
-                          }}
-                          disabled={!printerVal}
-                        >
-                          <SelectTrigger className="h-8 text-xs bg-white">
-                            <SelectValue placeholder="อัตโนมัติ" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="__AUTO__">-- อัตโนมัติ (Default) --</SelectItem>
-                            {invalidSaved && (
-                              <SelectItem value={trayVal} className="text-amber-700">
-                                {trayVal} (ไม่พบในเครื่อง)
-                              </SelectItem>
-                            )}
-                            {availableTrays.map((t) => (
-                              <SelectItem key={`${kind}-t-${t}`} value={t}>
-                                {formatTrayLabel(t)}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="w-full h-8 text-xs"
-                        disabled={testingDriver !== null || !printerVal}
-                        onClick={() => handleTestDriver(kind)}
-                      >
-                        {testingDriver === kind ? (
-                          <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
-                        ) : (
-                          <Printer className="h-3.5 w-3.5 mr-1" />
-                        )}
-                        ทดสอบพิมพ์
-                      </Button>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          <DialogFooter>
+          <DialogFooter className="shrink-0 border-t px-5 py-3 bg-white">
             <Button variant="outline" onClick={() => setDriverEditRow(null)}>
               ยกเลิก
             </Button>
             <Button
               className="bg-[#007a87] hover:bg-[#00606b] text-white"
-              disabled={savingDriver}
+              disabled={savingDriver||!driverEditorReady}
               onClick={handleSaveDriverRow}
             >
               {savingDriver && <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />}

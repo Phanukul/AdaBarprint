@@ -4,9 +4,10 @@ use std::net::SocketAddr;
 async fn main() {
     let (router, pool) = adabarprint_tauri_lib::init_db_and_router()
         .await
-        .expect("Failed to connect and initialize db/AdaAccD.db");
+        .expect("Failed to connect and initialize AdaBarprint storage");
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let port = std::env::var("ADABARPRINT_PORT").ok().and_then(|p| p.parse::<u16>().ok()).unwrap_or(3000);
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("Failed to bind 127.0.0.1:3000 (port already in use)");
