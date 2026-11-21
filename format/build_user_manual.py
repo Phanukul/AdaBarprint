@@ -16,9 +16,11 @@ def p(text): return '<p>'+text+'</p>'
 def note(text): return '<aside class="note">'+text+'</aside>'
 def steps(items): return '<ol class="steps">'+''.join('<li>'+s+'</li>' for s in items)+'</ol>'
 def shot(name, title, points):
-    data=base64.b64encode((ROOT/'manual-assets'/f'{name}.png').read_bytes()).decode()
+    raw=(ROOT/'manual-assets'/f'{name}.png').read_bytes()
+    data=base64.b64encode(raw).decode()
+    mime='image/png' if raw.startswith(b'\x89PNG') else 'image/jpeg'
     marks=''.join(f'<span class="pin" style="left:{x}%;top:{y}%" aria-hidden="true">{i}</span>' for i,(x,y,_) in enumerate(points,1))
-    return f'<figure><div class="screen"><img src="data:image/jpeg;base64,{data}" alt="{html.escape(title)}" loading="lazy">{marks}</div><figcaption>{title} · หมายเลขเริ่มใหม่ในแต่ละภาพ</figcaption></figure>'+steps([s for _,_,s in points])
+    return f'<figure class="{"compact" if name == "24-pin-dialog" else ""}"><div class="screen"><img src="data:{mime};base64,{data}" alt="{html.escape(title)}" loading="lazy">{marks}</div><figcaption>{title} · หมายเลขเริ่มใหม่ในแต่ละภาพ</figcaption></figure>'+steps([s for _,_,s in points])
 
 section('start','1. ติดตั้งและเปิดโปรแกรมครั้งแรก',
  p('คู่มือนี้ใช้กับ <strong>AdaBarprint รุ่นเดสก์ท็อปสำหรับ Windows</strong> เริ่มเปิดจากไอคอนโปรแกรมหลังติดตั้งชุด EXE ภาพประกอบแสดงพื้นที่ทำงานภายในโปรแกรม ชื่อสินค้า ผู้ใช้ เครื่องพิมพ์ และค่าการเชื่อมต่อในภาพเป็นตัวอย่าง ให้ใช้ค่าของสาขาที่ติดตั้งจริง')+
@@ -30,17 +32,21 @@ section('database','2. ฐานข้อมูลและตำแหน่ง
  note('ProgramData เป็นโฟลเดอร์ที่ Windows อาจซ่อนไว้ เปิด File Explorer แล้ววางพาธเต็มในช่องที่อยู่ได้ ค่าในบทนี้เป็นตำแหน่งมาตรฐานของชุดติดตั้ง ไม่ใช่ตำแหน่งโฟลเดอร์พัฒนาโปรแกรม การย้ายฐานเดิมให้ทีมติดตั้งเป็นผู้ดำเนินการและสำรองข้อมูลก่อนเสมอ'))
 
 section('pin','3. PIN ผู้ดูแลระบบและการตั้งค่าครั้งแรก',
+ shot('24-pin-dialog','หน้าต่างยืนยันหลังจากกดบันทึก',[(4,51,'กรอก <strong>PIN ผู้ดูแลระบบ</strong> ที่ใช้อยู่'),(4,69,'เปิดส่วน <strong>เปลี่ยน PIN</strong> เฉพาะเมื่อต้องการตั้งรหัสใหม่'),(94,85,'กด <strong>ยืนยันบันทึก</strong> เพื่อส่งคำขอ หรือ <strong>ยกเลิก</strong> เพื่อกลับโดยไม่บันทึก')])+
  p('<strong>PIN ผู้ดูแลระบบ</strong> ใช้ยืนยันการแก้ค่าของ AdaBarprint เช่น แหล่งข้อมูลและการดาวน์โหลด แยกจาก PIN/รหัสผ่านที่ใช้เข้าสู่ระบบ และแยกจาก API Key สำหรับเชื่อมต่อข้อมูล')+
  steps(['กรอกค่าบนหน้าแหล่งข้อมูลให้ครบ แล้วกด <strong>บันทึกการเชื่อมต่อ</strong> หรือ <strong>บันทึกแหล่งข้อมูล</strong> ไม่ต้องกรอก PIN ก่อนกดปุ่ม','หน้าต่าง <strong>ยืนยันด้วย PIN ผู้ดูแลระบบ</strong> จะเปิดขึ้น กรอก PIN ผู้ดูแลของ AdaBarprint','เมื่อติดตั้งครั้งแรก ระบบอาจขอให้ตั้ง PIN ใหม่ในหน้าต่างเดียวกัน กรอกตัวเลข 6–12 หลักและยืนยันให้ตรงกัน ไม่ใช้รหัสเดิมหรือเลขเดียวกันทั้งหมด','กด <strong>ยืนยันบันทึก</strong> แล้วรอข้อความสำเร็จ หาก PIN ไม่ถูกต้อง ระบบแจ้งในหน้าต่าง ให้แก้แล้วกดยืนยันอีกครั้ง','กด <strong>ยกเลิก</strong> เพื่อกลับไปแก้ค่าที่กรอกไว้ โดยยังไม่บันทึกและไม่เปลี่ยนค่าระบบ'])+
  note('เครื่องใหม่ที่ยังใช้ PIN เริ่มต้นจะต้องตั้ง PIN ใหม่ก่อนบันทึกแหล่งข้อมูล ให้ผู้ดูแลเป็นผู้กำหนดและเก็บรหัสนี้ ผู้ใช้ทั่วไปไม่ต้องเปลี่ยน PIN ทุกครั้ง หากลืมรหัสให้ติดต่อทีมดูแลระบบ'))
 
 section('standalone','4. เครื่องแยกจาก POS: ดาวน์โหลดข้อมูลเอง',
+ shot('23-source-standalone','ตั้งค่า Standalone — URL และพาธในภาพเป็นตัวอย่าง',[(2,15,'เลือกโหมดเครื่องแยกจาก POS'),(2,29,'ระบุไฟล์ <strong>AdaAccD.db</strong> ปลายทาง'),(2,41,'กำหนดการเชื่อมต่อที่ได้รับจากทีมติดตั้ง'),(52,59,'ตั้งรอบดาวน์โหลด เช่น <strong>300 นาที = 5 ชั่วโมง</strong>'),(2,70,'กดบันทึก แล้วกรอก PIN ในหน้าต่างยืนยัน'),(20,70,'หลังบันทึกสำเร็จ ใช้ปุ่มดาวน์โหลดข้อมูลตอนนี้เมื่อต้องการอัปเดตทันที')])+
  p('ใช้โหมดนี้เมื่อเครื่องลูกค้าไม่ได้ติดตั้ง POS ต้องมีการเชื่อมต่อ API2PSMaster ที่ใช้งานได้ การดาวน์โหลดคือการอัปเดตข้อมูล ไม่ใช่การสั่งพิมพ์')+
  steps(['เลือก <strong>เครื่องแยกจาก POS — ดาวน์โหลดข้อมูลเอง</strong>','ระบุพาธเต็มของ <strong>AdaAccD.db</strong> ในช่องไฟล์ฐานข้อมูลสำหรับดาวน์โหลด ระบบสร้างไฟล์ใหม่ให้ได้','กรอก URL ของ API2PSMaster รหัสตัวแทน สาขา และเครื่อง POS ตามข้อมูลจากผู้ดูแล','กรอก API Key ครั้งแรก หากเคยบันทึกแล้วจึงเว้นว่างเพื่อใช้ค่าเดิมได้','ตั้ง <strong>ดาวน์โหลดทุก (นาที)</strong>: 60 คือทุก 1 ชั่วโมง หรือ 300 คือทุก 5 ชั่วโมง รองรับจำนวนเต็ม 1–1440 นาที','กด <strong>บันทึกการเชื่อมต่อ</strong> กรอก PIN ในหน้าต่างยืนยัน แล้วกด <strong>ยืนยันบันทึก</strong>','หลังบันทึกสำเร็จ กด <strong>ดาวน์โหลดข้อมูลตอนนี้</strong> กรอก PIN แล้วกด <strong>ยืนยันดาวน์โหลด</strong> ตรวจสถานะสำเร็จก่อนเข้าสู่ระบบ'])+
  p('<strong>ตั้งค่าขั้นสูงสำหรับผู้ดูแลระบบ</strong> ใช้กำหนดชื่อ Header สำหรับส่ง API Key ใช้ค่าเดิมได้ เว้นแต่ทีม API กำหนดชื่ออื่น อย่าใส่ค่าทดลองลงเครื่องลูกค้า')+
  note('ห้ามเลือก AdaAccD.db ที่ POS กำลังใช้งานเป็นปลายทาง Sync ของ Standalone และอย่าสับสนช่องพาธฐานสินค้ากับ AdaBarprint.db เมื่อย้ายสาขาหรือเปลี่ยนฐาน ให้ตรวจตาราง Auto ใหม่ก่อนเปิดใช้'))
 
 section('pos','5. ใช้ฐานข้อมูลของ StoreFront ที่มีอยู่',
+ shot('25-source-pos','ระบุฐาน StoreFront — พาธในภาพเป็นตัวอย่าง',[(1,28,'เลือกใช้ฐานข้อมูลของ StoreFront'),(1,53,'ระบุพาธฐาน <strong>AdaAccD.db</strong> ที่ POS ใช้จริง'),(1,70,'กดตรวจสอบการเชื่อมต่อ แล้วกรอก PIN เพื่อยืนยัน')])+
+ note('ภาพนี้แสดงขั้นก่อนตรวจสอบฐาน ข้อความสถานะด้านล่างอาจยังเป็นผลจากการทำรายการก่อนหน้า ให้รอผลตรวจสอบใหม่ก่อนเลือกสาขาและบันทึก')+
  steps(['เลือก <strong>ใช้ฐานข้อมูลของ StoreFront</strong>','ระบุพาธ <strong>AdaAccD.db</strong> ที่ StoreFront ใช้จริง หรือกด <strong>เลือกไฟล์ฐานข้อมูล</strong> ในโปรแกรมเดสก์ท็อป','กด <strong>ตรวจสอบการเชื่อมต่อ</strong> กรอก PIN ในหน้าต่างที่เปิดขึ้น แล้วกด <strong>ยืนยันตรวจสอบ</strong>','เมื่อตรวจผ่าน เลือกสาขาของเครื่องพิมพ์ แล้วกด <strong>บันทึกแหล่งข้อมูล</strong> กรอก PIN และกด <strong>ยืนยันบันทึก</strong>'])+
  p(r'ตัวอย่างพาธมาตรฐานของ StoreFront คือ <code>C:\ProgramData\AdaPos6.0\AdaStoreFront\Data\AdaAccD.db</code> แต่ต้องใช้ตำแหน่งจริงของเครื่องนั้น โปรแกรมอ่านฐานนี้โดยไม่เขียนทับข้อมูล POS')+
  note('ถ้าผลตรวจพบฐานแต่ไม่มีสินค้า ผู้ใช้ หรือสาขา ให้ผู้ดูแลอัปเดตข้อมูลใน StoreFront ก่อน สำหรับโหมดนี้ไม่มีปุ่ม Sync ของ AdaBarprint เพราะใช้ข้อมูลจาก StoreFront โดยตรง'))
@@ -120,6 +126,6 @@ css += '''
 '''
 toc=''.join(f'<li><a href="#{k}">{html.escape(t.split(". ",1)[1])}</a></li>' for k,t,_ in chapters)
 body=''.join(f'<section id="{k}"><h2>{t}</h2>{b}</section>' for k,t,b in chapters)
-OUT.write_text(f'<!doctype html><html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>คู่มือการใช้งาน AdaBarprint — Desktop EXE</title><style>{css}</style></head><body id="top"><header><small>ADABARPRINT · DESKTOP USER GUIDE</small><h1>คู่มือการใช้งาน AdaBarprint</h1><p>ตั้งแต่เปิดโปรแกรมครั้งแรกจนถึงพิมพ์เอง ออกแบบ Pre-Print และตั้งเวลา Auto</p><p>สำหรับ Windows Desktop EXE · รุ่น 0.2.1 · ปรับปรุง 21 พฤศจิกายน 2569</p></header><nav aria-label="สารบัญ"><ol>{toc}</ol></nav><main>{body}</main><footer>คู่มือสำหรับผู้ใช้งานและทีมติดตั้ง · ภาพหน้าจอรุ่นปัจจุบัน พร้อมหมายเลขกำกับ · ไม่ได้ส่งงานพิมพ์จริงระหว่างจัดทำคู่มือ</footer></body></html>',encoding='utf-8')
+OUT.write_text(f'<!doctype html><html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>คู่มือการใช้งาน AdaBarprint — Desktop EXE</title><style>{css}.compact{{max-width:640px;margin-inline:auto}}</style></head><body id="top"><header><small>ADABARPRINT · DESKTOP USER GUIDE</small><h1>คู่มือการใช้งาน AdaBarprint</h1><p>ตั้งแต่เปิดโปรแกรมครั้งแรกจนถึงพิมพ์เอง ออกแบบ Pre-Print และตั้งเวลา Auto</p><p>สำหรับ Windows Desktop EXE · รุ่น 0.2.1 · ปรับปรุง 21 พฤศจิกายน 2569</p></header><nav aria-label="สารบัญ"><ol>{toc}</ol></nav><main>{body}</main><footer>คู่มือสำหรับผู้ใช้งานและทีมติดตั้ง · ภาพหน้าจอรุ่นปัจจุบัน พร้อมหมายเลขกำกับ · ไม่ได้ส่งงานพิมพ์จริงระหว่างจัดทำคู่มือ</footer></body></html>',encoding='utf-8')
 OUT.write_text(re.sub(r'(?m)[ \t]+$', '', OUT.read_text(encoding='utf-8')), encoding='utf-8')
 print(f'Built {OUT.name}: {len(chapters)} chapters, {OUT.stat().st_size:,} bytes')
