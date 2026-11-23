@@ -13,6 +13,7 @@ interface PreviewMediaToolbarProps {
   onChange: (next: PreviewMediaConfig) => void;
   savedPaperSize: string;
   lbsGroup?: string;
+  compact?: boolean;
 }
 
 const MODE_OPTIONS: Array<{ value: PreviewMediaMode; label: string }> = [
@@ -37,6 +38,7 @@ export const PreviewMediaToolbar: React.FC<PreviewMediaToolbarProps> = ({
   onChange,
   savedPaperSize,
   lbsGroup,
+  compact = false,
 }) => {
   const savedLabel = getPaperSizeDisplayName(savedPaperSize);
 
@@ -62,7 +64,17 @@ export const PreviewMediaToolbar: React.FC<PreviewMediaToolbarProps> = ({
   return (
     <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-50 border border-slate-200 rounded-md px-2.5 py-1.5 text-[11px]">
       <div className="flex flex-wrap items-center gap-1.5">
-        <span className="font-medium text-slate-700 mr-0.5">ขนาด Preview:</span>
+        {compact ? (
+          <label className="grid w-full gap-1 text-xs text-slate-700">
+            ขนาดกระดาษ
+            <select className="w-full rounded border bg-white p-2" value={config.mode}
+              onChange={e => handleModeSelect(e.target.value as PreviewMediaMode)}>
+              {MODE_OPTIONS.map(opt => <option key={opt.value} value={opt.value}>
+                {opt.value === 'AUTO' ? `${opt.label} (${savedLabel})` : opt.label}
+              </option>)}
+            </select>
+          </label>
+        ) : <><span className="font-medium text-slate-700 mr-0.5">ขนาด Preview:</span>
         <div className="inline-flex flex-wrap rounded border border-slate-200 bg-white p-0.5 gap-0.5">
           {MODE_OPTIONS.map((opt) => {
             const active = config.mode === opt.value;
@@ -85,7 +97,7 @@ export const PreviewMediaToolbar: React.FC<PreviewMediaToolbarProps> = ({
               </button>
             );
           })}
-        </div>
+        </div></>}
 
         {config.mode === 'ROLL' && (
           <div className="flex items-center gap-2 ml-1 bg-amber-50 border border-amber-200 rounded px-2 py-0.5">

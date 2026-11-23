@@ -4,6 +4,7 @@ import {
   parseMasterOrPrintFile,
   triggerFileDownload,
 } from '@/lib/masterImport';
+import { readDraft, writeDraft } from '@/lib/manualDraft';
 import {resolveTemplateRoute,manualTemplateProblem} from '@/lib/printProfile';
 import {api as printApi, purposes as printPurposes} from '@/components/autoPrintShared';
 import { MasterDatabaseSettings } from '@/components/MasterDatabaseSettings';
@@ -162,6 +163,51 @@ interface PrintQueueRow {
   statusText: string;
 }
 
+type EventPrice = { pdtCode: string; barcode: string; setPrice: number; ctx: PrintQueueRow['ctx']; isPromo: boolean };
+function indexEventPrices(lines: EventPrice[]) {
+  return new Map(lines.map(line => [JSON.stringify([line.pdtCode, line.barcode]), line]));
+}
+
+function PreviewPageWindow({ count, render }: { count: number; render: (start: number, end: number) => React.ReactNode }) {
+  const [block, setBlock] = useState(0);
+  const pageSize = 8;
+  const lastBlock = Math.max(0, Math.ceil(count / pageSize) - 1);
+  const current = Math.min(block, lastBlock);
+  const start = current * pageSize;
+  const end = Math.min(start + pageSize, count);
+  return <>
+    {lastBlock > 0 && <nav aria-label="เลือกช่วงหน้าตัวอย่าง" className="sticky top-0 z-10 flex flex-wrap items-center gap-2 rounded border bg-white p-2 text-xs">
+      <button type="button" disabled={!current} className="rounded border px-2 py-1 disabled:opacity-40" onClick={() => setBlock(current - 1)}>ก่อนหน้า</button>
+      <select aria-label="ช่วงหน้าตัวอย่าง" value={current} onChange={event => setBlock(Number(event.target.value))}>
+        {Array.from({length: lastBlock + 1}, (_, i) => <option key={i} value={i}>{i * pageSize + 1}–{Math.min(count, (i + 1) * pageSize)} / {count}</option>)}
+      </select>
+      <button type="button" disabled={current === lastBlock} className="rounded border px-2 py-1 disabled:opacity-40" onClick={() => setBlock(current + 1)}>ถัดไป</button>
+    </nav>}
+    {render(start, end)}
+  </>;
+}
+
+interface ManualPrintSet {
+  source: string;
+  date: string;
+  labelCode: string;
+  templateCode: string;
+  printerId: string;
+  media: PreviewMediaConfig;
+  priceGroup: string;
+  verify: boolean;
+  dated: boolean;
+  review?: string;
+  id: string;
+  name: string;
+  format: string;
+  sheets: number;
+  labels: number;
+  branch: string;
+  lines: PrintQueueRow[];
+  units: Array<{ kind: string; payload: Record<string, unknown> }>;
+}
+
 let queueRowSeq = 0;
 function nextQueueRowKey(pdtCode: string, barCode: string, priType: string): string {
   queueRowSeq += 1;
@@ -256,8 +302,10 @@ async function capturePagesToPngBase64(
         ctx.fillStyle = '#FFFFFF';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         ctx.scale(scale, scale);
-        ctx.drawImage(image, 0, 0, wPx, hPx);
-        resolve(canvas.toDataURL('image/png'));
+        try {
+          ctx.drawImage(image, 0, 0, wPx, hPx);
+          resolve(canvas.toDataURL('image/png'));
+        } catch (error) { reject(error); }
       };
       image.onerror = reject;
       image.src = svgUrl;
@@ -537,6 +585,8 @@ function AdaBarprintWorkspace({
   // Right Print Terms (default ว่าง ให้ผู้ใช้เลือกเองตามแบบ V.5)
   const [selectedLabelCode, setSelectedLabelCode] = useState('');
   const [selectedTemplateCode,setSelectedTemplateCode]=useState('');
+  const loadedEvent = useRef<{key: string; loaded: number; lines: Map<string, EventPrice>} | null>(null);
+  const eventKey = (source: string) => JSON.stringify([authUser.id, resolveDefaultBranch(), source, effectiveDate, selectedLabelCode]);
   const [manualSource,setManualSource]=useState('');
 
   const selectedTemplate=labelSizes.flatMap(size=>(size.templates||[]).map(t=>({...t,FTLbsCode:size.FTLbsCode}))).find(t=>t.FTLtmCode===selectedTemplateCode&&t.FTLbsCode===selectedLabelCode);
@@ -1032,21 +1082,24 @@ function AdaBarprintWorkspace({
     });
     setImportPreviewOpen(false);
     setScanModalOpen(false);
-    toast.success(`นำเข้า ${previewPass.length} รายการลงตารางพิมพ์สำเร็จ`);
+    toast.success(`เพิ่มในตารางพิมพ์แล้ว ${previewPass.length} รายการ`);
   };
 
   // MoveDataIntoTable (ปุ่ม แสดงข้อมูล จากแผงเงื่อนไขซ้าย)
   const handleMoveDataIntoTable = async () => {
+    loadedEvent.current = null;
     setMovingData(true);
     setLookupFailures([]);
     try {
       if(manualSource){
         if(!selectedLabelCode)throw new Error('กรุณาเลือกแบบป้ายก่อนแสดงข้อมูล');
         const data=await printApi('/api/print-center/manual-candidates',{source:manualSource,date:effectiveDate,size:selectedLabelCode,quantity:Math.max(1,defaultQty)});
+        loadedEvent.current = {key: eventKey(manualSource), loaded: Date.now(), lines: indexEventPrices(data.lines)};
         setMainRows(data.lines.map((line:any)=>({rowKey:nextQueueRowKey(line.pdtCode,line.barcode,line.isPromo?'2':'1'),pdtCode:line.pdtCode,pdtName:line.pdtName,barCode:line.barcode,price:line.setPrice??0,priType:line.isPromo?'2':'1',qty:Math.max(1,defaultQty),selected:true,lbsCode:selectedLabelCode,tmplCode:selectedTemplateCode||line.tmplCode,ctx:line.ctx,promoName:line.promo?.name,statusText:printPurposes[manualSource].title})));
         setMainPage(1);toast.success(`พบสินค้า ${data.lines.length} รายการ`);return;
       }
-      const params = new URLSearchParams({ limit: '5000' });
+      const pageSize = 500;
+      const params = new URLSearchParams({ limit: String(pageSize) });
       if (pdtFrom.trim()) params.set('pdtFrom', pdtFrom.trim());
       if (pdtTo.trim()) params.set('pdtTo', pdtTo.trim());
       if (pdtGrpFilter) params.set('grpFrom', pdtGrpFilter);
@@ -1068,10 +1121,21 @@ function AdaBarprintWorkspace({
       if (useEffectiveDate && effectiveDate) params.set('effectiveDate', effectiveDate);
       // Filter the resolved label price below, not legacy POS5 promotion tables.
 
-      const res = await fetch(`/api/products?${params.toString()}`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'โหลดรายการสินค้าไม่สำเร็จ');
-      const list: ProductItem[] = data.products || [];
+      const list: ProductItem[] = [];
+      for (;;) {
+        params.set('offset', String(list.length));
+        const res = await fetch(`/api/products?${params.toString()}`);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'โหลดรายการสินค้าไม่สำเร็จ');
+        const page: ProductItem[] = data.products;
+        if (!Array.isArray(page)) throw new Error('ข้อมูลรายการสินค้าไม่ถูกต้อง');
+        if (list.length && page.length && list[list.length - 1].FTPdtCode === page[page.length - 1].FTPdtCode &&
+            list[list.length - 1].bars?.[0]?.FTPdbBarCode === page[page.length - 1].bars?.[0]?.FTPdbBarCode) {
+          throw new Error('บริการสินค้าไม่ได้ส่งหน้าถัดไป กรุณาอัปเดตบริการ AdaBarprint');
+        }
+        list.push(...page);
+        if (page.length < pageSize) break;
+      }
       const bchCode = resolveDefaultBranch();
 
       const targets = list;
@@ -1132,10 +1196,8 @@ function AdaBarprintWorkspace({
       setLookupFailures(failures);
       setMainPage(1);
       (failures.length ? toast.warning : toast.success)(
-        failures.length ? `พร้อม ${built.length} รายการ · ไม่พร้อม ${failures.length} รายการ ดูเหตุผลเหนือตาราง` :
-        list.length >= 5000
-          ? `แสดงข้อมูลสินค้า ${built.length} รายการ (ถึงขีดจำกัด 5,000 รายการ กรุณาระบุช่วงสินค้าเพื่อค้นหาส่วนที่เหลือ)`
-          : `แสดงข้อมูลสินค้า ${built.length} รายการ`
+        failures.length ? `พร้อมพิมพ์ ${built.length} · ต้องตรวจสอบ ${failures.length}` :
+        `แสดงข้อมูลสินค้า ${built.length} รายการ`
       );
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'ดึงข้อมูลสินค้าตามเงื่อนไขไม่สำเร็จ');
@@ -1193,8 +1255,43 @@ function AdaBarprintWorkspace({
     [mainRows]
   );
 
-  const normalRows = useMemo(() => mainRows.filter(r => r.selected && (selectedTemplateCode || r.priType === '1')), [mainRows,selectedTemplateCode]);
-  const promoRows = useMemo(() => selectedTemplateCode ? [] : mainRows.filter(r => r.selected && r.priType === '2'), [mainRows,selectedTemplateCode]);
+  const [previewPurpose, setPreviewPurpose] = useState('');
+  const [eventLines, setEventLines] = useState<Map<string, {setPrice: number; ctx: PrintQueueRow['ctx']; isPromo: boolean}> | null>(null);
+  const [eventError, setEventError] = useState('');
+  const previewEventKey = eventKey(previewPurpose);
+  useEffect(() => {
+    if (!sendPrintOpen || !previewPurpose || previewPurpose === 'basket') return;
+    const cached = loadedEvent.current;
+    if (cached?.key === previewEventKey && Date.now() - cached.loaded < 60_000) {
+      setEventLines(cached.lines);
+      setEventError('');
+      return;
+    }
+    let active = true;
+    setEventLines(null);
+    setEventError('');
+    printApi('/api/print-center/manual-candidates', {
+      source: previewPurpose, date: effectiveDate, size: selectedLabelCode, quantity: 1,
+    }).then(data => {
+      if (active) {
+        const lines = indexEventPrices(data.lines);
+        loadedEvent.current = {key: previewEventKey, loaded: Date.now(), lines};
+        setEventLines(lines);
+      }
+    }).catch(error => {
+      if (active) setEventError(error instanceof Error ? error.message : 'ตรวจรายการตามประเภทงานไม่สำเร็จ');
+    });
+    return () => { active = false; };
+  }, [sendPrintOpen, previewPurpose, effectiveDate, selectedLabelCode, previewEventKey]);
+  const printRows = useMemo(() => mainRows.filter(row => row.selected).flatMap(row => {
+    if (previewPurpose === 'basket') return [];
+    if (!sendPrintOpen || !previewPurpose) return [row];
+    const line = eventLines?.get(JSON.stringify([row.pdtCode, row.barCode]));
+    if (!line) return [];
+    return [{...row, ctx: line.ctx, price: line.setPrice, priType: line.isPromo ? '2' as const : '1' as const}];
+  }), [mainRows, sendPrintOpen, previewPurpose, eventLines]);
+  const normalRows = useMemo(() => printRows.filter(r => selectedTemplateCode || r.priType === '1'), [printRows, selectedTemplateCode]);
+  const promoRows = useMemo(() => selectedTemplateCode ? [] : printRows.filter(r => r.priType === '2'), [printRows, selectedTemplateCode]);
   const activeDriverMapping = useMemo(()=>{
     const mapping=driverMappings.find(m=>m.lbsCode===selectedLabelCode);
     if(!mapping||!selectedTemplate)return mapping||null;
@@ -1286,56 +1383,107 @@ function AdaBarprintWorkspace({
     }
   };
 
-  const handleConfirmSendPrint = async () => {
-    if(selectedTemplateCode&&!selectedTemplate){toast.error('ไม่พบแบบป้ายที่เลือก กรุณาเลือกแบบป้ายใหม่');return;}
-    const selected = mainRows.filter(r => r.selected);
-    if (selected.length === 0) {
-      toast.error('ไม่มีรายการที่เลือกพิมพ์');
-      return;
-    }
-    const printer = printers.find(p => p.id === selectedPrinterId);
-    setPrinting(true);
+  const [printSets, setPrintSets] = useState<ManualPrintSet[]>([]);
+  const [editingSet, setEditingSet] = useState('');
+  const [draftBusy, setDraftBusy] = useState(false);
+  const [hasDraft, setHasDraft] = useState(false);
+  const draftOwner = JSON.stringify([authUser.id, resolveDefaultBranch()]);
+  const pendingJobId = useRef('');
+  useEffect(() => {
+    let active = true;
+    setHasDraft(false);
+    readDraft<ManualPrintSet>(draftOwner).then(draft => {
+      if (active) setHasDraft(Boolean(draft?.sets.length));
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [draftOwner]);
+
+  async function saveDraft() {
+    setDraftBusy(true);
     try {
-      const bchCode = resolveDefaultBranch();
-      const fallbackPrinterName = printer?.name || '';
-      const norPrtDesc = activeDriverMapping?.normalPrinter
-        ? `${activeDriverMapping.normalPrinter}${activeDriverMapping.normalTray ? ` (${activeDriverMapping.normalTray})` : ''}`
-        : fallbackPrinterName;
-      const pmtPrtDesc = activeDriverMapping?.promoPrinter
-        ? `${activeDriverMapping.promoPrinter}${activeDriverMapping.promoTray ? ` (${activeDriverMapping.promoTray})` : ''}`
-        : fallbackPrinterName;
-      const jobResponse = await fetch('/api/print/create-job', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          lines: selected.map(r => ({
-            barcode: r.barCode,
-            qty: r.qty,
-            ctx: r.ctx,
-            priType: r.priType,
-            lbsCode: selectedLabelCode || r.lbsCode,
-            salePrice: r.price,
-            setPrice: r.price,
-            promo: r.ctx?.promotion ?? null,
-            tmplCode: selectedTemplateCode || r.tmplCode,
-            pdtCode: r.pdtCode,
-          })),
-          bchCode,
-          source: '1',
-          verify: true,
-          user: sysOptValue('DefaultUser') || undefined,
-          serverCode: driverServerCode,
-          normalPrinter: norPrtDesc,
-          promoPrinter: pmtPrtDesc,
-          defaultPrinter: fallbackPrinterName,
-        }),
-      });
+      if (printSets.some(set => set.branch !== resolveDefaultBranch())) throw new Error('กรุณาเลือกสาขาเดิมของชุดพิมพ์');
+      await writeDraft(draftOwner, printSets);
+      setHasDraft(true);
+      toast.success('บันทึกฉบับร่างในเบราว์เซอร์นี้แล้ว');
+    } catch (error) { toast.error(error instanceof Error ? error.message : 'บันทึกฉบับร่างไม่สำเร็จ'); }
+    finally { setDraftBusy(false); }
+  }
 
-      const savedJob = await jobResponse.json();
-      if (!jobResponse.ok || !savedJob.jobId) {
-        throw new Error(savedJob.error || 'บันทึกงานพิมพ์ไม่สำเร็จ ยังไม่ได้ส่งพิมพ์');
+  async function refreshSet(set: ManualPrintSet) {
+    const refreshed: PrintQueueRow[] = [];
+    const candidates = set.source ? await printApi('/api/print-center/manual-candidates', {
+      source: set.source, date: set.date, size: set.labelCode, quantity: 1,
+    }) : null;
+    const byKey = new Map<string, any>(candidates?.lines.map((line: any) =>
+      [JSON.stringify([line.pdtCode, line.barcode]), line]));
+    for (let i = 0; i < set.lines.length; i += 10) {
+      const rows = await Promise.all(set.lines.slice(i, i + 10).map(async row => {
+        const line = candidates ? byKey.get(JSON.stringify([row.pdtCode, row.barCode])) :
+          await printApi('/api/print/build-line', {barcode: row.barCode, pdtCode: row.pdtCode, qty: row.qty,
+            bchCode: set.branch, overrideLbs: set.labelCode, verify: set.verify, priType: '1',
+            effectiveDate: set.dated ? set.date : undefined, priceGroup: set.priceGroup || undefined});
+        return line ? {...row, price: line.setPrice, pdtName: line.pdtName, ctx: line.ctx,
+          promoName: line.promo?.name, priType: line.isPromo ? '2' as const : '1' as const} : null;
+      }));
+      refreshed.push(...rows.filter(row => row !== null));
+    }
+    return refreshed;
+  }
+
+  async function openDraft() {
+    setDraftBusy(true);
+    try {
+      const draft = await readDraft<ManualPrintSet>(draftOwner);
+      if (!draft?.sets.length) throw new Error('ไม่พบฉบับร่างในสาขานี้');
+      const checked: ManualPrintSet[] = [];
+      for (const set of draft.sets) {
+        let rows: PrintQueueRow[];
+        try { rows = await refreshSet(set); }
+        catch (error) {
+          checked.push({...set, review: error instanceof Error ? error.message : 'ตรวจข้อมูลชุดนี้ไม่สำเร็จ'});
+          continue;
+        }
+        const changed = rows.length !== set.lines.length || rows.some((row,i) =>
+          row.price !== set.lines[i].price || row.priType !== set.lines[i].priType ||
+          row.pdtName !== set.lines[i].pdtName || row.promoName !== set.lines[i].promoName ||
+          JSON.stringify(row.ctx) !== JSON.stringify(set.lines[i].ctx));
+        checked.push({...set, review: changed ? 'ข้อมูลสินค้าเปลี่ยน กรุณาตรวจและอัปเดตชุด' : undefined});
       }
+      setPrintSets(checked);
+      setEditingSet('');
+      setPreviewPurpose('basket');
+      setSendPrintOpen(true);
+    } catch (error) { toast.error(error instanceof Error ? error.message : 'เปิดฉบับร่างไม่สำเร็จ'); }
+    finally { setDraftBusy(false); }
+  }
 
+  async function editSet(set: ManualPrintSet) {
+    setDraftBusy(true);
+    try {
+      const rows = await refreshSet(set);
+      if (!rows.length) throw new Error('ไม่มีสินค้าที่ยังตรงเงื่อนไข กรุณาลบชุดนี้');
+      if (rows.length < set.lines.length) toast.warning(`เหลือ ${rows.length} จาก ${set.lines.length} รายการที่ตรงเงื่อนไข`);
+      setEditingSet(set.id);
+      setMainRows(rows);
+      setMainSearch('');
+      setMainPage(1);
+      setManualSource(set.source);
+      setEffectiveDate(set.date);
+      setUseEffectiveDate(set.dated);
+      setPriceGroupCode(set.priceGroup);
+      setSheetPriceType(set.verify ? 'All' : 'Normal');
+      setSelectedLabelCode(set.labelCode);
+      setSelectedTemplateCode(set.templateCode);
+      setSendPrintOpen(false);
+    } catch (error) { toast.error(error instanceof Error ? error.message : 'เปิดชุดไม่สำเร็จ'); }
+    finally { setDraftBusy(false); }
+  }
+  const printBusy = useRef(false);
+  const prepareManualSet = async (): Promise<ManualPrintSet> => {
+    if (selectedTemplateCode && !selectedTemplate) throw new Error('ไม่พบแบบป้ายที่เลือก');
+    const selected = printRows;
+    if (!selected.length) throw new Error('ไม่มีรายการที่เลือกพิมพ์');
+    const printer = printers.find(p => p.id === selectedPrinterId);
       const queueUnits: Array<{ kind: string; payload: Record<string, unknown> }> = [];
       const hasSplitMapping = Boolean(
         (normalRows.length > 0 && activeDriverMapping?.normalPrinter) ||
@@ -1374,11 +1522,7 @@ function AdaBarprintWorkspace({
           requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 180)))
         );
 
-        for (let idx = 0; idx < dispatches.length; idx++) {
-          const d = dispatches[idx];
-          if (idx > 0) {
-            await new Promise(r => setTimeout(r, 900));
-          }
+        for (const d of dispatches) {
           const lan = printers.find(p => p.name === d.printer && p.enabled && p.ip !== 'Windows' && p.brand !== 'WINDOWS' && p.brand !== 'SAMSUNG');
           if (lan) {
             const rows = d.containerId === 'v5-capture-normal' ? normalRows : promoRows;
@@ -1417,15 +1561,111 @@ function AdaBarprintWorkspace({
             priTypeLabel:label,pageImages,paperSize:a4Layout.paperSize,paperWidthMm:a4Layout.paperWidthMm,paperHeightMm:a4Layout.paperHeightMm}});
         }
       }
+      for (const unit of queueUnits) {
+        if (unit.kind === 'WINDOWS' && !(unit.payload.pageImages as string[])?.length)
+          throw new Error('สร้างภาพหน้าพิมพ์ไม่สำเร็จ');
+      }
+      return {
+        id: editingSet || crypto.randomUUID(),
+        source: previewPurpose, date: effectiveDate, labelCode: selectedLabelCode, templateCode: selectedTemplateCode,
+        printerId: selectedPrinterId, media: previewMedia, dated: useEffectiveDate, verify: sheetPriceType !== 'Normal', priceGroup: priceGroupCode,
+        name: previewPurpose ? printPurposes[previewPurpose].title : 'รายการที่เลือก',
+        format: selectedTemplate?.FTLtmName || selectedLabelCode,
+        sheets: previewSheetCount, labels: a4Layout.totalLabels, branch: resolveDefaultBranch(),
+        lines: selected.map(row => ({ ...row, lbsCode: selectedLabelCode || row.lbsCode,
+          tmplCode: selectedTemplateCode || (row.lbsCode === selectedLabelCode ? row.tmplCode : '') })),
+        units: queueUnits,
+      };
+  };
+
+  const printerPicker = (<SearchableSelect
+                      value={selectedPrinterId}
+                      onValueChange={(v) => setSelectedPrinterId(v === '__NONE__' ? '' : v)}
+                      placeholder="เลือกเครื่องพิมพ์..."
+                      searchPlaceholder="ค้นหาชื่อเครื่องพิมพ์ หรือ IP..."
+                      className="h-9 text-xs"
+                      options={[
+                        ...(selectedPrinterId ? [{ value: '__NONE__', label: '-- ล้างการเลือก (ยังไม่เลือก) --' }] : []),
+                        ...printers.map((p) => ({
+                          value: p.id,
+                          label: `${p.name} (${p.ip}:${p.port})`,
+                          keywords: `${p.name} ${p.ip} ${p.brand}`,
+                          badge: p.ip === 'Windows' ? 'WIN' : 'LAN',
+                          badgeClassName:
+                            p.ip === 'Windows'
+                              ? 'bg-slate-100 text-slate-700'
+                              : 'bg-emerald-100 text-emerald-800',
+                        })),
+                      ]}
+                    />);
+
+  const formatPicker = (
+<SearchableSelect
+                      value={selectedTemplateCode|| (selectedLabelCode?`legacy:${selectedLabelCode}`:'')}
+                      onValueChange={value=>{if(value.startsWith('legacy:')){setSelectedTemplateCode('');setSelectedLabelCode(value.slice(7));}else{const size=labelSizes.find(s=>s.templates?.some(t=>t.FTLtmCode===value));if(size){const template=size.templates?.find(t=>t.FTLtmCode===value);const problem=manualTemplateProblem(template?.FTLtmLayout);if(problem){toast.error(problem);return;}setSelectedLabelCode(size.FTLbsCode);setSelectedTemplateCode(value);}}}}
+                      placeholder="เลือกแบบป้ายที่จะพิมพ์..."
+                      searchPlaceholder="ค้นหาชื่อแบบป้ายหรือขนาด..."
+                      className="h-9 text-xs"
+                      options={labelSizes.filter(l=>l.FTLbsStaUse==='1').flatMap(l=>{
+                        const templates=(l.templates||[]).filter(t=>{try{return JSON.parse(t.FTLtmLayout||'null')?.elements?.length>0;}catch{return false;}});
+                        return templates.length?templates.map(t=>({value:t.FTLtmCode,label:t.FTLtmName,keywords:`${t.FTLtmCode} ${l.FTLbsName}`,badge:`${l.FCLbsWidth}×${l.FCLbsHeight} มม.`})):[{value:`legacy:${l.FTLbsCode}`,label:l.FTLbsName||l.FTLbsCode,keywords:l.FTLbsCode,badge:'แบบเดิม'}];
+                      })}
+                    />
+  );
+
+  const canPrepareSet = printRows.length > 0 && Boolean(selectedPrinterId || ((!normalRows.length || activeDriverMapping?.normalPrinter) && (!promoRows.length || activeDriverMapping?.promoPrinter)));
+  const handleConfirmSendPrint = async (stageOnly = false) => {
+    if (printBusy.current || draftBusy) return;
+    printBusy.current = true;
+    setPrinting(true);
+    try {
+      if (stageOnly) {
+        const set = await prepareManualSet();
+        const duplicate = printSets.some(other => other.id !== set.id && other.source === set.source &&
+          other.date === set.date && other.labelCode === set.labelCode && other.templateCode === set.templateCode &&
+          JSON.stringify(other.units) === JSON.stringify(set.units));
+        if (duplicate) throw new Error('มีชุดนี้แล้ว หากต้องการเพิ่มจำนวนให้แก้ไขชุดเดิม');
+        setPrintSets(prev => editingSet ? prev.map(old => old.id === editingSet ? set : old) : [...prev, set]);
+        setEditingSet('');
+        setPreviewPurpose('basket');
+        toast.success(editingSet ? 'อัปเดตชุดแล้ว' : `เพิ่มชุด ${set.name} แล้ว`);
+        return;
+      }
+      if (printSets.length && previewPurpose !== 'basket') { setPreviewPurpose('basket'); return; }
+      if (printSets.some(set => set.review)) throw new Error('กรุณาตรวจชุดที่ข้อมูลเปลี่ยนก่อนยืนยัน');
+      const sets = printSets.length ? printSets : [await prepareManualSet()];
+      const branch = resolveDefaultBranch();
+      if (sets.some(set => set.branch !== branch)) throw new Error('สาขาของชุดพิมพ์ไม่ตรงกับสาขาปัจจุบัน');
+      const lines = sets.flatMap(set => set.lines.map(row => ({
+        barcode: row.barCode, qty: row.qty, ctx: row.ctx, priType: row.priType, lbsCode: row.lbsCode,
+        salePrice: row.price, setPrice: row.price, promo: row.ctx?.promotion ?? null, tmplCode: row.tmplCode, pdtCode: row.pdtCode,
+      })));
+      if (!pendingJobId.current) {
+        const response = await fetch('/api/print/create-job', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({lines, bchCode: branch, source: '1', verify: true,
+            user: sysOptValue('DefaultUser') || undefined, serverCode: driverServerCode,
+            normalPrinter: activeDriverMapping?.normalPrinter, promoPrinter: activeDriverMapping?.promoPrinter,
+            defaultPrinter: printers.find(p => p.id === selectedPrinterId)?.name}),
+        });
+        const saved = await response.json();
+        if (!response.ok || !saved.jobId) throw new Error(saved.error || 'บันทึกงานพิมพ์ไม่สำเร็จ');
+        pendingJobId.current = saved.jobId;
+        setPrintSets(sets);
+      }
       const queued = await fetch('/api/print-center/manual', {method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({requestId:savedJob.jobId,jobId:savedJob.jobId,name:`สั่งพิมพ์เอง ${selected.length} รายการ`,units:queueUnits})});
+        body:JSON.stringify({requestId:pendingJobId.current,jobId:pendingJobId.current,name:`สั่งพิมพ์เอง ${sets.length} ชุด · ${lines.length} รายการ`,units:sets.flatMap(set => set.units)})});
       const result = await queued.json();
       if (!queued.ok) throw new Error(result.error || 'บันทึกคิวไม่สำเร็จ');
+      pendingJobId.current = '';
+      setPrintSets([]);
+      setEditingSet('');
       toast.success('เพิ่มงานพิมพ์แล้ว ดูสถานะที่ งานพิมพ์');
       setSendPrintOpen(false);
     } catch (err: any) {
       toast.error(err?.message || 'ส่งคำสั่งพิมพ์ไม่สำเร็จ');
     } finally {
+      printBusy.current = false;
       setCaptureDomMounted(false);
       setPrinting(false);
     }
@@ -1526,6 +1766,14 @@ function AdaBarprintWorkspace({
     paperSizes,
   ]);
 
+  useEffect(() => {
+    const set = printSets.find(item => item.id === editingSet);
+    if (set) {
+      setSelectedPrinterId(set.printerId);
+      setPreviewMedia(set.media);
+    }
+  }, [editingSet]);
+
   const a4Layout = useMemo(() => {
     const ls = selectedLabelSizeObj;
     const widthMm = ls?.FCLbsWidth || 100;
@@ -1591,9 +1839,9 @@ function AdaBarprintWorkspace({
       }
       return { exp, pg };
     };
-    const all = paginate(mainRows.filter((r) => r.selected));
-    const nor = paginate(mainRows.filter((r) => r.selected && (selectedTemplateCode || r.priType === '1')));
-    const pmt = paginate(selectedTemplateCode ? [] : mainRows.filter((r) => r.selected && r.priType === '2'));
+    const all = paginate(printRows);
+    const nor = paginate(normalRows);
+    const pmt = paginate(promoRows);
     return {
       lbsGroup: ls?.FTLbsGroup,
       savedPaperSize,
@@ -1623,7 +1871,7 @@ function AdaBarprintWorkspace({
       promoPages: pmt.pg,
       promoLabelsCount: pmt.exp.length,
     };
-  }, [selectedLabelSizeObj, paperSizes, previewMedia, mainRows, selectedTemplateCode]);
+  }, [selectedLabelSizeObj, paperSizes, previewMedia, printRows, normalRows, promoRows, selectedTemplateCode]);
 
   useEffect(() => {
     setPrintOffsetX(a4Layout.offsetX);
@@ -1868,7 +2116,7 @@ function AdaBarprintWorkspace({
 
   const renderPreviewSheets = (
     sheetPages: Array<Array<{ barcode: string; priType: string; ctx: Record<string, any> }>>,
-    keyPrefix: string
+    keyPrefix: string, start: number, end: number
   ) => {
     const sheetFactor = sheetPreviewScale;
     if (a4Layout.isRoll) {
@@ -1895,7 +2143,7 @@ function AdaBarprintWorkspace({
             boxSizing: 'border-box',
           }}
         >
-          {sheetPages.map((rowItems, rowIdx) => (
+          {sheetPages.slice(start, end).map((rowItems, rowIdx) => (
             <div
               key={`${keyPrefix}-roll-row-${rowIdx}`}
               style={{
@@ -1942,7 +2190,7 @@ function AdaBarprintWorkspace({
           <PreviewReferenceFrameWrapper
             refFrame={previewMedia.refFrame}
             sheetWidthMm={a4Layout.paperWidthMm}
-            sheetHeightMm={totalRollLenMm}
+            sheetHeightMm={4 + (end - start) * a4Layout.heightMm + Math.max(0, end - start - 1) * a4Layout.gapVMm}
             scale={sheetFactor}
           >
             {rollBox}
@@ -1951,7 +2199,8 @@ function AdaBarprintWorkspace({
       );
     }
 
-    return sheetPages.map((pageItems, pageIdx) => {
+    return sheetPages.slice(start, end).map((pageItems, i) => {
+      const pageIdx = start + i;
       const firstPreprintLayout = pageItems
         .map((it) => resolveCustomLayout(selectedLabelCode, it.priType))
         .find((ly) => ly?.designMode === 'preprint');
@@ -2263,24 +2512,25 @@ function AdaBarprintWorkspace({
                   size="sm"
                   className="bg-[#007a87] hover:bg-[#00606b] text-white"
                   onClick={() => {
-                    if (!selectedLabelCode) {
+                    if (!printSets.length && !selectedLabelCode) {
                       toast.error('กรุณาเลือกรูปแบบป้าย (Label Format)');
                       return;
                     }
-                    const hasMapped = Boolean(activeDriverMapping?.normalPrinter || activeDriverMapping?.promoPrinter);
-                    if (!selectedPrinterId && !hasMapped) {
-                      toast.error('กรุณาเลือกเครื่องพิมพ์ (Printer) หรือตั้งค่าไดร์เวอร์ตามรหัสฉลาก');
-                      return;
-                    }
-                    if (mainRows.filter(r => r.selected).length === 0) {
+                    if (!printSets.length && !mainRows.some(r => r.selected)) {
                       toast.error('กรุณาเลือกรายการที่ต้องการพิมพ์');
                       return;
                     }
+                    setPreviewPurpose(printSets.length && !mainRows.some(r => r.selected) ? 'basket' : manualSource);
+                    setEventLines(null);
+                    setEventError('');
                     setSendPrintOpen(true);
                   }}
                 >
-                  <Printer className="h-3.5 w-3.5 mr-1" />พิมพ์
+                  <Printer className="h-3.5 w-3.5 mr-1" />{editingSet ? 'ตรวจชุดที่แก้ไข' : 'พิมพ์'}
                 </Button>
+                {editingSet && <Button size="sm" variant="outline" onClick={() => {setEditingSet(''); setPreviewPurpose('basket'); setSendPrintOpen(true);}}>จบการแก้ไขโดยไม่บันทึก</Button>}
+                {hasDraft && !printSets.length && <Button size="sm" variant="outline" disabled={draftBusy} onClick={openDraft}>{draftBusy ? 'กำลังตรวจข้อมูล…' : 'เปิดฉบับร่าง'}</Button>}
+                {printSets.length > 0 && <Button size="sm" variant="outline" onClick={() => {setPreviewPurpose('basket'); setSendPrintOpen(true);}}>ชุดรอพิมพ์ ({printSets.length})</Button>}
                 <Button size="sm" variant="outline" className="border-[#007a87] text-[#007a87] hover:bg-teal-50/70" onClick={handleExportCsv}>
                   <Download className="h-3.5 w-3.5 mr-1" />ส่งออก CSV
                 </Button>
@@ -2413,18 +2663,25 @@ function AdaBarprintWorkspace({
                     }}
                   >
                   <fieldset className="space-y-2 mb-3">
-                    <legend className="text-xs font-semibold">ประเภทงานพิมพ์</legend>
-                    <div className="grid grid-cols-2 gap-2" role="group" aria-label="ประเภทงานพิมพ์">
-                      {['PRICE_CHG', 'NEW_PDT', 'PROMO_START', 'PROMO_END_REVERT'].map(code => (
-                        <Button key={code} type="button" variant={manualSource === code ? 'default' : 'outline'}
-                          aria-pressed={manualSource === code} className="h-auto min-h-9 whitespace-normal text-xs"
-                          onClick={() => { setManualSource(code); setLookupFailures([]); setMainRows([]); if (code) { setUseEffectiveDate(true); setSheetPriceType('All'); } }}>
-                          {printPurposes[code].title}
-                        </Button>
-                      ))}
-                    </div>
-                    <p className="text-xs text-slate-500">งานอัตโนมัติมี 4 แบบ ใช้เงื่อนไขเดียวกับ Profile ที่เรียกผ่าน Task Scheduler</p>
-                    <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={!manualSource} onChange={e => { setManualSource(e.target.checked ? '' : 'PRICE_CHG'); setLookupFailures([]); setMainRows([]); if (!e.target.checked) { setUseEffectiveDate(true); setSheetPriceType('All'); } }} />เลือกสินค้าด้วยตนเอง โดยไม่กรองตามประเภทงาน</label>
+                    <legend className="text-xs font-medium">เลือกรายการสินค้า</legend>
+                    <Select value={manualSource || 'manual'} onValueChange={value => {
+                      const source = value === 'manual' ? '' : value;
+                      setManualSource(source);
+                      setLookupFailures([]);
+                      setMainRows([]);
+                      if (source) {
+                        setUseEffectiveDate(true);
+                        setSheetPriceType('All');
+                      }
+                    }}>
+                      <SelectTrigger aria-label="เลือกรายการสินค้า" className="w-full h-9 text-xs"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="manual">เลือกสินค้าเอง</SelectItem>
+                        {['PRICE_CHG', 'NEW_PDT', 'PROMO_START', 'PROMO_END_REVERT'].map(code => (
+                          <SelectItem key={code} value={code}>{printPurposes[code].title}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                     {manualSource && <p className="text-xs text-slate-600">{manualSource === 'PROMO_END_REVERT' ? 'เลือกวันที่โปรสิ้นสุด ระบบตรวจราคาวันถัดไป และข้ามสินค้าที่ยังมีโปรอื่นใช้งานอยู่' : 'เลือกวันที่มีผล แล้วกดแสดงข้อมูล'} · ใช้แบบป้ายและเครื่องพิมพ์ที่เลือกด้านขวา</p>}
                   </fieldset>
                   {/* Row 1: Price Type + Total Print */}
@@ -2724,40 +2981,11 @@ function AdaBarprintWorkspace({
                         </button>
                       )}
                     </div>
-                    <SearchableSelect
-                      value={selectedTemplateCode|| (selectedLabelCode?`legacy:${selectedLabelCode}`:'')}
-                      onValueChange={value=>{if(value.startsWith('legacy:')){setSelectedTemplateCode('');setSelectedLabelCode(value.slice(7));}else{const size=labelSizes.find(s=>s.templates?.some(t=>t.FTLtmCode===value));if(size){const template=size.templates?.find(t=>t.FTLtmCode===value);const problem=manualTemplateProblem(template?.FTLtmLayout);if(problem){toast.error(problem);return;}setSelectedLabelCode(size.FTLbsCode);setSelectedTemplateCode(value);}}}}
-                      placeholder="เลือกแบบป้ายที่จะพิมพ์..."
-                      searchPlaceholder="ค้นหาชื่อแบบป้ายหรือขนาด..."
-                      className="h-9 text-xs"
-                      options={labelSizes.filter(l=>l.FTLbsStaUse==='1').flatMap(l=>{
-                        const templates=(l.templates||[]).filter(t=>{try{return JSON.parse(t.FTLtmLayout||'null')?.elements?.length>0;}catch{return false;}});
-                        return templates.length?templates.map(t=>({value:t.FTLtmCode,label:t.FTLtmName,keywords:`${t.FTLtmCode} ${l.FTLbsName}`,badge:`${l.FCLbsWidth}×${l.FCLbsHeight} มม.`})):[{value:`legacy:${l.FTLbsCode}`,label:l.FTLbsName||l.FTLbsCode,keywords:l.FTLbsCode,badge:'แบบเดิม'}];
-                      })}
-                    />
+                    {formatPicker}
                   </div>
                   <div className="space-y-1">
                     <Label className="text-xs font-medium"><span className="text-red-500">*</span> เครื่องพิมพ์ (สำรอง / LAN Printer)</Label>
-                    <SearchableSelect
-                      value={selectedPrinterId}
-                      onValueChange={(v) => setSelectedPrinterId(v === '__NONE__' ? '' : v)}
-                      placeholder="เลือกเครื่องพิมพ์..."
-                      searchPlaceholder="ค้นหาชื่อเครื่องพิมพ์ หรือ IP..."
-                      className="h-9 text-xs"
-                      options={[
-                        ...(selectedPrinterId ? [{ value: '__NONE__', label: '-- ล้างการเลือก (ยังไม่เลือก) --' }] : []),
-                        ...printers.map((p) => ({
-                          value: p.id,
-                          label: `${p.name} (${p.ip}:${p.port})`,
-                          keywords: `${p.name} ${p.ip} ${p.brand}`,
-                          badge: p.ip === 'Windows' ? 'WIN' : 'LAN',
-                          badgeClassName:
-                            p.ip === 'Windows'
-                              ? 'bg-slate-100 text-slate-700'
-                              : 'bg-emerald-100 text-emerald-800',
-                        })),
-                      ]}
-                    />
+                    {printerPicker}
                   </div>
                   
                   </div>
@@ -2802,12 +3030,10 @@ function AdaBarprintWorkspace({
                 {lookupFailures.length > 0 && (
                   <details className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm">
                     <summary className="cursor-pointer font-medium">รายการที่ไม่เพิ่มในตารางพิมพ์ ({lookupFailures.length})</summary>
-                    <p className="mt-2">รายการเหล่านี้จะไม่ถูกส่งพิมพ์ กรุณาตรวจสอบข้อมูลตามเหตุผลด้านล่าง</p>
-                    {!manualSource && sheetPriceType !== 'Normal' && <p className="mt-1">ถ้าต้องการป้ายราคาปกติ ให้เลือก “ราคาปกติ” แล้วกดแสดงข้อมูลใหม่ ระบบจะไม่ใช้ราคาโปรโมชั่นที่ตรวจสอบไม่ได้</p>}
+                    {!manualSource && sheetPriceType !== 'Normal' && <p className="mt-2">พิมพ์เฉพาะราคาปกติได้โดยเลือก “ราคาปกติ” แล้วกดแสดงข้อมูล</p>}
                     <ul className="mt-2 max-h-48 overflow-auto space-y-2">
-                      {lookupFailures.map((failure, index) => <li key={`${failure.barcode}-${index}`} className="break-words"><strong>{failure.barcode}</strong> — {failure.reason}</li>)}
+                      {lookupFailures.map((failure, index) => <li key={`${failure.barcode}-${index}`} className="break-words"><strong>{failure.barcode}</strong> — {failure.reason.replace(/^encountered unexpected or invalid data:\s*/i, '')}</li>)}
                     </ul>
-                    <Button variant="ghost" size="sm" onClick={() => setLookupFailures([])}>ปิดรายละเอียด</Button>
                   </details>
                 )}
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -3320,42 +3546,65 @@ function AdaBarprintWorkspace({
       </Dialog>
 
       {/* ===== Modal: ส่งพิมพ์แยกแท็บ Preview รูปแบบกระดาษ / ม้วน (odvPRNModalSendPrint) ===== */}
-      <Dialog open={sendPrintOpen} onOpenChange={setSendPrintOpen}>
-        <DialogContent className="w-[95vw] sm:max-w-5xl max-h-[92vh] flex flex-col overflow-hidden">
-          <DialogHeader>
-            <DialogTitle className="text-base">
-              Preview {a4Layout.isRoll ? 'ม้วน Thermal (Roll)' : a4Layout.isSingle ? 'ป้ายเดี่ยว 1:1' : `แผ่นกระดาษ ${a4Layout.paperLabel}`} ({previewSheetCount} {a4Layout.isRoll ? 'แถวตัด' : a4Layout.isSingle ? 'หน้า' : 'แผ่น'} · {a4Layout.totalLabels} ดวง)
-            </DialogTitle>
-            <DialogDescription className="text-xs">
-              รูปแบบป้าย: {selectedTemplate?.FTLtmName||selectedLabelCode} ({a4Layout.widthMm}×{a4Layout.heightMm} mm{' '}
-              {a4Layout.isRoll
-                ? `บนม้วนกว้าง ${a4Layout.paperWidthMm} mm · แถวละ ${a4Layout.cols} ดวง · Gap ${a4Layout.gapVMm} mm`
-                : `บนกระดาษ ${a4Layout.paperWidthMm}×${a4Layout.paperHeightMm} mm · จัดเรียง ${a4Layout.cols}×${a4Layout.rows} = ${a4Layout.perPage} ดวง/แผ่น`}
-              ){hasSplitPreview ? ' · แยกชุดส่งพิมพ์ตามปลายทาง' : ` · เครื่องพิมพ์: ${printers.find(p => p.id === selectedPrinterId)?.name || 'Windows Print'}`}
+      <Dialog open={sendPrintOpen} onOpenChange={open => { if (!printBusy.current && !draftBusy) setSendPrintOpen(open); }}>
+        <DialogContent className="flex h-[92dvh] w-[96vw] max-h-[92dvh] flex-col gap-0 overflow-hidden p-0 sm:max-w-6xl">
+          <DialogHeader className="shrink-0 border-b px-5 py-4 text-left">
+            <DialogTitle className="text-lg font-semibold">ตัวอย่างก่อนพิมพ์</DialogTitle>
+            <DialogDescription className="text-sm">
+              {previewPurpose === 'basket' ? `รวม ${printSets.length} ชุด · ${printSets.reduce((n, set) => n + set.labels, 0)} ดวง` : `${selectedTemplate?.FTLtmName || selectedLabelCode} · ป้าย ${a4Layout.widthMm} × ${a4Layout.heightMm} มม.`}
             </DialogDescription>
           </DialogHeader>
-          <Tabs defaultValue="preview" className="flex-1 min-h-0 flex flex-col">
-            <TabsList className="shrink-0">
-              <TabsTrigger value="preview">
-                Preview {a4Layout.isRoll ? `ม้วน (${a4Layout.totalLabels} ดวง)` : `(${previewSheetCount})`}
-              </TabsTrigger>
-              <TabsTrigger value="normal">{selectedTemplate?.FTLtmName||'ราคาปกติ'} ({normalRows.length})</TabsTrigger>
-              {!selectedTemplateCode&&<TabsTrigger value="promo">ราคาโปรโมชัน ({promoRows.length})</TabsTrigger>}
-            </TabsList>
-            <TabsContent value="preview" className="border rounded p-2 flex-1 min-h-0 overflow-hidden flex flex-col gap-2">
+          <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+            <aside className="flex max-h-[34vh] shrink-0 flex-col min-w-0 gap-4 overflow-x-hidden overflow-y-auto border-b bg-white p-4 md:max-h-none md:w-60 md:border-r md:border-b-0">
+              <div className="flex flex-col gap-2">
+            <label htmlFor="preview-purpose" className="text-xs font-medium">แสดงตัวอย่าง</label>
+            <select id="preview-purpose" className="min-h-10 w-full rounded-md border border-slate-300 bg-white px-2 text-sm" value={previewPurpose}
+              onChange={e => { setEventLines(null); setEventError(''); setPreviewPurpose(e.target.value); }}>
+              {printSets.length > 0 && <option value="basket">ทุกชุดที่รอส่งพร้อมกัน ({printSets.length} ชุด)</option>}
+              {!manualSource && <option value="">สินค้าที่เลือกในตารางปัจจุบัน</option>}
+              {Object.entries(printPurposes).filter(([code]) => !manualSource || code === manualSource).map(([code, purpose]) => <option key={code} value={code}>{purpose.title}</option>)}
+            </select>
+            {previewPurpose && previewPurpose !== 'basket' && <span className="text-xs text-slate-600">วันที่ {effectiveDate}{printRows.length > 0 && ` · ${printRows.length} รายการ`}</span>}
+          </div>
+              {previewPurpose !== 'basket' && <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-1 text-xs font-medium">แบบป้ายของชุดนี้{formatPicker}</div>}
+              {previewPurpose !== 'basket' && !canPrepareSet && printRows.length > 0 && <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-1 text-xs">เลือกเครื่องพิมพ์สำหรับชุดนี้{printerPicker}</div>}
+              {printSets.length > 0 && <section className="grid gap-2 border-t pt-3" aria-label="ชุดที่รอส่งพร้อมกัน">
+                <strong className="text-sm">ชุดที่รอส่งพร้อมกัน ({printSets.length})</strong>
+                {printSets.map(set => <div key={set.id} className="flex items-start justify-between gap-1 rounded border p-2 text-xs">
+                  <div className="min-w-0 break-words"><strong>{set.name}</strong><p>{set.format}</p><p>{set.labels} ดวง · {set.sheets} หน้า</p></div>
+                  {set.review && <span className="text-amber-800">{set.review}</span>}
+                  <button type="button" className="shrink-0 text-teal-700" disabled={printing || draftBusy || Boolean(pendingJobId.current)} onClick={() => editSet(set)}>แก้ไข</button>
+                  <button type="button" disabled={draftBusy || printing || Boolean(pendingJobId.current)} aria-label={`ลบชุด ${set.name}`}
+                    className="shrink-0 rounded px-2 py-1 text-red-700 hover:bg-red-50"
+                    onClick={() => {
+                      setPrintSets(prev => prev.filter(item => item.id !== set.id));
+                      if (editingSet === set.id) setEditingSet('');
+                      if (printSets.length === 1 && previewPurpose === 'basket') setPreviewPurpose(manualSource);
+                    }}>ลบ</button>
+                </div>)}
+                {previewPurpose === 'basket' && <Button variant="outline" size="sm" disabled={draftBusy || printing || Boolean(pendingJobId.current)} onClick={saveDraft}>บันทึกฉบับร่างไว้ทำต่อ</Button>}
+              </section>}
+              {previewPurpose !== 'basket' && <><div className="border-t pt-3 text-sm">
+                <div className="font-medium">กระดาษและจำนวน</div>
+                <p className="mt-1 text-slate-600">{a4Layout.paperLabel} · {previewSheetCount} {a4Layout.isRoll ? 'แถวตัด' : 'หน้า'} · {a4Layout.totalLabels} ดวง</p>
+              </div>
+              <details className="rounded-md border">
+                <summary className="cursor-pointer px-3 py-2 text-sm font-medium">ตั้งค่ากระดาษและกรอบเทียบ</summary>
               <PreviewMediaToolbar
+                compact
                 config={previewMedia}
                 onChange={setPreviewMedia}
                 savedPaperSize={a4Layout.savedPaperSize}
                 lbsGroup={a4Layout.lbsGroup}
               />
+              </details>
               {(() => {
                 const anyPreprint =
                   resolveCustomLayout(selectedLabelCode, '1')?.designMode === 'preprint' ||
                   resolveCustomLayout(selectedLabelCode, '2')?.designMode === 'preprint';
                 const showOffsetControls = anyPreprint || printOffsetX !== 0 || printOffsetY !== 0;
                 return (
-                  <div className="flex flex-wrap items-center justify-between gap-2 bg-amber-50/70 border border-amber-200 rounded px-2.5 py-1.5 shrink-0">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3 shrink-0">
                     <div className="flex flex-wrap items-center gap-2">
                       {anyPreprint && !a4Layout.isRoll && !a4Layout.isSingle ? (
                         <div className="inline-flex rounded border border-amber-300 bg-white p-0.5">
@@ -3382,35 +3631,14 @@ function AdaBarprintWorkspace({
                             เฉพาะหมึกที่จะพิมพ์จริง
                           </button>
                         </div>
-                      ) : (
-                        <span className="text-[11px] text-slate-700 font-medium">
-                          {a4Layout.isRoll ? 'ตัวอย่างแถบม้วนสติ๊กเกอร์ (Roll)' : a4Layout.isSingle ? 'ตัวอย่างป้ายเดี่ยว 1:1' : 'ตัวอย่างแผ่นกระดาษจริง'}
-                        </span>
-                      )}
-
-                      <div className="inline-flex items-center rounded border border-slate-200 bg-white p-0.5 text-[10px]">
-                        <span className="px-1.5 text-slate-500">ซูม:</span>
-                        {[
-                          { label: '45%', value: 0.45 },
-                          { label: '65%', value: 0.65 },
-                          { label: '85%', value: 0.85 },
-                          { label: '100%', value: 1 },
-                          { label: '150%', value: 1.5 },
-                        ].map((z) => (
-                          <button
-                            key={z.label}
-                            type="button"
-                            onClick={() => setSheetPreviewScale(z.value)}
-                            className={`px-1.5 py-0.5 rounded-xs font-mono ${
-                              Math.abs(sheetPreviewScale - z.value) < 0.01
-                                ? 'bg-[#007a87] text-white'
-                                : 'text-slate-600 hover:bg-slate-100'
-                            }`}
-                          >
-                            {z.label}
-                          </button>
-                        ))}
-                      </div>
+                      ) : null}
+                      <label className="flex items-center gap-2 text-sm">ซูม
+                        <select className="rounded-md border bg-white px-2 py-1" value={sheetPreviewScale}
+                          onChange={e => setSheetPreviewScale(Number(e.target.value))}>
+                          {[0.45, 0.65, 0.85, 1, 1.5].map(scale =>
+                            <option key={scale} value={scale}>{Math.round(scale * 100)}%</option>)}
+                        </select>
+                      </label>
                     </div>
 
                     {showOffsetControls && (
@@ -3453,12 +3681,38 @@ function AdaBarprintWorkspace({
                     )}
                   </div>
                 );
-              })()}
-              <div className="max-h-[48vh] overflow-y-auto pr-1 flex-1">
-                {hasSplitPreview ? (
+              })()}</>}
+            </aside>
+              <div key={previewPurpose} className="min-h-0 min-w-0 flex-1 overflow-auto bg-slate-100 px-3 py-2 sm:px-5" aria-label="ตัวอย่างป้าย">
+                {previewPurpose === 'basket' ? (
+                  <div className="space-y-6">
+                    {printSets.map(set => <section key={set.id} className="space-y-3">
+                      <h3 className="font-semibold">{set.name} · {set.format} · {set.labels} ดวง</h3>
+                      {set.units.map((unit, index) => unit.kind === 'WINDOWS'
+                        ? (unit.payload.pageImages as string[]).map((src, page) => <figure key={index + '-' + page} className="mx-auto max-w-lg">
+                            <figcaption className="mb-1 text-xs">{String(unit.payload.priTypeLabel)} · แผ่นที่ {page + 1} / {(unit.payload.pageImages as string[]).length}</figcaption>
+                            <img loading="lazy" className="h-auto w-full border bg-white" src={src} alt={set.name + ' แผ่นที่ ' + (page + 1)} />
+                          </figure>)
+                        : <div key={index} className="rounded border bg-white p-3 text-sm">
+                            <strong>รายการส่งเครื่องพิมพ์ LAN</strong>
+                            {(unit.payload.lines as PrintQueueRow[]).map((row,i) => <p key={i}>{row.barCode} · {row.pdtName} · {row.qty} ดวง</p>)}
+                          </div>)}
+                    </section>)}
+                  </div>
+                ) : previewPurpose && !printRows.length ? (
+                  <div className="flex min-h-full items-center justify-center px-4 py-6 text-center text-sm text-slate-700">
+                    <div className="w-full max-w-md">
+                      <p role="status">{eventError ? 'ตรวจรายการไม่สำเร็จ' : !eventLines ? 'กำลังตรวจรายการ…' : 'ไม่มีสินค้าที่เลือกตรงกับประเภทงานนี้'}</p>
+                      {eventError && <details className="mt-2 text-xs">
+                        <summary className="cursor-pointer">ดูสาเหตุ</summary>
+                        <p className="mt-2 max-h-28 overflow-auto break-words">{eventError.replace(/^encountered unexpected or invalid data:\s*/i, '')}</p>
+                      </details>}
+                    </div>
+                  </div>
+                ) : hasSplitPreview ? (
                   <div className="space-y-6 py-2 px-1">
                     {a4Layout.normalPages.length > 0 && (
-                      <div className="space-y-3 rounded-lg border border-teal-200/80 bg-teal-50/30 p-3">
+                      <div className="space-y-3">
                         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-teal-100 pb-2">
                           <span className="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
                             <span className="inline-block w-2 h-2 rounded-full bg-[#007a87]" />
@@ -3470,12 +3724,12 @@ function AdaBarprintWorkspace({
                           </span>
                         </div>
                         <div className="space-y-5">
-                          {renderPreviewSheets(a4Layout.normalPages, 'nor')}
+                          <PreviewPageWindow count={a4Layout.normalPages.length} render={(start, end) => renderPreviewSheets(a4Layout.normalPages, 'nor', start, end)} />
                         </div>
                       </div>
                     )}
                     {a4Layout.promoPages.length > 0 && (
-                      <div className="space-y-3 rounded-lg border border-red-200/80 bg-red-50/25 p-3">
+                      <div className="space-y-3">
                         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-red-100 pb-2">
                           <span className="text-xs font-semibold text-red-800 flex items-center gap-1.5">
                             <span className="inline-block w-2 h-2 rounded-full bg-red-600" />
@@ -3487,101 +3741,35 @@ function AdaBarprintWorkspace({
                           </span>
                         </div>
                         <div className="space-y-5">
-                          {renderPreviewSheets(a4Layout.promoPages, 'pmt')}
+                          <PreviewPageWindow count={a4Layout.promoPages.length} render={(start, end) => renderPreviewSheets(a4Layout.promoPages, 'pmt', start, end)} />
                         </div>
                       </div>
                     )}
                   </div>
                 ) : (
                   <div className="space-y-6 py-2 px-1">
-                    {renderPreviewSheets(a4Layout.pages, 'all')}
+                    <PreviewPageWindow count={a4Layout.pages.length} render={(start, end) => renderPreviewSheets(a4Layout.pages, 'all', start, end)} />
                   </div>
                 )}
               </div>
-            </TabsContent>
-            <TabsContent value="normal" className="border rounded p-2 max-h-64 overflow-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="text-xs">รหัส</TableHead>
-                    <TableHead className="text-xs">ชื่อสินค้า</TableHead>
-                    <TableHead className="text-xs">บาร์โค้ด</TableHead>
-                    <TableHead className="text-xs text-right">ราคา</TableHead>
-                    <TableHead className="text-xs text-right">จำนวน</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {normalRows.length === 0 ? (
-                    <TableRow><TableCell colSpan={5} className="text-center text-xs text-slate-400 py-4">ไม่มีรายการราคาปกติ</TableCell></TableRow>
-                  ) : normalRows.map((r, i) => (
-                    <TableRow key={i}>
-                      <TableCell className="text-xs font-mono">{r.pdtCode}</TableCell>
-                      <TableCell className="text-xs">{r.pdtName}</TableCell>
-                      <TableCell className="text-xs font-mono">{r.barCode}</TableCell>
-                      <TableCell className="text-xs text-right">{r.price.toFixed(2)}</TableCell>
-                      <TableCell className="text-xs text-right">{r.qty}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </TabsContent>
-            <TabsContent value="promo" className="border rounded p-2 max-h-64 overflow-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="text-xs">รหัส</TableHead>
-                    <TableHead className="text-xs">ชื่อสินค้า</TableHead>
-                    <TableHead className="text-xs">บาร์โค้ด</TableHead>
-                    <TableHead className="text-xs text-right">ราคาโปรฯ</TableHead>
-                    <TableHead className="text-xs text-right">จำนวน</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {promoRows.length === 0 ? (
-                    <TableRow><TableCell colSpan={5} className="text-center text-xs text-slate-400 py-4">ไม่มีรายการราคาโปรโมชัน</TableCell></TableRow>
-                  ) : promoRows.map((r, i) => (
-                    <TableRow key={i}>
-                      <TableCell className="text-xs font-mono">{r.pdtCode}</TableCell>
-                      <TableCell className="text-xs">{r.pdtName}</TableCell>
-                      <TableCell className="text-xs font-mono">{r.barCode}</TableCell>
-                      <TableCell className="text-xs text-right text-red-600 font-semibold">{r.price.toFixed(2)}</TableCell>
-                      <TableCell className="text-xs text-right">{r.qty}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </TabsContent>
-          </Tabs>
-          <DialogFooter className="flex-wrap gap-2">
-            {hasSplitPreview && (
-              <div className="w-full text-[11px] bg-teal-50/80 border border-teal-200 rounded px-2.5 py-1.5 text-slate-800 flex flex-wrap gap-x-4 gap-y-1">
-                {normalRows.length > 0 && (
-                  <span>
-                    <strong>{selectedTemplate?.FTLtmName||'ราคาปกติ'} ({normalRows.length} รายการ · {a4Layout.normalLabelsCount} ดวง):</strong>{' '}
-                    {activeDriverMapping?.normalPrinter || 'ใช้เครื่องด้านบน'}
-                    {activeDriverMapping?.normalTray ? ` · ถาด: ${activeDriverMapping.normalTray}` : ''}
-                  </span>
-                )}
-                {promoRows.length > 0 && (
-                  <span>
-                    <strong>ราคาโปรโมชัน ({promoRows.length} รายการ · {a4Layout.promoLabelsCount} ดวง):</strong>{' '}
-                    {activeDriverMapping?.promoPrinter || 'ใช้เครื่องด้านบน'}
-                    {activeDriverMapping?.promoTray ? ` · ถาด: ${activeDriverMapping.promoTray}` : ''}
-                  </span>
-                )}
+          </div>
+          <DialogFooter className="shrink-0 flex-wrap items-center gap-2 border-t bg-white px-5 py-3">
                 {labelSizes.find(s => s.FTLbsCode === selectedLabelCode)?.FTLbsGroup === '2' && !a4Layout.isRoll && !a4Layout.isSingle && (
                   <span className="w-full text-amber-700 font-medium">
-                    ⚠ รูปแบบ {selectedLabelCode} เป็นสติ๊กเกอร์ม้วน (Thermal) — ตอนนี้กำลัง Preview แบบจัดหน้าเป็นแผ่น {a4Layout.paperLabel} (สามารถสลับด้านบนเป็นโหมด ม้วน Thermal (Roll) เพื่อดู/พิมพ์แบบม้วนได้)
+                    แบบป้ายนี้ใช้กระดาษม้วน · ขณะนี้เลือก {a4Layout.paperLabel}
                   </span>
                 )}
-              </div>
-            )}
-            <Button variant="outline" onClick={() => setSendPrintOpen(false)}>ยกเลิก</Button>
-            <Button className="bg-[#007a87] hover:bg-[#00606b] text-white" onClick={() => handleConfirmSendPrint()} disabled={printing}>
+            {previewPurpose !== 'basket' && printSets.length > 0 && <p className="w-full text-xs text-slate-600">
+              {editingSet ? 'กดอัปเดตชุดนี้เพื่อเก็บการแก้ไข' : 'หากต้องการรวมชุดที่กำลังดู ให้กดเพิ่มชุดก่อนตรวจยอดรวม'}
+            </p>}
+            {previewPurpose !== 'basket' && (printing || !canPrepareSet) && <p role="status" className="w-full text-xs text-slate-700">
+              {printing ? 'กำลังเตรียมหน้าพิมพ์…' : !printRows.length ? (eventError ? 'โหลดข้อมูลไม่สำเร็จ' : previewPurpose && !eventLines ? 'กำลังตรวจรายการสินค้า…' : 'ยังไม่มีสินค้าที่เลือกตรงกับชุดนี้') : 'เลือกเครื่องพิมพ์ในแถบตั้งค่าก่อนเพิ่มชุด'}
+            </p>}
+            <Button variant="outline" disabled={printing || draftBusy} onClick={() => setSendPrintOpen(false)}>{previewPurpose === 'basket' ? 'เลือกสินค้าเพื่อเพิ่มชุดถัดไป' : 'กลับไปเลือกสินค้า'}</Button>
+            {previewPurpose !== 'basket' && <Button variant="outline" onClick={() => handleConfirmSendPrint(true)} disabled={printing || Boolean(pendingJobId.current) || !canPrepareSet}>{editingSet ? 'อัปเดตชุดนี้' : 'เพิ่มชุดนี้ไว้พิมพ์พร้อมกัน'}</Button>}
+            <Button className="bg-[#007a87] hover:bg-[#00606b] text-white" onClick={() => handleConfirmSendPrint()} disabled={printing || draftBusy || (previewPurpose === 'basket' && printSets.some(set => set.review)) || (!printSets.length && !canPrepareSet)}>
               {printing && <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />}
-              {hasSplitPreview
-                ? 'ยืนยันสั่งพิมพ์แยกเครื่อง/ถาด'
-                : 'ยืนยันสั่งพิมพ์'}
+              {printSets.length && previewPurpose !== 'basket' ? `ตรวจชุดที่เพิ่มไว้ (${printSets.length} ชุด)` : printSets.length ? `ยืนยันพิมพ์ ${printSets.length} ชุด (${printSets.reduce((sum,set) => sum+set.labels,0)} ดวง)` : `ยืนยันสั่งพิมพ์ (${a4Layout.totalLabels} ดวง)`}
             </Button>
           </DialogFooter>
         </DialogContent>
