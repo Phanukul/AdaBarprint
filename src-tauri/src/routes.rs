@@ -2340,6 +2340,7 @@ pub async fn get_promotions(State(st): State<AppState>) -> Response {
 pub struct ProductsQuery {
     pub keyword: Option<String>,
     pub limit: Option<i64>,
+    pub offset: Option<i64>,
     pub pdt_from: Option<String>,
     pub pdt_to: Option<String>,
     pub grp_from: Option<String>,
@@ -2550,7 +2551,7 @@ pub async fn get_products(
         }
 
         qb.push(" GROUP BY b.FTPdtCode, b.FTBarCode ORDER BY b.FTPdtCode ASC, b.FTBarCode ASC LIMIT ")
-            .push_bind(limit);
+            .push_bind(limit).push(" OFFSET ").push_bind(q.offset.unwrap_or(0).max(0));
 
         let rows_res = qb.build_query_as::<AccdProductRow>().fetch_all(accd).await;
 

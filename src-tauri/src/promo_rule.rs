@@ -82,9 +82,33 @@ pub fn unit_reward(rule: &Value, product: &str, barcode: &str) -> Result<Option<
     unit_reward_with_scope(rule, product, barcode, &ProductScope::default())
 }
 
+pub(crate) fn receipt_only(rule: &Value) -> bool {
+    let mut rewards = Vec::new();
+    if let Some(items) = rule["get"].as_array() { rewards.extend(items); }
+    if let Some(conditions) = rule["buy"].as_array() {
+        for condition in conditions {
+            for key in ["tiers", "everySteps"] {
+                if let Some(steps) = condition[key].as_array() {
+                    for step in steps {
+                        let Some(items) = step["get"].as_array() else { return false; };
+                        rewards.extend(items);
+                    }
+                }
+            }
+        }
+    }
+    !rewards.is_empty() && rewards.iter().all(|reward|
+        reward["target"] == "@bill" || (reward["type"] == "EN" && reward["target"].is_null()))
+}
+
 pub fn unit_reward_with_scope(rule: &Value, product: &str, barcode: &str, scope: &ProductScope) -> Result<Option<UnitReward>, String> {
     let status = rule["status"].as_str().unwrap_or("").to_ascii_lowercase();
     if ["closed", "inactive", "cancelled", "canceled", "draft"].contains(&status.as_str()) { return Ok(None); }
+    // A store-wide bill reward has no item target and does not set any shelf price.
+    if receipt_only(rule) && (rule["groups"].is_null() || rule["get"].as_array().is_some_and(|items|
+        !items.is_empty() && items.iter().all(|item| item["type"] == "EN"))) {
+        return Ok(None);
+    }
     let groups = rule["groups"].as_object().ok_or("โปรโมชั่นไม่มีข้อมูลกลุ่มสินค้า")?;
     let mut matched = Vec::new();
     for (key, group) in groups { if matches_group_with_scope(group, product, barcode, scope)? { matched.push(key.as_str()); } }

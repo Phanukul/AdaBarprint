@@ -111,6 +111,7 @@ pub async fn canonical_event_barcodes(pool: &SqlitePool, from: &str, to: &str, b
     for (doc, raw) in rows {
         let rule: serde_json::Value = serde_json::from_str(raw.as_deref().unwrap_or(""))
             .map_err(|_| sqlx::Error::Protocol(format!("ข้อมูลโปรโมชั่น {doc} ไม่สมบูรณ์")))?;
+        if rule["groups"].is_null() && crate::promo_rule::receipt_only(&rule) { continue; }
         let groups = rule["groups"].as_object().ok_or_else(|| sqlx::Error::Protocol(format!("โปรโมชั่น {doc} ไม่มีกลุ่มสินค้า")))?;
         for (product, barcode) in &bars {
             for group in groups.values() {

@@ -164,7 +164,8 @@ async fn refresh_attachment(c: &mut SqliteConnection) -> Result<(), sqlx::Error>
     if present>0 && adapted==0 {
         // Scope branch-bearing business rows. Branch selection is stored in main,
         // so existing pooled views also see changes without rebuilding the pool.
-        for table in ["TCNTPdtPrice4PDT","TCNTPdtAdjPriHD","TCNTPdtAdjPriDT","TCNTPdtPmtHD","TCNTPdtPmtDT","TCNTPdtPmtHD_L","TCNTPdtPmtCG"] {
+        let branch_has_agency: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_table_info('TCNMBranch','master') WHERE name='FTAgnCode'").fetch_one(&mut *c).await?;
+        for table in ["TCNTPdtPrice4PDT","TCNTPdtAdjPriHD","TCNTPdtAdjPriDT","TCNTPdtPmtHD","TCNTPdtPmtDT","TCNTPdtPmtHD_L","TCNTPdtPmtCG","TCNTPmtHD"] {
             let columns:Vec<(i64,String,String,i64,Option<String>,i64)>=sqlx::query_as(&format!("PRAGMA master.table_info(\"{table}\")")).fetch_all(&mut *c).await?;
             if columns.is_empty() {continue;}
             let has=|name:&str|columns.iter().any(|col|col.1==name);
@@ -176,7 +177,9 @@ async fn refresh_attachment(c: &mut SqliteConnection) -> Result<(), sqlx::Error>
                     _=>format!("\"{}\"",col.1.replace('"',"\"\"")),
                 }).collect::<Vec<_>>().join(",")
             } else {"*".into()};
-            let filter=if has("FTBchCode") {" WHERE COALESCE(FTBchCode,'')='' OR FTBchCode=(SELECT branch FROM main.ABStorage WHERE id=1)"} else {""};
+            let filter=if table=="TCNTPmtHD" && has("FTAgnCode") && branch_has_agency>0 {
+                " WHERE COALESCE(FTAgnCode,'')='' OR FTAgnCode=COALESCE((SELECT NULLIF(TRIM(b.FTAgnCode),'') FROM master.TCNMBranch b JOIN main.ABStorage s ON s.branch=b.FTBchCode WHERE s.id=1),FTAgnCode)"
+            } else if has("FTBchCode") {" WHERE COALESCE(FTBchCode,'')='' OR FTBchCode=(SELECT branch FROM main.ABStorage WHERE id=1)"} else {""};
             sqlx::query(&format!("CREATE TEMP VIEW IF NOT EXISTS \"{table}\" AS SELECT {projection} FROM master.\"{table}\"{filter}")).execute(&mut *c).await?;
         }
     }

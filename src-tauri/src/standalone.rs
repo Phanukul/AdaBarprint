@@ -286,14 +286,19 @@ async fn http(c: &SyncConfig, url: &str, body: Option<Value>) -> Result<Value> {
     let resp = req
         .send()
         .await
-        .map_err(|_| "เชื่อม API ไม่สำเร็จ ตรวจ URL เครือข่าย และสิทธิ์ API Key".to_string())?;
+        .map_err(|e| if e.is_timeout() { "หมดเวลารอ API" } else if e.is_connect() { "ติดต่อเซิร์ฟเวอร์ API ไม่ได้ ตรวจ URL และเครือข่าย" } else { "ส่งคำขอ API ไม่สำเร็จ ตรวจ URL และการตั้งค่า Header" }.to_string())?;
     if !resp.status().is_success() {
-        return Err("เชื่อม API ไม่สำเร็จ ตรวจ URL เครือข่าย และสิทธิ์ API Key".into());
+        let status = resp.status();
+        return Err(match status.as_u16() {
+            401 | 403 => format!("API ปฏิเสธสิทธิ์ (HTTP {status}) ตรวจ API Key และชื่อ Header"),
+            404 => format!("ไม่พบเส้นทาง API (HTTP {status}) ตรวจ URL และเวอร์ชัน"),
+            _ => format!("API ตอบกลับด้วย HTTP {status}"),
+        });
     }
     let bytes = resp
         .bytes()
         .await
-        .map_err(|_| "เชื่อม API ไม่สำเร็จ ตรวจ URL เครือข่าย และสิทธิ์ API Key".to_string())?;
+        .map_err(|_| "อ่านข้อมูลตอบกลับจาก API ไม่สำเร็จ".to_string())?;
     let v: Value =
         serde_json::from_slice(&bytes).map_err(|_| "API ไม่ได้ตอบกลับเป็น JSON".to_string())?;
     if !["001", "1"].contains(&v["rtCode"].as_str().unwrap_or("")) {

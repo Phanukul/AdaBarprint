@@ -380,7 +380,8 @@ async fn resolve_user_roles(pool: &SqlitePool, usr_code: &str) -> (Vec<String>, 
 }
 
 async fn resolve_default_branch(pool: &SqlitePool) -> (String, String) {
-    let bch_code: String = sqlx::query_scalar::<_, Option<String>>(
+    let configured = crate::storage::configured_branch(pool).await;
+    let bch_code = if configured.is_empty() { sqlx::query_scalar::<_, Option<String>>(
         "SELECT FTSopValue FROM TCNSSysOption WHERE FTSopCode = 'DefaultBranch' LIMIT 1",
     )
     .fetch_optional(pool)
@@ -390,7 +391,7 @@ async fn resolve_default_branch(pool: &SqlitePool) -> (String, String) {
     .flatten()
     .unwrap_or_default()
     .trim()
-    .to_string();
+    .to_string() } else { configured };
 
     if bch_code.is_empty() {
         return (String::new(), String::new());
@@ -526,7 +527,7 @@ pub async fn get_auth_users(
         return Json(json!({ "users": Vec::<AuthUserDto>::new() })).into_response();
     }
 
-    let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+    let rows: Vec<(String, Option<String>, Option<String>)> = match sqlx::query_as(
         r#"
         SELECT U.FTUsrCode AS id,
                MAX(NULLIF(TRIM(UL.FTUsrName), '')) AS name,
@@ -547,8 +548,10 @@ pub async fn get_auth_users(
     )
     .bind(cred_type)
     .fetch_all(&st.pool)
-    .await
-    .unwrap_or_default();
+    .await {
+        Ok(rows) => rows,
+        Err(_) => return err_json(StatusCode::SERVICE_UNAVAILABLE, "อ่านรายชื่อผู้ใช้ไม่ได้ กรุณาตรวจแหล่งข้อมูลและผลการดาวน์โหลดล่าสุด"),
+    };
 
     let mut users = Vec::with_capacity(rows.len());
     for (id, name_opt, login_opt) in rows {

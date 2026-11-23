@@ -154,18 +154,29 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
     setUsersLoading(true);
     setUsersError(null);
     fetchAuthUsers(credentialType)
-      .then((rows) => {
+      .then(async (rows) => {
         if (cancelled) return;
         setUsers(rows);
         setUserId((cur) => {
           if (cur.trim()) return cur;
           return resolveRecentUsers(rows, recentUserIds)[0]?.id ?? '';
         });
+        if (rows.length === 0 && credentialType !== '3') {
+          const response = await fetch('/api/storage');
+          if (response.ok) {
+            const source = await response.json();
+            if (!cancelled && source.connected === false) {
+              setUsersError(source.mode === 'STANDALONE' && !source.sync?.lastSuccess
+                ? 'ยังเปิดรายชื่อผู้ใช้ไม่ได้ เพราะแหล่งข้อมูลนี้ยังไม่มีผลดาวน์โหลดสำเร็จ กรุณาตรวจที่ตั้งค่าฐานข้อมูล (IT/Admin)'
+                : 'ยังเปิดฐานข้อมูลสินค้าและผู้ใช้ไม่ได้ กรุณาตรวจที่ตั้งค่าฐานข้อมูล (IT/Admin)');
+            }
+          }
+        }
       })
       .catch(() => {
         if (cancelled) return;
         setUsers([]);
-        setUsersError('โหลดรายชื่อผู้ใช้งานไม่สำเร็จ');
+        setUsersError('อ่านรายชื่อผู้ใช้ไม่ได้ กรุณาตรวจแหล่งข้อมูลและผลการดาวน์โหลดล่าสุด');
       })
       .finally(() => {
         if (!cancelled) setUsersLoading(false);
@@ -381,7 +392,9 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
                       ? `${selectedUser.name} · ${selectedUser.role}`
                       : userId.trim()
                         ? 'จะตรวจสอบรหัสผู้ใช้นี้เมื่อเข้าสู่ระบบ'
-                        : usersError ?? 'พิมพ์รหัสผู้ใช้ หรือเลือกจากรายชื่อ'}
+                        : usersError ?? (usersLoading ? 'กำลังโหลดรายชื่อผู้ใช้' : users.length === 0
+                          ? `ไม่พบผู้ใช้ที่มีสิทธิ์ใช้งานด้วย ${activeMethod.label} ในขณะนี้`
+                          : 'พิมพ์รหัสผู้ใช้ หรือเลือกจากรายชื่อ')}
                   </div>
                 </div>
               )}

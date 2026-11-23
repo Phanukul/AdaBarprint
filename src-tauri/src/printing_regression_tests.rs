@@ -21,6 +21,47 @@ async fn fixture()->(SqlitePool,SqliteConnection){
 fn schedule(event:&str)->models::TCNTLabelSchedule{
  serde_json::from_value(json!({"FTLscCode":"AUDIT","FTLscName":"Audit","FTLscStaUse":"1","FTLscRunTime":"00:00","FNLscPreSyncMin":0,"FNLscJitterSec":0,"FTLscDaysMask":"1111111","FTLscTriggerRules":event,"FTLscBchCode":"B1","FTLscPplCode":"","FTLscLbsCode":"ADA-100x38","FNLscQtyMode":1,"FTLscSyncMode":"LOCAL_ONLY","FNLscSyncRetry":0,"FNLscRetryWaitSec":0,"FTLscOnSyncFail":"ABORT","FTLscOnPrinterBack":"WAIT_CONFIRM","FNLscMisfireMin":0,"FTLscStaCoverSheet":"0"})).unwrap()
 }
+
+/// Exercise manual preparation against a read-only installed master, isolated from the live print queue.
+#[tokio::test]
+#[ignore]
+async fn installed_master_checks_all_active_barcodes() {
+    let master = std::env::var("ADABARPRINT_VERIFY_MASTER").unwrap();
+    let branch = std::env::var("ADABARPRINT_VERIFY_BRANCH").unwrap();
+    let (pool, conn) = fixture().await;
+    sqlx::query("UPDATE ABStorage SET path=?, branch=? WHERE id=1")
+        .bind(master).bind(&branch).execute(&pool).await.unwrap();
+    let products: Vec<(String,String)> = sqlx::query_as(
+        "SELECT DISTINCT FTPdtCode, FTBarCode FROM master.TCNMPdtBar
+         WHERE COALESCE(FTBarStaUse,'1')='1' AND TRIM(FTBarCode)<>''
+         ORDER BY FTPdtCode,FTBarCode"
+    ).fetch_all(&pool).await.unwrap();
+    let total = products.len();
+    assert!(total > 0);
+    let mut failures = std::collections::BTreeMap::new();
+    let mut no_price = 0;
+    for (code, barcode) in products {
+        let request = json!({"barcode":barcode,"pdtCode":code,"qty":1,"bchCode":branch,"priType":"1","verify":true});
+        let response = routes::post_build_line(State(routes::AppState { pool:pool.clone() }),
+            Json(serde_json::from_value(request).unwrap())).await;
+        if !response.status().is_success() {
+            let body = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+            let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let reason = error["error"].as_str().unwrap();
+            if reason.starts_with("ไม่พบราคาขายที่ใช้ได้") {
+                no_price += 1;
+            } else {
+                *failures.entry(reason.to_owned()).or_insert(0) += 1;
+            }
+        }
+    }
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM ABPrintJob").fetch_one(&pool).await.unwrap(), 0);
+    let blocked: usize = failures.values().copied().sum();
+    println!("Total {total}, prepared {}, missing price {no_price}, other blocks {failures:?}", total-no_price-blocked);
+    assert!(total > no_price+blocked, "No printable labels");
+    conn.close().await.unwrap();
+    pool.close().await;
+}
 async fn seed_product(c:&mut SqliteConnection){
  sqlx::raw_sql("INSERT INTO TCNMBranch(FTBchCode,FTPplCode,FTWahCode) VALUES('B1','','');
  INSERT INTO TCNMPdt(FTPdtCode,FDCreateOn) VALUES('P1','2026-01-01');
@@ -60,6 +101,8 @@ async fn canonical(c:&mut SqliteConnection) {
 async fn four_manual_events_resolve_group_promotion_and_revert_to_base() {
  let (pool,mut c)=fixture().await; seed_product(&mut c).await;
  price(&mut c,1,"2026-11-23","PCS","",100.0).await; canonical(&mut c).await;
+ sqlx::query("UPDATE TCNMBranch SET FTAgnCode='LOCAL' WHERE FTBchCode='B1'").execute(&mut c).await.unwrap();
+ sqlx::query("INSERT INTO TCNTPmtHD(FTAgnCode,FTPmhDocNo,FNPmhVersion,FTPmhName,FDPmhDStart,FDPmhDStop,FTPmhStaActive,FTPmhStaDoc,FTPmhStaPrcDoc,FTPmhRuleJson) SELECT 'OTHER','FOREIGN',FNPmhVersion,FTPmhName,FDPmhDStart,FDPmhDStop,FTPmhStaActive,FTPmhStaDoc,FTPmhStaPrcDoc,FTPmhRuleJson FROM TCNTPmtHD WHERE FTPmhDocNo='PROMO-GROUP'").execute(&mut c).await.unwrap();
  sqlx::query("UPDATE TCNMPdt SET FDCreateOn='2026-11-23' WHERE FTPdtCode='P1'").execute(&mut c).await.unwrap();
  for (event,day,expected) in [("PRICE_CHG","2026-11-23",100.0),("NEW_PDT","2026-11-23",79.0),("PROMO_START","2026-11-23",79.0),("PROMO_END_REVERT","2026-11-24",100.0)] {
   let response=print_center::manual_candidates(State(routes::AppState{pool:pool.clone()}),Json(print_center::ManualCandidates{source:event.into(),date:day.into(),size:"SH-100x38".into(),quantity:1})).await;
