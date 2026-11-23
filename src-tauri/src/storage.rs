@@ -1,22 +1,66 @@
 //! Print-owned SQLite main database with a read-only StoreFront attachment.
 //! Each pooled connection checks the persisted configuration before reuse so the
 //! desktop and standalone agent cannot silently keep different master paths.
-use std::{path::{Path, PathBuf}, time::Duration};
+use std::{path::{Path, PathBuf}, sync::OnceLock, time::Duration};
 use axum::{extract::State, http::StatusCode, response::{IntoResponse, Response}, Json};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteJournalMode}, Connection, SqliteConnection, SqlitePool};
 use crate::routes::AppState;
 
+static APP_DATA_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Sets the application data root directory from the runtime (used on mobile platforms).
+pub fn set_app_data_root(path: PathBuf) {
+    let _ = APP_DATA_ROOT.set(path);
+}
+
 pub fn data_root() -> PathBuf {
-    std::env::var_os("ADABARPRINT_DATA_DIR").map(PathBuf::from).unwrap_or_else(||
+    if let Some(dir) = std::env::var_os("ADABARPRINT_DATA_DIR") {
+        return PathBuf::from(dir);
+    }
+    if let Some(dir) = APP_DATA_ROOT.get() {
+        return dir.clone();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        #[cfg(not(test))]
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                return dir.to_path_buf();
+            }
+        }
         PathBuf::from(std::env::var_os("ProgramData").expect("Windows ProgramData is required"))
-            .join("AdaPos6.0").join("AdaBarprint"))
+            .join("AdaPos6.0")
+            .join("AdaBarprint")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::env::temp_dir().join("AdaBarprint")
+    }
+}
+
+pub fn is_dir_writable(dir: &Path) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(format!(".adabarprint-write-probe-{}", uuid::Uuid::new_v4()));
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&probe) {
+        Ok(file) => {
+            drop(file);
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
 }
 pub fn print_db_path() -> PathBuf { std::env::var_os("ADABARPRINT_DB_DIR").map(PathBuf::from).unwrap_or_else(||data_root().join("Data")).join("AdaBarprint.db") }
 pub fn default_master() -> PathBuf {
     PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into()))
         .join("AdaPos6.0").join("AdaStoreFront").join("Data").join("AdaAccD.db")
+}
+pub fn default_local_master() -> PathBuf {
+    data_root().join("Data").join("AdaAccD.db")
 }
 
 pub fn readonly_uri(path: &Path) -> String {
@@ -135,9 +179,9 @@ async fn refresh_attachment(c: &mut SqliteConnection) -> Result<(), sqlx::Error>
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all="camelCase")]
-pub struct Config { #[serde(default)] pub path: String, #[serde(default="pos_mode")] pub mode:String, #[serde(default)] pub sync:Option<crate::standalone::SyncConfig>, #[serde(default)] pub branch: String,
+pub struct Config { #[serde(default)] pub path: String, #[serde(default="unified_mode")] pub mode:String, #[serde(default)] pub sync:Option<crate::standalone::SyncConfig>, #[serde(default)] pub branch: String,
     #[serde(default="default_age")] pub max_age_minutes: i64, #[serde(default,skip_serializing)] pub pin: String, #[serde(default,skip_serializing)] pub new_pin: String }
-fn pos_mode()->String{"POS_SHARED".into()}
+fn unified_mode()->String{"UNIFIED".into()}
 fn default_age() -> i64 { 1440 }
 
 pub async fn validate(path: &str) -> Result<Value, String> {
@@ -322,6 +366,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unified_save_handles_local_and_pos_db_without_mode_dropdown() {
+        let (root, master, pool) = fixture().await;
+        crate::db::ensure_label_schema(&pool).await.unwrap();
+        crate::print_center::ensure_schema(&pool).await.unwrap();
+        crate::auth::ensure_auth_schema(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNSSysOption(FTSopCode,FTSopApp,FTSopName,FTSopValue) VALUES('AutoPrintAdminPin','PrintBar','PIN','1234')").execute(&pool).await.unwrap();
+
+        // First-time Admin Gate verification must require setting a new PIN when current PIN is 1234
+        let err_missing = verify_and_update_admin_pin(&pool, "1234", "").await.unwrap_err();
+        assert_eq!(err_missing.0, StatusCode::BAD_REQUEST);
+        assert!(err_missing.2);
+        assert!(!verify_and_update_admin_pin(&pool, "1234", "246810").await.unwrap());
+        assert!(!admin_pin_change_required(&pool).await);
+
+        let state = || State(AppState { pool: pool.clone() });
+        // 1) Unified save pointing to new local DB without API URL -> initializes local owned AdaAccD.db automatically
+        let local_db = root.join("LocalData").join("AdaAccD.db");
+        let res_local = save_config(state(), Json(Config {
+            mode: "UNIFIED".into(),
+            sync: None,
+            path: local_db.to_string_lossy().into_owned(),
+            branch: "00002".into(),
+            max_age_minutes: 1440,
+            pin: "246810".into(),
+            new_pin: String::new(),
+        })).await;
+        assert!(res_local.status().is_success());
+        assert!(local_db.is_file());
+        assert_eq!(crate::standalone::mode(&pool).await, "STANDALONE");
+        assert_eq!(configured_branch(&pool).await, "00002");
+
+        // 2) Unified save pointing to existing StoreFront POS DB without API URL -> read-only POS attachment automatically
+        let res_pos = save_config(state(), Json(Config {
+            mode: "UNIFIED".into(),
+            sync: None,
+            path: master.to_string_lossy().into_owned(),
+            branch: String::new(), // single branch auto-detected
+            max_age_minutes: 1440,
+            pin: "246810".into(),
+            new_pin: String::new(),
+        })).await;
+        assert!(res_pos.status().is_success());
+        assert_eq!(crate::standalone::mode(&pool).await, "POS_SHARED");
+        assert_eq!(configured_branch(&pool).await, "00001");
+        pool.close().await;
+    }
+
+    #[tokio::test]
     async fn manual_event_lookup_does_not_create_jobs_or_rules() {
         let (_root,master,pool)=fixture().await;
         crate::db::ensure_label_schema(&pool).await.unwrap();
@@ -385,13 +477,18 @@ mod tests {
 
 pub async fn status(pool: &SqlitePool) -> Value {
     let cfg:Option<(String,String,i64)> = sqlx::query_as("SELECT path,branch,max_age_minutes FROM main.ABStorage WHERE id=1").fetch_optional(pool).await.ok().flatten();
-    let (path,branch,age)=cfg.clone().unwrap_or((default_master().to_string_lossy().into_owned(),String::new(),1440));
+    let default_path = default_local_master();
+    let (path,branch,age)=cfg.clone().unwrap_or((default_path.to_string_lossy().into_owned(),String::new(),1440));
     let checked=validate(&path).await;
     let attached=sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM master.TCNMBranch").fetch_one(pool).await.is_ok();
     let connected=cfg.is_some() && checked.is_ok() && attached;
-    json!({"sourceVersion":3,"adminPinChangeRequired":admin_pin_change_required(pool).await,"mode":crate::standalone::mode(pool).await,"standalonePath":if crate::standalone::mode(pool).await=="STANDALONE" {PathBuf::from(&path)}else{crate::standalone::own_path()},"sync":crate::standalone::status(pool).await,"configured":cfg.is_some(),"connected":connected,"path":path,"branch":branch,"maxAgeMinutes":age,
+    let root_dir = data_root();
+    let sync_status = crate::standalone::status(pool).await;
+    let api_configured = sync_status["config"]["baseUrl"].as_str().map(|s| !s.trim().is_empty()).unwrap_or(false);
+    json!({"sourceVersion":4,"platform":std::env::consts::OS,"supportsPosShared":cfg!(target_os="windows"),"supportsWindowsPrint":cfg!(target_os="windows"),"adminPinChangeRequired":admin_pin_change_required(pool).await,"mode":crate::standalone::mode(pool).await,"apiConfigured":api_configured,"defaultPath":default_path,"standalonePath":if crate::standalone::mode(pool).await=="STANDALONE" {PathBuf::from(&path)}else{crate::standalone::own_path()},"sync":sync_status,"configured":cfg.is_some(),"connected":connected,"path":path,"branch":branch,"maxAgeMinutes":age,
+        "dataRoot":root_dir,"dataRootWritable":is_dir_writable(&root_dir),
         "printDb":print_db_path(),"readOnly":true,"autoReady":connected && auto_ready(pool).await,
-        "error":checked.err(),"message":"ข้อมูลสินค้าอัปเดตโดย StoreFront; Auto รอหลักฐานการอัปเดตสินค้าและราคาที่อยู่ในระยะเวลาที่กำหนด"})
+        "error":checked.err(),"message":"พร้อมใช้งานกับแหล่งข้อมูลสินค้า และรัน Profile ผ่าน Windows Task Scheduler"})
 }
 
 fn error(message: impl ToString) -> Response { (StatusCode::BAD_REQUEST,Json(json!({"error":message.to_string()}))).into_response() }
@@ -412,41 +509,179 @@ async fn matches_admin_pin(pool:&SqlitePool,pin:&str)->bool {
     let saved=saved_admin_pin(pool).await;
     let expected=if let Some(protected)=saved.strip_prefix("dpapi:") {
         match crate::standalone::protect(protected,true).await {Ok(v)=>v,Err(_)=>return false}
+    }else if saved.starts_with("local:"){
+        match crate::standalone::protect(&saved,true).await {Ok(v)=>v,Err(_)=>return false}
     }else{saved};
     pin.trim()==expected
 }
 pub async fn valid_pin(pool:&SqlitePool,pin:&str)->bool {
     !admin_pin_change_required(pool).await && matches_admin_pin(pool,pin).await
 }
+fn validate_new_pin_value(current_pin: &str, new_pin: &str) -> Result<(), &'static str> {
+    let np = new_pin.trim();
+    if !(6..=12).contains(&np.len())
+        || !np.bytes().all(|b| b.is_ascii_digit())
+        || np == current_pin.trim()
+        || np.bytes().all(|b| Some(b) == np.bytes().next())
+    {
+        return Err("PIN ใหม่ต้องเป็นตัวเลข 6–12 หลัก ไม่ซ้ำรหัสเดิมและไม่เป็นตัวเลขเดียวกันทั้งหมด");
+    }
+    Ok(())
+}
+async fn encrypt_admin_pin(new_pin: &str) -> Result<String, String> {
+    let encrypted = crate::standalone::protect(new_pin.trim(), false).await?;
+    Ok(if encrypted.starts_with("local:") { encrypted } else { format!("dpapi:{encrypted}") })
+}
+pub async fn verify_and_update_admin_pin(pool: &SqlitePool, pin: &str, new_pin: &str) -> Result<bool, (StatusCode, &'static str, bool)> {
+    if !matches_admin_pin(pool, pin).await {
+        return Err((StatusCode::UNAUTHORIZED, "รหัส PIN ผู้ดูแลระบบไม่ถูกต้อง", false));
+    }
+    let must_change = admin_pin_change_required(pool).await;
+    let trimmed_new = new_pin.trim();
+    if must_change && trimmed_new.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "กรุณาตั้ง PIN ผู้ดูแลระบบใหม่ (ตัวเลข 6–12 หลัก) ก่อนเข้าใช้งาน", true));
+    }
+    if !trimmed_new.is_empty() {
+        validate_new_pin_value(pin, trimmed_new).map_err(|msg| (StatusCode::BAD_REQUEST, msg, must_change))?;
+        let protected = encrypt_admin_pin(trimmed_new)
+            .await
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "ไม่สามารถเข้ารหัส PIN ใหม่ได้", must_change))?;
+        sqlx::query("INSERT INTO TCNSSysOption(FTSopCode,FTSopApp,FTSopName,FTSopValue) VALUES('AutoPrintAdminPin','PrintBar','Admin PIN',?) ON CONFLICT(FTSopCode) DO UPDATE SET FTSopValue=excluded.FTSopValue")
+            .bind(protected)
+            .execute(pool)
+            .await
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "บันทึก PIN ใหม่ไม่สำเร็จ", must_change))?;
+        return Ok(false);
+    }
+    Ok(must_change)
+}
+async fn has_barprint_identity(path: &Path) -> Result<bool, String> {
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .read_only(true)
+        .create_if_missing(false)
+        .busy_timeout(Duration::from_secs(3));
+    let mut c = SqliteConnection::connect_with(&options)
+        .await
+        .map_err(|_| "เปิดไฟล์ฐานข้อมูลเพื่อตรวจสอบไม่ได้".to_string())?;
+    let owned: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='ABMasterIdentity'",
+    )
+    .fetch_one(&mut c)
+    .await
+    .map_err(|e| e.to_string())?;
+    let _ = c.close().await;
+    Ok(owned > 0)
+}
 pub async fn save_config(State(st):State<AppState>,Json(mut cfg):Json<Config>) -> Response {
     if !matches_admin_pin(&st.pool,&cfg.pin).await{return (StatusCode::UNAUTHORIZED,Json(json!({"error":"กรุณาระบุ PIN ผู้ดูแลระบบให้ถูกต้อง"}))).into_response();}
     let must_change=admin_pin_change_required(&st.pool).await;
     if must_change && cfg.new_pin.trim().is_empty(){return error("กรุณาตั้ง PIN ผู้ดูแลระบบใหม่ก่อนเริ่มใช้งาน");}
     let new_pin=cfg.new_pin.trim();
-    if !new_pin.is_empty() && (!(6..=12).contains(&new_pin.len()) || !new_pin.bytes().all(|b|b.is_ascii_digit()) || new_pin==cfg.pin.trim() || new_pin.bytes().all(|b|Some(b)==new_pin.bytes().next())) {
-        return error("PIN ใหม่ต้องเป็นตัวเลข 6–12 หลัก ไม่ซ้ำรหัสเดิมและไม่เป็นตัวเลขเดียวกันทั้งหมด");
+    if !new_pin.is_empty() {
+        if let Err(msg) = validate_new_pin_value(&cfg.pin, new_pin) {
+            return error(msg);
+        }
     }
     let protected_pin=if !new_pin.is_empty(){
-        Some(format!("dpapi:{}",match crate::standalone::protect(new_pin,false).await{Ok(v)=>v,Err(e)=>return error(e)}))
+        match encrypt_admin_pin(new_pin).await {Ok(v)=>Some(v),Err(e)=>return error(e)}
     }else{None};
-    if !["POS_SHARED","STANDALONE"].contains(&cfg.mode.as_str()){return error("โหมดแหล่งข้อมูลไม่ถูกต้อง");}
-    let mut sync_json=String::from("{}");
-    if cfg.mode=="STANDALONE" {
-        let Some(mut sync)=cfg.sync.take() else{return error("ระบุการเชื่อมต่อ API2PSMaster");};
-        if let Err(e)=crate::standalone::validate_config(&sync){return error(e);}
-        cfg.branch=sync.branch.trim().into();
-        if sync.api_key.is_empty(){
-            let previous:String=sqlx::query_scalar("SELECT config FROM ABSource WHERE id=1").fetch_optional(&st.pool).await.ok().flatten().unwrap_or_default();
-            let old:Option<crate::standalone::SyncConfig>=serde_json::from_str(&previous).ok();
-            if let Some(old)=old{if old.base_url!=sync.base_url||old.agency!=sync.agency||old.branch!=sync.branch{return error("การเปลี่ยนปลายทางหรือสาขาต้องระบุ API Key ใหม่");}sync.api_key=old.api_key;}
-            if sync.api_key.is_empty(){return error("ระบุ API Key");}
-        }else{sync.api_key=match crate::standalone::protect(&sync.api_key,false).await{Ok(k)=>k,Err(e)=>return error(e)};}
-        sync_json=serde_json::to_string(&sync).unwrap();if cfg.path.trim().is_empty(){cfg.path=crate::standalone::own_path().to_string_lossy().into_owned();}
-        if let Err(e)=crate::standalone::prepare_destination(Path::new(cfg.path.trim())).await{return error(e);}
+    if !["UNIFIED","POS_SHARED","STANDALONE"].contains(&cfg.mode.as_str()){return error("โหมดแหล่งข้อมูลไม่ถูกต้อง");}
+    if cfg.path.trim().is_empty() {
+        cfg.path = default_local_master().to_string_lossy().into_owned();
+    }
+    let has_api = cfg
+        .sync
+        .as_ref()
+        .map(|s| !s.base_url.trim().is_empty())
+        .unwrap_or(false);
+    let mut sync_json = String::from("{}");
+    let effective_mode: String;
+    if has_api {
+        let Some(mut sync) = cfg.sync.take() else { return error("ระบุการเชื่อมต่อ API2PSMaster"); };
+        sync.base_url = sync.base_url.trim().to_string();
+        sync.agency = sync.agency.trim().to_string();
+        sync.pos = sync.pos.trim().to_string();
+        if sync.branch.trim().is_empty() {
+            sync.branch = cfg.branch.trim().to_string();
+        } else {
+            sync.branch = sync.branch.trim().to_string();
+        }
+        if let Err(e) = crate::standalone::validate_config(&sync) {
+            return error(e);
+        }
+        cfg.branch = sync.branch.clone();
+        if sync.api_key.is_empty() {
+            let previous: String = sqlx::query_scalar("SELECT config FROM ABSource WHERE id=1")
+                .fetch_optional(&st.pool)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let old: Option<crate::standalone::SyncConfig> = serde_json::from_str(&previous).ok();
+            if let Some(old) = old {
+                if old.base_url.trim() != sync.base_url || old.agency.trim() != sync.agency || old.branch.trim() != sync.branch {
+                    return error("การเปลี่ยนปลายทางหรือสาขาต้องระบุ API Key ใหม่");
+                }
+                sync.api_key = old.api_key;
+            }
+            if sync.api_key.is_empty() {
+                return error("ระบุ API Key");
+            }
+        } else {
+            sync.api_key = match crate::standalone::protect(&sync.api_key, false).await {
+                Ok(k) => k,
+                Err(e) => return error(e),
+            };
+        }
+        sync_json = serde_json::to_string(&sync).unwrap();
+        if let Err(e) = crate::standalone::prepare_destination(Path::new(cfg.path.trim())).await {
+            return error(e);
+        }
+        effective_mode = "STANDALONE".into();
+    } else {
+        let target_path = Path::new(cfg.path.trim());
+        if !target_path.is_absolute() {
+            return error("ระบุพาธเต็มของไฟล์ AdaAccD.db");
+        }
+        if target_path.is_file() {
+            let is_owned = match has_barprint_identity(target_path).await {
+                Ok(v) => v,
+                Err(e) => return error(e),
+            };
+            if is_owned {
+                effective_mode = "STANDALONE".into();
+                if cfg.branch.trim().is_empty() {
+                    cfg.branch = "00001".into();
+                }
+            } else {
+                let check = match validate(&cfg.path).await {
+                    Ok(v) => v,
+                    Err(e) => return error(e),
+                };
+                let branch_arr = check["branches"].as_array().cloned().unwrap_or_default();
+                if cfg.branch.trim().is_empty() && branch_arr.len() == 1 {
+                    cfg.branch = branch_arr[0]["code"].as_str().unwrap_or("").to_string();
+                }
+                if !branch_arr.iter().any(|b| b["code"].as_str() == Some(cfg.branch.trim())) {
+                    return error("เลือกสาขาที่มีอยู่ในฐานข้อมูล Master (กดตรวจสอบไฟล์ DB ก่อนบันทึก)");
+                }
+                effective_mode = "POS_SHARED".into();
+            }
+        } else {
+            if cfg.mode == "POS_SHARED" {
+                return error("เลือกไฟล์ AdaAccD.db ที่มีอยู่จริงด้วยพาธเต็ม");
+            }
+            if let Err(e) = crate::standalone::prepare_destination(target_path).await {
+                return error(e);
+            }
+            if cfg.branch.trim().is_empty() {
+                cfg.branch = "00001".into();
+            }
+            effective_mode = "STANDALONE".into();
+        }
     }
     if !(1..=10080).contains(&cfg.max_age_minutes) { return error("อายุข้อมูลต้องอยู่ระหว่าง 1 ถึง 10080 นาที"); }
-    if cfg.mode=="POS_SHARED" { let check=match validate(&cfg.path).await {Ok(v)=>v,Err(e)=>return error(e)};
-    if !check["branches"].as_array().unwrap().iter().any(|b| b["code"].as_str()==Some(cfg.branch.trim())) { return error("เลือกสาขาที่มีอยู่ใน Master"); }}
     let canonical=match std::fs::canonicalize(cfg.path.trim()) { Ok(p)=>p.to_string_lossy().trim_start_matches("\\\\?\\").to_string(),Err(e)=>return error(e)};
     let result:Result<(),sqlx::Error>=async {
         let mut tx=st.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -459,7 +694,7 @@ pub async fn save_config(State(st):State<AppState>,Json(mut cfg):Json<Config>) -
         let mut source_changed=source.as_ref().map(|v| {
             let before:Value=serde_json::from_str(&v.1).unwrap_or(Value::Null);
             let after:Value=serde_json::from_str(&sync_json).unwrap_or(Value::Null);
-            v.0!=cfg.mode || ["baseUrl","agency","branch","pos","shop"].iter().any(|key|before[*key]!=after[*key])
+            v.0!=effective_mode || ["baseUrl","agency","branch","pos","shop"].iter().any(|key|before[*key]!=after[*key])
         }).unwrap_or(true);
         let old:Option<(String,String)>=sqlx::query_as("SELECT path,branch FROM ABStorage WHERE id=1").fetch_optional(&mut *tx).await?;
         source_changed |= old.as_ref().map(|v|v.0!=canonical || v.1!=cfg.branch.trim()).unwrap_or(true);
@@ -473,13 +708,41 @@ pub async fn save_config(State(st):State<AppState>,Json(mut cfg):Json<Config>) -
         sqlx::query("INSERT INTO ABStorage(id,path,branch,max_age_minutes) VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,branch=excluded.branch,max_age_minutes=excluded.max_age_minutes")
             .bind(&canonical).bind(cfg.branch.trim()).bind(cfg.max_age_minutes).execute(&mut *tx).await?;
         sqlx::query("UPDATE TCNSSysOption SET FTSopValue=? WHERE FTSopCode='DefaultBranch'").bind(cfg.branch.trim()).execute(&mut *tx).await?;
-        sqlx::query("INSERT INTO ABSource(id,mode,config) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET mode=excluded.mode,config=excluded.config,last_success=CASE WHEN ? THEN '' ELSE last_success END,status=CASE WHEN ? THEN 'รอดาวน์โหลดครั้งแรก' ELSE status END").bind(&cfg.mode).bind(&sync_json).bind(source_changed).bind(source_changed).execute(&mut *tx).await?;
+        let next_last_success_sql = if has_api {
+            "CASE WHEN ? THEN '' ELSE last_success END"
+        } else {
+            "CASE WHEN NULLIF(last_success,'') IS NULL THEN datetime('now') ELSE last_success END"
+        };
+        let next_status = if has_api {
+            "รอดาวน์โหลดครั้งแรก"
+        } else if effective_mode == "POS_SHARED" {
+            "เชื่อมต่อฐานข้อมูล Master แล้ว (อ่านอย่างเดียว)"
+        } else {
+            "พร้อมใช้งานฐานข้อมูลภายในเครื่อง (Manual / Import)"
+        };
+        let query_sql = format!(
+            "INSERT INTO ABSource(id,mode,config,status,last_success) VALUES(1,?,?,?,{}) ON CONFLICT(id) DO UPDATE SET mode=excluded.mode,config=excluded.config,last_success={},status=CASE WHEN ? OR ?='' THEN ? ELSE status END",
+            if has_api { "''" } else { "datetime('now')" },
+            next_last_success_sql
+        );
+        let mut q = sqlx::query(&query_sql)
+            .bind(&effective_mode)
+            .bind(&sync_json)
+            .bind(next_status);
+        if has_api {
+            q = q.bind(source_changed);
+        }
+        q.bind(source_changed)
+            .bind(if has_api { "api" } else { "" })
+            .bind(next_status)
+            .execute(&mut *tx)
+            .await?;
         if let Some(pin)=protected_pin {
             sqlx::query("UPDATE TCNSSysOption SET FTSopValue=? WHERE FTSopCode='AutoPrintAdminPin'").bind(pin).execute(&mut *tx).await?;
         }
         tx.commit().await
     }.await;
-    match result {Ok(())=>Json(json!({"ok":true,"message":"บันทึกแล้ว กรุณาเข้าสู่ระบบใหม่และตรวจตารางพิมพ์ก่อนเปิด Auto"})).into_response(),Err(e)=>error(e)}
+    match result {Ok(())=>Json(json!({"ok":true,"message":"บันทึกแหล่งข้อมูลแล้ว กรุณาเข้าสู่ระบบเพื่อใช้งาน"})).into_response(),Err(e)=>error(e)}
 }
 
 #[cfg(test)]

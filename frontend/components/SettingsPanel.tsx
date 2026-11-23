@@ -134,7 +134,7 @@ export interface SettingsWindowsPrinter {
 }
 
 interface SettingsPanelProps {
-  workspace?: 'settings' | 'jobs';
+  workspace?: 'settings' | 'jobs' | 'profiles';
 
   authUser: AuthSessionUser;
   allLabelSizes: ConfigLabelSizeRow[];
@@ -280,9 +280,93 @@ export function SettingsPanel({
     if (!ENABLE_AUTO_PRINT_HISTORY_TAB && initialSubTab === 'autoprint_history') {
       return 'sizes';
     }
-    if(workspace==='jobs')return 'jobs';
+    if (workspace === 'jobs') return 'jobs';
+    if (workspace === 'profiles') return 'autoprint';
     return initialSubTab || 'devices';
   });
+  const [adminChecked, setAdminChecked] = useState(workspace !== 'settings');
+  const [adminGranted, setAdminGranted] = useState(workspace !== 'settings');
+  const [pinChangeRequired, setPinChangeRequired] = useState(false);
+  const [adminPinInput, setAdminPinInput] = useState('');
+  const [adminNewPinInput, setAdminNewPinInput] = useState('');
+  const [adminConfirmPinInput, setAdminConfirmPinInput] = useState('');
+  const [adminPinError, setAdminPinError] = useState('');
+  const [verifyingAdminPin, setVerifyingAdminPin] = useState(false);
+
+  React.useEffect(() => {
+    if (workspace !== 'settings') {
+      setAdminChecked(true);
+      setAdminGranted(true);
+      return;
+    }
+    let active = true;
+    fetch('/api/config/admin-status')
+      .then((r) => r.json())
+      .then((d) => {
+        if (!active) return;
+        setAdminGranted(Boolean(d?.adminGranted));
+        setPinChangeRequired(Boolean(d?.pinChangeRequired));
+        setAdminChecked(true);
+      })
+      .catch(() => {
+        if (active) setAdminChecked(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [workspace]);
+
+  const handleUnlockAdminConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!adminPinInput.trim() || verifyingAdminPin) return;
+    if (pinChangeRequired) {
+      if (!adminNewPinInput.trim() || adminNewPinInput.trim() !== adminConfirmPinInput.trim()) {
+        setAdminPinError('กรุณากรอก PIN ผู้ดูแลระบบใหม่ (6–12 หลัก) และยืนยันให้ตรงกัน');
+        return;
+      }
+    }
+    setVerifyingAdminPin(true);
+    setAdminPinError('');
+    try {
+      const res = await fetch('/api/config/admin-verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pin: adminPinInput.trim(),
+          ...(pinChangeRequired ? { newPin: adminNewPinInput.trim() } : {}),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (data?.pinChangeRequired) setPinChangeRequired(true);
+        throw new Error(data?.error || 'รหัส PIN ผู้ดูแลระบบไม่ถูกต้อง');
+      }
+      setPinChangeRequired(Boolean(data?.pinChangeRequired));
+      setAdminGranted(true);
+      setAdminPinInput('');
+      setAdminNewPinInput('');
+      setAdminConfirmPinInput('');
+      toast.success('ยืนยันสิทธิ์ผู้ดูแลระบบ (IT / Admin) สำเร็จ');
+    } catch (err) {
+      setAdminPinError(err instanceof Error ? err.message : 'ยืนยันสิทธิ์ไม่สำเร็จ');
+    } finally {
+      setVerifyingAdminPin(false);
+    }
+  };
+
+  const handleLockAdminConfig = async () => {
+    try {
+      await fetch('/api/config/admin-revoke', { method: 'POST' });
+    } catch {
+      // ignore network error; lock UI state regardless
+    }
+    setAdminGranted(false);
+    setAdminPinInput('');
+    setAdminNewPinInput('');
+    setAdminConfirmPinInput('');
+    setAdminPinError('');
+    toast.info('ล็อกสิทธิ์ผู้ดูแลระบบ (IT / Admin) เรียบร้อยแล้ว');
+  };
 
   // ── Tab 1: Label Sizes State ───────────────────────────────────────────────
   const [sizeSearch, setSizeSearch] = useState('');
@@ -921,19 +1005,130 @@ export function SettingsPanel({
     }
   };
 
+  const isAdminLockedView =
+    workspace === 'settings' &&
+    ['connection', 'system'].includes(subTab) &&
+    (!adminChecked || !adminGranted);
+
+  const renderAdminGateCard = (title: string) => (
+    <div className="max-w-md mx-auto py-4">
+      <Card className="border-slate-200 shadow-sm bg-white py-0 overflow-hidden">
+        <CardHeader className="bg-[#3d4a57] text-white py-3 px-4">
+          <CardTitle className="text-sm font-semibold">🔒 {title}</CardTitle>
+        </CardHeader>
+        <CardContent className="p-5 space-y-4">
+          <p className="text-sm text-slate-600">
+            กรุณายืนยันด้วย PIN ผู้ดูแลระบบ (IT / Admin)
+          </p>
+          <form onSubmit={handleUnlockAdminConfig} className="space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="settings-admin-pin" className="text-xs font-medium">
+                {pinChangeRequired ? 'PIN ผู้ดูแลระบบปัจจุบัน (ค่าเริ่มต้น 1234)' : 'PIN ผู้ดูแลระบบ AdaBarprint'}
+              </Label>
+              <Input
+                id="settings-admin-pin"
+                type="password"
+                inputMode="numeric"
+                autoComplete="off"
+                autoFocus
+                value={adminPinInput}
+                disabled={verifyingAdminPin}
+                onChange={(e) => {
+                  setAdminPinError('');
+                  setAdminPinInput(e.target.value);
+                }}
+                placeholder="กรอก PIN ผู้ดูแล..."
+              />
+            </div>
+            {pinChangeRequired && (
+              <>
+                <div className="space-y-1.5">
+                  <Label htmlFor="settings-admin-new-pin" className="text-xs font-medium">
+                    ตั้ง PIN ผู้ดูแลระบบใหม่ (ตัวเลข 6–12 หลัก)
+                  </Label>
+                  <Input
+                    id="settings-admin-new-pin"
+                    type="password"
+                    inputMode="numeric"
+                    autoComplete="new-password"
+                    value={adminNewPinInput}
+                    disabled={verifyingAdminPin}
+                    onChange={(e) => {
+                      setAdminPinError('');
+                      setAdminNewPinInput(e.target.value);
+                    }}
+                    placeholder="กรอก PIN ใหม่..."
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="settings-admin-confirm-pin" className="text-xs font-medium">
+                    ยืนยัน PIN ผู้ดูแลระบบใหม่
+                  </Label>
+                  <Input
+                    id="settings-admin-confirm-pin"
+                    type="password"
+                    inputMode="numeric"
+                    autoComplete="new-password"
+                    value={adminConfirmPinInput}
+                    disabled={verifyingAdminPin}
+                    onChange={(e) => {
+                      setAdminPinError('');
+                      setAdminConfirmPinInput(e.target.value);
+                    }}
+                    placeholder="กรอก PIN ใหม่อีกครั้ง..."
+                  />
+                </div>
+              </>
+            )}
+            {adminPinError && (
+              <p role="alert" className="text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2.5">
+                {adminPinError}
+              </p>
+            )}
+            <Button
+              type="submit"
+              className="w-full bg-[#007a87] hover:bg-[#00606b] text-white"
+              disabled={!adminPinInput.trim() || (pinChangeRequired && (!adminNewPinInput.trim() || !adminConfirmPinInput.trim())) || verifyingAdminPin}
+            >
+              {verifyingAdminPin ? 'กำลังตรวจสอบ...' : pinChangeRequired ? 'ตั้ง PIN ใหม่และปลดล็อกสิทธิ์ Admin' : 'ยืนยัน PIN ผู้ดูแลระบบ'}
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
+    </div>
+  );
+
   return (
     <main className="max-w-[1600px] min-w-0 w-full mx-auto p-2 sm:p-4 space-y-4">
       <Tabs value={subTab} onValueChange={(v) => setSubTab(v as typeof subTab)} className="space-y-4">
         <div className="space-y-3">
-          {workspace==='jobs'?<TabsList className="bg-white border p-1 h-auto w-full justify-start overflow-x-auto"><TabsTrigger value="jobs" className="min-h-10">งานพิมพ์</TabsTrigger>{ENABLE_AUTO_PRINT_HISTORY_TAB&&<TabsTrigger value="autoprint_history" className="min-h-10">ประวัติก่อนย้ายระบบ</TabsTrigger>}</TabsList>:<>
-            <label className="block sm:hidden text-sm space-y-2"><span className="font-medium">หมวดการตั้งค่า</span><select className="w-full rounded-lg border bg-white p-3" value={subTab==='printers'?'devices':subTab} onChange={e=>setSubTab(e.target.value as typeof subTab)}>{[['sizes','ขนาดและกระดาษ'],['preprints','กระดาษพิมพ์พื้นหลัง'],['devices','เครื่องพิมพ์'],['connection','แหล่งข้อมูล'],['system','ค่าเริ่มต้น'],...(ENABLE_AUTO_PRINT_UI?[['autoprint','ตั้งเวลาพิมพ์']]:[])].map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>
+          {workspace==='jobs'?<TabsList className="bg-white border p-1 h-auto w-full justify-start overflow-x-auto"><TabsTrigger value="jobs" className="min-h-10">งานพิมพ์</TabsTrigger>{ENABLE_AUTO_PRINT_HISTORY_TAB&&<TabsTrigger value="autoprint_history" className="min-h-10">ประวัติก่อนย้ายระบบ</TabsTrigger>}</TabsList>:workspace==='profiles'?null:<>
+            <label className="block sm:hidden text-sm space-y-2"><span className="font-medium">หมวดการตั้งค่า</span><select className="w-full rounded-lg border bg-white p-3" value={subTab==='printers'?'devices':subTab} onChange={e=>setSubTab(e.target.value as typeof subTab)}>{[['sizes','ขนาดและกระดาษ'],['preprints','กระดาษพิมพ์พื้นหลัง'],['devices','เครื่องพิมพ์'],['connection','🔒 แหล่งข้อมูล (IT/Admin)'],['system','🔒 ค่าเริ่มต้น (IT/Admin)'],...(ENABLE_AUTO_PRINT_UI?[['autoprint','จัดการ Profile']]:[])].map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>
             <div className="hidden sm:block"><TabsList className="bg-white border border-slate-200 p-1 h-auto min-h-11 w-full max-w-full flex-nowrap overflow-x-auto justify-start gap-1">
-              {([['sizes','ขนาดและกระดาษ'],['preprints','กระดาษพิมพ์พื้นหลัง'],['devices','เครื่องพิมพ์'],['connection','แหล่งข้อมูล'],['system','ค่าเริ่มต้น'],...(ENABLE_AUTO_PRINT_UI?[['autoprint','ตั้งเวลาพิมพ์']]:[])]).map(([value,label])=><TabsTrigger key={value} value={value==='devices'&&subTab==='printers'?'printers':value} className="flex-none min-h-10 text-sm px-3">{label}</TabsTrigger>)}
+              {([['sizes','ขนาดและกระดาษ'],['preprints','กระดาษพิมพ์พื้นหลัง'],['devices','เครื่องพิมพ์'],...(ENABLE_AUTO_PRINT_UI?[['autoprint','จัดการ Profile']]:[]),['connection','🔒 แหล่งข้อมูล (IT/Admin)'],['system','🔒 ค่าเริ่มต้น (IT/Admin)']]).map(([value,label])=><TabsTrigger key={value} value={value==='devices'&&subTab==='printers'?'printers':value} className="flex-none min-h-10 text-sm px-3">{label}</TabsTrigger>)}
             </TabsList></div>
             {(subTab==='devices'||subTab==='printers')&&<div className="flex flex-wrap gap-2"><Button variant={subTab==='devices'?'default':'outline'} className={subTab==='devices'?'bg-teal-700 hover:bg-teal-800':''} onClick={()=>setSubTab('devices')}>รายชื่อเครื่องพิมพ์</Button><Button variant={subTab==='printers'?'default':'outline'} className={subTab==='printers'?'bg-teal-700 hover:bg-teal-800':''} onClick={()=>setSubTab('printers')}>เครื่องพิมพ์ตามแบบป้าย</Button></div>}
+            {adminGranted && ['connection', 'system'].includes(subTab) && (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-teal-200 bg-teal-50 px-3 py-2 text-xs text-teal-900">
+                <span>โหมดผู้ดูแลระบบ (IT / Admin) ปลดล็อกอยู่ · สิทธิ์: {authUser.name} ({authUser.role})</span>
+                <Button type="button" size="sm" variant="outline" className="h-7 text-xs bg-white border-teal-300" onClick={() => void handleLockAdminConfig()}>
+                  ล็อกสิทธิ์ Admin กลับ
+                </Button>
+              </div>
+            )}
           </>}
         </div>
-        <TabsContent value="connection"><MasterDatabaseSettings onSaved={()=>window.location.reload()}/></TabsContent>
+        <TabsContent value="connection">
+          {!adminChecked || isAdminLockedView ? (
+            !adminChecked ? (
+              <p className="p-6 text-sm text-slate-500">กำลังตรวจสอบสิทธิ์ผู้ดูแลระบบ...</p>
+            ) : (
+              renderAdminGateCard('แหล่งข้อมูลสินค้า & API (IT / Admin Only)')
+            )
+          ) : (
+            <MasterDatabaseSettings onSaved={() => window.location.reload()} />
+          )}
+        </TabsContent>
         <TabsContent value="jobs"><AutoScheduleSettings mode="jobs" authUser={authUser} allLabelSizes={allLabelSizes} sysOptions={sysOptions} branches={branches} windowsPrinters={windowsPrinters} printers={printers} driverMappings={driverMappings} driverServerCode={driverServerCode} formatTrayLabel={formatTrayLabel} onRefreshAll={onRefreshAll}/></TabsContent>
 
 
@@ -941,14 +1136,9 @@ export function SettingsPanel({
         <TabsContent value="sizes" className="space-y-4 mt-0">
           <Card className="border-slate-200 shadow-xs bg-white py-0 gap-0">
             <CardHeader className="bg-[#3d4a57] text-white py-2.5 px-4 flex flex-row flex-wrap items-center justify-between gap-2">
-              <div>
-                <CardTitle className="text-sm font-semibold">
-                  ขนาดป้ายและการจัดวางบนกระดาษ
-                </CardTitle>
-                <p className="text-[11px] text-slate-300 mt-0.5">
-                  ค่า Margin Top/Left และ Gap H/V ที่ตั้งไว้ในตารางนี้ จะนำไปใช้จัดหน้า A4 Preview และส่งพิมพ์จริงโดยตรง
-                </p>
-              </div>
+              <CardTitle className="text-sm font-semibold">
+                ขนาดป้ายและการจัดวางบนกระดาษ
+              </CardTitle>
               <Button
                 size="sm"
                 className="h-8 text-xs bg-[#007a87] hover:bg-[#00606b] text-white"
@@ -1131,15 +1321,10 @@ export function SettingsPanel({
         <TabsContent value="preprints" className="space-y-4 mt-0">
           <Card className="border-slate-200 shadow-xs bg-white py-0 gap-0">
             <CardHeader className="bg-[#3d4a57] text-white py-2.5 px-4 flex flex-row flex-wrap items-center justify-between gap-2">
-              <div>
-                <CardTitle className="text-sm font-semibold flex items-center gap-1.5">
-                  <FileText className="h-4 w-4 text-amber-300" />
-                  คลังฟอร์มกระดาษ Pre-Print ที่บันทึกไว้ในระบบ ({preprints.length})
-                </CardTitle>
-                <p className="text-[11px] text-slate-300 mt-0.5">
-                  นำเข้าได้จากหน้า Design Studio (โหมด Pre-Print) เพื่อใช้ทาบเล็งตำแหน่งข้อความและ Preview โดยไม่พิมพ์ภาพฟอร์มซ้ำ
-                </p>
-              </div>
+              <CardTitle className="text-sm font-semibold flex items-center gap-1.5">
+                <FileText className="h-4 w-4 text-amber-300" />
+                คลังฟอร์มกระดาษ Pre-Print ({preprints.length})
+              </CardTitle>
               <div className="relative w-64">
                 <Search className="h-3.5 w-3.5 absolute left-2.5 top-2.5 text-slate-400" />
                 <Input
@@ -1386,6 +1571,11 @@ export function SettingsPanel({
 
         {/* ══════════════════ TAB 3: SYSTEM OPTIONS ═════════════════════════ */}
         <TabsContent value="system" className="space-y-4 mt-0">
+          {!adminChecked ? (
+            <p className="p-6 text-sm text-slate-500">กำลังตรวจสอบสิทธิ์ผู้ดูแลระบบ...</p>
+          ) : isAdminLockedView ? (
+            renderAdminGateCard('ตั้งค่าเริ่มต้นของระบบ (Admin Config)')
+          ) : (
           <Card className="border-slate-200 shadow-xs bg-white py-0 gap-0 max-w-3xl">
             <CardHeader className="bg-[#3d4a57] text-white py-2.5 px-4">
               <CardTitle className="text-sm font-semibold flex items-center gap-1.5">
@@ -1449,6 +1639,13 @@ export function SettingsPanel({
                         label: w.name,
                         keywords: w.name,
                       })),
+                      ...printers
+                        .filter((p) => p.enabled && p.ip !== 'Windows' && p.brand !== 'WINDOWS' && p.brand !== 'SAMSUNG')
+                        .map((p) => ({
+                          value: p.name,
+                          label: `${p.name} (LAN ${p.brand})`,
+                          keywords: `${p.name} ${p.brand} ${p.ip}`,
+                        })),
                     ]}
                   />
                 </div>
@@ -1531,7 +1728,7 @@ export function SettingsPanel({
               </div>
             </CardContent>
           </Card>
-
+          )}
         </TabsContent>
 
         {ENABLE_AUTO_PRINT_UI && (

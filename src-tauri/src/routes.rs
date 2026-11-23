@@ -10,7 +10,7 @@ use chrono::{Local, NaiveDate, NaiveTime, Utc};
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sqlx::SqlitePool;
+use sqlx::{Connection, SqlitePool};
 use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
 
@@ -1574,6 +1574,8 @@ pub async fn get_config_all(State(st): State<AppState>) -> Response {
         "labelFields": label_fields,
         "lanPrinters": lan_printers,
         "company": company,
+        "platform": std::env::consts::OS,
+        "supportsWindowsPrint": cfg!(target_os = "windows"),
     }))
     .into_response()
 }
@@ -3589,7 +3591,206 @@ pub async fn post_godex_print(
 // ─── /api/import ─────────────────────────────────────────────────────────────
 
 pub async fn post_import(State(_st): State<AppState>, _multipart: Multipart) -> Response {
-    err_json(StatusCode::CONFLICT, "ไม่รองรับการนำเข้าข้อมูลสินค้าจากไฟล์ กรุณาอัปเดตข้อมูลจากแหล่งข้อมูลที่ตั้งไว้")
+    err_json(StatusCode::CONFLICT, "กรุณาใช้หน้าต่างนำเข้าข้อมูล (Excel / JSON / CSV) แบบใหม่เพื่อตรวจและนำเข้าข้อมูล")
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MasterImportItem {
+    pub pdt_code: String,
+    pub pdt_name: String,
+    pub bar_code: String,
+    #[serde(default)]
+    pub unit_code: String,
+    #[serde(default)]
+    pub unit_name: String,
+    pub base_price: f64,
+    #[serde(default)]
+    pub effective_start: String,
+    #[serde(default)]
+    pub effective_stop: String,
+    #[serde(default)]
+    pub promo_price: Option<f64>,
+    #[serde(default)]
+    pub promo_name: String,
+    #[serde(default)]
+    pub promo_start: String,
+    #[serde(default)]
+    pub promo_stop: String,
+    #[serde(default)]
+    pub brand_name: String,
+    #[serde(default)]
+    pub group_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MasterImportBody {
+    #[serde(default)]
+    pub branch: String,
+    pub items: Vec<MasterImportItem>,
+}
+
+/// Import Master product & price items (from Excel/JSON/CSV) into the Barprint-owned
+/// standalone `AdaAccD.db`. Never modifies a StoreFront-shared POS database.
+pub async fn post_import_master(
+    State(st): State<AppState>,
+    Json(body): Json<MasterImportBody>,
+) -> Response {
+    if body.items.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "ไม่มีรายการข้อมูลสินค้าที่จะนำเข้า");
+    }
+    if body.items.len() > 10000 {
+        return err_json(StatusCode::BAD_REQUEST, "นำเข้าได้ไม่เกิน 10,000 รายการต่อครั้ง");
+    }
+
+    let mode = crate::standalone::mode(&st.pool).await;
+    let configured: Option<(String, String)> = sqlx::query_as("SELECT path, branch FROM main.ABStorage WHERE id=1")
+        .fetch_optional(&st.pool)
+        .await
+        .ok()
+        .flatten();
+
+    if configured.is_some() && mode == "POS_SHARED" {
+        return err_json(
+            StatusCode::CONFLICT,
+            "ระบบกำลังเชื่อมต่อฐาน StoreFront ของ POS อยู่ (อ่านอย่างเดียว) จึงไม่อนุญาตให้นำเข้าทับฐาน POS — กรุณานำเข้าลงตารางพิมพ์ หรือเปลี่ยนเป็นโหมดเครื่องแยก",
+        );
+    }
+
+    let target_path = configured
+        .as_ref()
+        .map(|(p, _)| std::path::PathBuf::from(p))
+        .unwrap_or_else(crate::standalone::own_path);
+
+    if let Err(e) = crate::standalone::prepare_destination(&target_path).await {
+        return err_json(StatusCode::BAD_REQUEST, e);
+    }
+
+    let branch = if !body.branch.trim().is_empty() {
+        body.branch.trim().to_string()
+    } else if let Some((_, b)) = &configured {
+        if !b.trim().is_empty() { b.trim().to_string() } else { "00001".to_string() }
+    } else {
+        "00001".to_string()
+    };
+
+    let today = Local::now().format("%Y-%m-%d").to_string();
+    let now_dt = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+    let mut conn = match sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&target_path)
+            .create_if_missing(false)
+            .busy_timeout(std::time::Duration::from_secs(10)),
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("เปิดฐานข้อมูล Master ไม่ได้: {e}")),
+    };
+
+    let mut imported = 0usize;
+    let mut promo_count = 0usize;
+    let write_res: Result<(), String> = async {
+        let mut tx = conn.begin().await.map_err(|e| e.to_string())?;
+        sqlx::query("INSERT OR IGNORE INTO TCNMBranch(FTBchCode,FTPplCode,FTWahCode) VALUES(?,'','')")
+            .bind(&branch)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        sqlx::query("INSERT OR IGNORE INTO TCNMBranch_L(FTBchCode,FNLngID,FTBchName) VALUES(?,1,?)")
+            .bind(&branch)
+            .bind(&branch)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        for (idx, item) in body.items.iter().enumerate() {
+            let pdt_code = item.pdt_code.trim();
+            let bar_code = item.bar_code.trim();
+            let pdt_name = if item.pdt_name.trim().is_empty() { pdt_code } else { item.pdt_name.trim() };
+            if pdt_code.is_empty() || bar_code.is_empty() || !item.base_price.is_finite() || item.base_price < 0.0 {
+                return Err(format!("รายการที่ {} ข้อมูลไม่ครบถ้วน (ต้องมีรหัสสินค้า, บาร์โค้ด และราคา >= 0)", idx + 1));
+            }
+            let unit_code = if item.unit_code.trim().is_empty() { "PCS" } else { item.unit_code.trim() };
+            let unit_name = if item.unit_name.trim().is_empty() { unit_code } else { item.unit_name.trim() };
+            let d_start = if item.effective_start.trim().is_empty() { today.as_str() } else { item.effective_start.trim() };
+            let d_stop = item.effective_stop.trim();
+
+            sqlx::query("INSERT OR IGNORE INTO TCNMPdtUnit(FTPunCode,FDCreateOn) VALUES(?,?)")
+                .bind(unit_code).bind(&now_dt).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+            sqlx::query("INSERT OR IGNORE INTO TCNMPdtUnit_L(FTPunCode,FNLngID,FTPunName) VALUES(?,1,?)")
+                .bind(unit_code).bind(unit_name).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+
+            sqlx::query("INSERT OR REPLACE INTO TCNMPdt(FTPdtCode,FTPdtStaActive,FDCreateOn,FDLastUpdOn) VALUES(?,'1',?,?)")
+                .bind(pdt_code).bind(d_start).bind(&now_dt).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+            sqlx::query("INSERT OR REPLACE INTO TCNMPdt_L(FTPdtCode,FNLngID,FTPdtName) VALUES(?,1,?)")
+                .bind(pdt_code).bind(pdt_name).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+            sqlx::query("INSERT OR REPLACE INTO TCNMPdtPackSize(FTPdtCode,FTPunCode,FCPdtUnitFact,FCPdtPriceRET) VALUES(?,?,1,?)")
+                .bind(pdt_code).bind(unit_code).bind(item.base_price).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+            sqlx::query("INSERT OR REPLACE INTO TCNMPdtBar(FTPdtCode,FTBarCode,FTPunCode,FNBarRefSeq,FTBarStaUse,FDCreateOn,FDLastUpdOn) VALUES(?,?,?,1,'1',?,?)")
+                .bind(pdt_code).bind(bar_code).bind(unit_code).bind(d_start).bind(&now_dt).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+
+            let price_doc = format!("IMP-{}-{}", d_start.replace('-', ""), pdt_code);
+            sqlx::query("DELETE FROM TCNTPdtPrice4PDT WHERE FTPdtCode=? AND FTPunCode=? AND FDPghDStart=?")
+                .bind(pdt_code).bind(unit_code).bind(d_start).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+            sqlx::query("INSERT INTO TCNTPdtPrice4PDT(FTAgnCode,FTPdtCode,FTPunCode,FDPghDStart,FTPghTStart,FTPplCode,FDPghDStop,FTPghDocNo,FTPghDocType,FCPgdPriceRet,FDCreateOn,FDLastUpdOn) VALUES('00001',?,?,?,'00:00:00','',?,?,'1',?,?,?)")
+                .bind(pdt_code).bind(unit_code).bind(d_start).bind(d_stop).bind(&price_doc).bind(item.base_price).bind(d_start).bind(&now_dt)
+                .execute(&mut *tx).await.map_err(|e| e.to_string())?;
+
+            if let Some(promo_pri) = item.promo_price.filter(|p| p.is_finite() && *p >= 0.0) {
+                let p_start = if item.promo_start.trim().is_empty() { d_start } else { item.promo_start.trim() };
+                let p_stop = if item.promo_stop.trim().is_empty() { d_stop } else { item.promo_stop.trim() };
+                let p_doc = format!("IMP-PMT-{}-{}", idx + 1, pdt_code);
+                let p_name = if item.promo_name.trim().is_empty() { "โปรโมชันนำเข้า".to_string() } else { item.promo_name.trim().to_string() };
+                sqlx::query("INSERT OR REPLACE INTO TCNTPmtHD(FTAgnCode,FTPmhDocNo,FNPmhVersion,FTPmhStaActive,FTPmhName,FTPmhStaDoc,FTPmhStaPrcDoc,FDPmhDStart,FDPmhDStop,FNPmhPriority,FDCreateOn,FDLastUpdOn) VALUES('',?,1,'1',?,'1','1',?,?,100,?,?)")
+                    .bind(&p_doc).bind(&p_name).bind(p_start).bind(p_stop).bind(&now_dt).bind(&now_dt)
+                    .execute(&mut *tx).await.map_err(|e| e.to_string())?;
+                sqlx::query("INSERT OR REPLACE INTO TCNTPmtHD_L(FTAgnCode,FTPmhDocNo,FNPmhVersion,FNLngID,FTPmhName) VALUES('',?,1,1,?)")
+                    .bind(&p_doc).bind(&p_name).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+                sqlx::query("INSERT OR REPLACE INTO TCNTPmtGrpDT(FTAgnCode,FTPmhDocNo,FTPmdGrpName,FNPmdSeqNo,FTPmdStaType,FTPmdRefType,FTPmdRefCode) VALUES('',?,'G1',1,'1','1',?)")
+                    .bind(&p_doc).bind(pdt_code).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+                sqlx::query("INSERT OR REPLACE INTO TCNTPmtCond(FTAgnCode,FTPmhDocNo,FNPmcSeqNo,FTPmcCondType,FCPmcValue) VALUES('',?,1,'FIX_PRI',?)")
+                    .bind(&p_doc).bind(promo_pri).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+                promo_count += 1;
+            }
+            imported += 1;
+        }
+
+        for t in ["TCNMBranch", "TCNMPdt", "TCNTPdtPrice4PDT", "TCNTPmtHD"] {
+            sqlx::query("INSERT OR REPLACE INTO TSysSyncTaskDownload(FTSynTable,FDSynLastSuccess) VALUES(?,?)")
+                .bind(t).bind(&now_dt).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+        }
+        sqlx::query("INSERT OR REPLACE INTO ABMasterIdentity VALUES(1,'00001',?,'')")
+            .bind(&branch).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+        tx.commit().await.map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    .await;
+    let _ = conn.close().await;
+
+    if let Err(e) = write_res {
+        return err_json(StatusCode::BAD_REQUEST, e);
+    }
+
+    let path_str = target_path.to_string_lossy().to_string();
+    let _ = sqlx::query("INSERT INTO ABStorage(id,path,branch,max_age_minutes) VALUES(1,?,?,1440) ON CONFLICT(id) DO UPDATE SET path=excluded.path,branch=excluded.branch")
+        .bind(&path_str).bind(&branch).execute(&st.pool).await;
+    let _ = sqlx::query("INSERT INTO ABSource(id,mode,config,status,last_success) VALUES(1,'STANDALONE','{}','นำเข้าไฟล์ Master สำเร็จ',datetime('now')) ON CONFLICT(id) DO UPDATE SET mode='STANDALONE',status='นำเข้าไฟล์ Master สำเร็จ',last_success=datetime('now')")
+        .execute(&st.pool).await;
+    let _ = sqlx::query("UPDATE TCNSSysOption SET FTSopValue=? WHERE FTSopCode='DefaultBranch'")
+        .bind(&branch).execute(&st.pool).await;
+
+    Json(json!({
+        "ok": true,
+        "imported": imported,
+        "promoCount": promo_count,
+        "path": path_str,
+        "branch": branch,
+        "message": format!("นำเข้า Master สำเร็จ {imported} รายการ")
+    }))
+    .into_response()
 }
 
 // ─── /api/paper-sizes, /api/preprints, /api/label-fields, /api/lan-printers ─
@@ -3978,31 +4179,32 @@ pub async fn get_image_proxy(Query(q): Query<ImageProxyQuery>) -> Response {
         return err_json(StatusCode::BAD_REQUEST, "only http/https URLs are supported");
     }
 
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut c = tokio::process::Command::new("curl.exe");
-        c.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        c
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("proxy client failed: {}", e)),
     };
-    #[cfg(not(target_os = "windows"))]
-    let mut cmd = tokio::process::Command::new("curl");
 
-    cmd.args(["-sSL", "--fail", "--max-time", "8", target]);
-    match cmd.output().await {
-        Ok(out) if out.status.success() && !out.stdout.is_empty() => {
-            if let Some(mime) = sniff_image_mime(&out.stdout) {
-                axum::http::Response::builder()
-                    .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, mime)
-                    .header(header::CACHE_CONTROL, "public, max-age=300")
-                    .body(axum::body::Body::from(out.stdout))
-                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
-            } else {
-                err_json(StatusCode::BAD_GATEWAY, "remote resource is not a supported image")
+    match client.get(target).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+            Ok(bytes) if !bytes.is_empty() => {
+                if let Some(mime) = sniff_image_mime(&bytes) {
+                    axum::http::Response::builder()
+                        .status(StatusCode::OK)
+                        .header(header::CONTENT_TYPE, mime)
+                        .header(header::CACHE_CONTROL, "public, max-age=300")
+                        .body(axum::body::Body::from(bytes))
+                        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+                } else {
+                    err_json(StatusCode::BAD_GATEWAY, "remote resource is not a supported image")
+                }
             }
-        }
+            _ => err_json(StatusCode::BAD_GATEWAY, "failed to fetch remote image"),
+        },
         Ok(_) => err_json(StatusCode::BAD_GATEWAY, "failed to fetch remote image"),
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("proxy exec failed: {}", e)),
+        Err(e) => err_json(StatusCode::BAD_GATEWAY, format!("proxy fetch failed: {}", e)),
     }
 }
 
@@ -4408,6 +4610,8 @@ pub async fn post_sync_trigger(State(st): State<AppState>) -> Response {
 #[serde(rename_all = "camelCase")]
 pub struct VerifyAdminPinBody {
     pub pin: String,
+    #[serde(default)]
+    pub new_pin: String,
 }
 
 pub async fn post_verify_admin_pin(
@@ -4415,20 +4619,19 @@ pub async fn post_verify_admin_pin(
     headers: axum::http::HeaderMap,
     Json(body): Json<VerifyAdminPinBody>,
 ) -> Response {
-    if crate::storage::admin_pin_change_required(&st.pool).await {
-        return err_json(StatusCode::BAD_REQUEST,"กรุณาตั้ง PIN ผู้ดูแลใหม่ในแท็บแหล่งข้อมูลก่อนแก้ไขการตั้งค่า");
-    }
-    let ok = crate::storage::valid_pin(&st.pool, &body.pin).await;
-    if !ok {
-        return (
-                StatusCode::BAD_REQUEST,
-            Json(json!({ "ok": false, "error": "รหัส PIN ผู้ดูแลระบบไม่ถูกต้อง" })),
-        )
-            .into_response();
-    }
-    match crate::auth::grant_admin(&st.pool,&headers).await {
-        Ok(())=>Json(json!({ "ok": true })).into_response(),
-        Err(e)=>err_json(StatusCode::UNAUTHORIZED,e),
+    let pin_change_required = match crate::storage::verify_and_update_admin_pin(&st.pool, &body.pin, &body.new_pin).await {
+        Ok(still_required) => still_required,
+        Err((status, msg, required)) => {
+            return (
+                status,
+                Json(json!({ "ok": false, "pinChangeRequired": required, "error": msg })),
+            )
+                .into_response();
+        }
+    };
+    match crate::auth::grant_admin(&st.pool, &headers).await {
+        Ok(()) => Json(json!({ "ok": true, "pinChangeRequired": pin_change_required })).into_response(),
+        Err(e) => err_json(StatusCode::UNAUTHORIZED, e),
     }
 }
 

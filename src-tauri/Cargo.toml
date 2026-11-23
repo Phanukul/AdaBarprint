@@ -15,7 +15,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-tauri-plugin-single-instance = "2"
 axum = { version = "0.7", features = ["multipart"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
@@ -33,6 +32,13 @@ sha2 = "0.10"
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"
+
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+rust-embed = { version = "8", features = ["debug-embed"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

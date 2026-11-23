@@ -13,10 +13,13 @@ export interface Props {
   driverMappings: SettingsDriverMapping[]; driverServerCode: string;
   formatTrayLabel: (tray: string) => string; onRefreshAll: () => Promise<void>;
 }
+export interface ProfileTarget {
+  size:string; template:string; printer:string; tray:string; protocol:string; ip:string; port:number; dpi:number; quantity:number;
+}
 export interface Rule {
-  id:string; name:string; enabled:boolean; branch:string; source:string; time:string; days:string;
+  id:string; code:string; name:string; enabled:boolean; branch:string; source:string; time:string; days:string;
   size:string; template:string; printer:string; tray:string; protocol:string; ip:string; port:number; dpi:number;
-  quantity:number; catchUp:boolean;
+  quantity:number; catchUp:boolean; offsetDays:number; targets?:ProfileTarget[];
 }
 interface Job { id:string; seq:number; source:string; name:string; status:string; created:string; error?:string; completed:number; total:number }
 export type EventProfile=Pick<Rule,'template'|'size'|'printer'|'tray'|'protocol'|'ip'|'port'|'dpi'>;

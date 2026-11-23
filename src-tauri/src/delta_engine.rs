@@ -90,6 +90,22 @@ fn previous_day(biz_date: &str) -> String {
         .unwrap_or_else(|| biz_date.to_string())
 }
 
+pub fn next_day(biz_date: &str) -> String {
+    NaiveDate::parse_from_str(biz_date, "%Y-%m-%d")
+        .ok()
+        .and_then(|d| d.succ_opt())
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| biz_date.to_string())
+}
+
+pub fn target_date_with_offset(base_date: NaiveDate, offset_days: i32) -> String {
+    base_date
+        .checked_add_signed(chrono::TimeDelta::days(offset_days as i64))
+        .unwrap_or(base_date)
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
 async fn resolve_default_lbs_and_qty(
     pool: &SqlitePool,
     pdt_code: &str,
@@ -201,9 +217,30 @@ pub async fn compute_delta_candidates(
     compute_delta_candidates_since(pool, schedule, biz_date, biz_date).await
 }
 
+/// Evaluate exact-date Profile candidates where Effective Date == target_date (`System Date + n`),
+/// cleanly separating Base Price (`PRICE_CHG`, `PROMO_END_REVERT`) vs Base Price + Price Off (`PROMO_START`),
+/// without consulting accumulated watermark logs.
+pub async fn compute_profile_candidates_exact(
+    pool: &SqlitePool,
+    schedule: &TCNTLabelSchedule,
+    target_date: &str,
+) -> Result<DeltaSummary, sqlx::Error> {
+    compute_delta_candidates_impl(pool, schedule, target_date, target_date, true).await
+}
+
 /// Select changes since the last completed round, resolving prices as of today.
 pub async fn compute_delta_candidates_since(
     pool: &SqlitePool, schedule: &TCNTLabelSchedule, biz_date: &str, since: &str,
+) -> Result<DeltaSummary, sqlx::Error> {
+    compute_delta_candidates_impl(pool, schedule, biz_date, since, false).await
+}
+
+async fn compute_delta_candidates_impl(
+    pool: &SqlitePool,
+    schedule: &TCNTLabelSchedule,
+    biz_date: &str,
+    since: &str,
+    exact_profile_mode: bool,
 ) -> Result<DeltaSummary, sqlx::Error> {
     crate::promo_v6::validate_v6_schema(pool).await?;
     let yesterday = previous_day(biz_date);
@@ -353,9 +390,16 @@ pub async fn compute_delta_candidates_since(
         }
     }
 
-    // Case 3: PROMO_END_REVERT (stopped yesterday -> reverts to Normal tag today unless overridden by another active promo)
+    // Case 3: PROMO_END_REVERT
+    // - Exact Profile mode: matches FDPmhDStop == target_date (`System Date + n`) directly and resolves Base Price on next_day(target_date).
+    // - Legacy delta mode: matches promotions that stopped yesterday (`biz_date - 1`).
     if rule_enabled(&schedule.FTLscTriggerRules, "PROMO_END_REVERT") {
-        let refs = resolve_promo_refs(pool, &yesterday, &since_stop, true, &eff_bch).await?;
+        let (stop_from, stop_to) = if exact_profile_mode {
+            (biz_date, biz_date)
+        } else {
+            (since_stop.as_str(), yesterday.as_str())
+        };
+        let refs = resolve_promo_refs(pool, stop_to, stop_from, true, &eff_bch).await?;
         for b in expand_refs_to_bars(pool, &refs).await? {
             cand_map
                 .entry((b.pdt_code, b.bar_code))
@@ -409,15 +453,33 @@ pub async fn compute_delta_candidates_since(
         )
         .await;
 
+        let (price_date, verify_promo) = if exact_profile_mode {
+            match trigger_src.as_str() {
+                "PRICE_CHG" => (biz_date.to_string(), false),
+                "PROMO_END_REVERT" => (next_day(biz_date), true),
+                _ => (biz_date.to_string(), true),
+            }
+        } else {
+            (biz_date.to_string(), true)
+        };
+
         let eff = resolve_effective_price(
             pool,
             &pdt_code,
             &bar_code,
             eff_ppl.as_deref(),
-            biz_date,
-            true,
+            &price_date,
+            verify_promo,
         )
         .await?;
+
+        if exact_profile_mode && trigger_src == "PROMO_END_REVERT" && eff.pri_type == "2" {
+            // Still covered by a replacement promotion on revert day -> do not print Base Price revert.
+            continue;
+        }
+        if exact_profile_mode && trigger_src == "PROMO_START" && eff.pri_type != "2" {
+            continue;
+        }
 
         let promo_doc = eff.promo.as_ref().map(|p| p.code.clone());
         let promo_name = eff.promo.as_ref().map(|p| p.name.clone());
@@ -439,16 +501,19 @@ pub async fn compute_delta_candidates_since(
             promo_dstop.as_deref(),
         );
 
-        let wm_hash: Option<(String,)> = sqlx::query_as(
-            "SELECT FTLswLastHash FROM TCNTLabelSchedWatermark WHERE FTBarCode = ? AND FTLbsCode = ? LIMIT 1",
-        )
-        .bind(&bar_code)
-        .bind(&lbs_code)
-        .fetch_optional(pool)
-        .await
-        .unwrap_or(None);
-
-        let is_dup = wm_hash.map(|(h,)| h == price_hash).unwrap_or(false);
+        let is_dup = if exact_profile_mode {
+            false
+        } else {
+            let wm_hash: Option<(String,)> = sqlx::query_as(
+                "SELECT FTLswLastHash FROM TCNTLabelSchedWatermark WHERE FTBarCode = ? AND FTLbsCode = ? LIMIT 1",
+            )
+            .bind(&bar_code)
+            .bind(&lbs_code)
+            .fetch_optional(pool)
+            .await
+            .unwrap_or(None);
+            wm_hash.map(|(h,)| h == price_hash).unwrap_or(false)
+        };
         if is_dup {
             skipped_dup += 1;
         } else if eff.pri_type == "2" {
@@ -602,5 +667,60 @@ mod tests {
         let res2 = compute_delta_candidates(&pool, &sched, biz).await.unwrap();
         assert_eq!(res2.skipped_dup, 4);
         assert_eq!(res2.ready_normal + res2.ready_promo, 0);
+    }
+
+    #[tokio::test]
+    async fn profile_exact_date_offset_base_price_and_price_off() {
+        let pool = setup_delta_db().await;
+        let base_today = NaiveDate::from_ymd_opt(2026, 11, 24).unwrap();
+        let yesterday = target_date_with_offset(base_today, -1); // 2026-11-23
+        let today = target_date_with_offset(base_today, 0);      // 2026-11-24
+        let tomorrow = target_date_with_offset(base_today, 1);   // 2026-11-25
+        assert_eq!((yesterday.as_str(), today.as_str(), tomorrow.as_str()), ("2026-11-23", "2026-11-24", "2026-11-25"));
+
+        // P01: Base price starts tomorrow (+1), also has active promo today -> PRICE_CHG must still use Base Price
+        sqlx::query("INSERT INTO TCNMPdt (FTPdtCode, FDCreateOn) VALUES ('P01', '2026-10-01')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNMPdtBar (FTPdtCode, FTBarCode, FTPunCode, FNBarRefSeq, FTBarStaUse, FDCreateOn) VALUES ('P01', '885101', 'UNIT', 1, '1', '2026-10-01')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNTPdtPrice4PDT (FTPdtCode, FTPunCode, FDPghDStart, FTPghDocType, FCPgdPriceRet) VALUES ('P01', 'UNIT', ?, '1', 89.0)").bind(&tomorrow).execute(&pool).await.unwrap();
+
+        // P02: Promo starts tomorrow (+1) with Base Price 50 -> Price Off 35
+        sqlx::query("INSERT INTO TCNMPdt (FTPdtCode, FDCreateOn) VALUES ('P02', '2026-10-01')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNMPdtBar (FTPdtCode, FTBarCode, FTPunCode, FNBarRefSeq, FTBarStaUse, FDCreateOn) VALUES ('P02', '885102', 'UNIT', 1, '1', '2026-10-01')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNTPdtPrice4PDT (FTPdtCode, FTPunCode, FDPghDStart, FTPghDocType, FCPgdPriceRet) VALUES ('P02', 'UNIT', '2026-10-01', '1', 50.0)").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNTPmtHD (FTAgnCode, FTPmhDocNo, FNPmhVersion, FTPmhStaActive, FDPmhDStart, FDPmhDStop) VALUES ('', 'PM-TMR', 1, '1', ?, '2026-12-01')").bind(&tomorrow).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNTPmtGrpDT (FTAgnCode, FTPmhDocNo, FTPmdGrpName, FNPmdSeqNo, FTPmdRefCode) VALUES ('', 'PM-TMR', 'G', 1, 'P02')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNTPmtCond (FTAgnCode, FTPmhDocNo, FNPmcSeqNo, FTPmcCondType, FCPmcValue) VALUES ('', 'PM-TMR', 1, 'FIX_PRI', 35.0)").execute(&pool).await.unwrap();
+
+        // P03: Promo stopped yesterday (-1: 2026-11-23), so today (2026-11-24) prints Base Price 120.0
+        sqlx::query("INSERT INTO TCNMPdt (FTPdtCode, FDCreateOn) VALUES ('P03', '2026-10-01')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNMPdtBar (FTPdtCode, FTBarCode, FTPunCode, FNBarRefSeq, FTBarStaUse, FDCreateOn) VALUES ('P03', '885103', 'UNIT', 1, '1', '2026-10-01')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNTPdtPrice4PDT (FTPdtCode, FTPunCode, FDPghDStart, FTPghDocType, FCPgdPriceRet) VALUES ('P03', 'UNIT', '2026-10-01', '1', 120.0)").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNTPmtHD (FTAgnCode, FTPmhDocNo, FNPmhVersion, FTPmhStaActive, FDPmhDStart, FDPmhDStop) VALUES ('', 'PM-STOP', 1, '1', '2026-11-01', ?)").bind(&yesterday).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNTPmtGrpDT (FTAgnCode, FTPmhDocNo, FTPmdGrpName, FNPmdSeqNo, FTPmdRefCode) VALUES ('', 'PM-STOP', 'G', 1, 'P03')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNTPmtCond (FTAgnCode, FTPmhDocNo, FNPmcSeqNo, FTPmcCondType, FCPmcValue) VALUES ('', 'PM-STOP', 1, 'FIX_PRI', 79.0)").execute(&pool).await.unwrap();
+
+        let mut sched = test_sched();
+        sched.FTLscTriggerRules = "PRICE_CHG".into();
+        let chg = compute_profile_candidates_exact(&pool, &sched, &tomorrow).await.unwrap();
+        assert_eq!(chg.items.len(), 1);
+        assert_eq!(chg.items[0].bar_code, "885101");
+        assert_eq!(chg.items[0].pri_type, "1");
+        assert!((chg.items[0].sale_price - 89.0).abs() < 0.01);
+
+        sched.FTLscTriggerRules = "PROMO_START".into();
+        let start = compute_profile_candidates_exact(&pool, &sched, &tomorrow).await.unwrap();
+        assert_eq!(start.items.len(), 1);
+        assert_eq!(start.items[0].bar_code, "885102");
+        assert_eq!(start.items[0].pri_type, "2");
+        assert_eq!(start.items[0].old_price, Some(50.0));
+        assert!((start.items[0].sale_price - 35.0).abs() < 0.01);
+
+        sched.FTLscTriggerRules = "PROMO_END_REVERT".into();
+        let stop = compute_profile_candidates_exact(&pool, &sched, &yesterday).await.unwrap();
+        assert_eq!(stop.items.len(), 1);
+        assert_eq!(stop.items[0].bar_code, "885103");
+        assert_eq!(stop.items[0].pri_type, "1");
+        assert!((stop.items[0].sale_price - 120.0).abs() < 0.01);
+        assert!(!stop.items[0].skipped_dup);
     }
 }

@@ -1,129 +1,617 @@
 import { invoke } from '@tauri-apps/api/core';
 import React, { useEffect, useState } from 'react';
+import { Download, FolderOpen, RefreshCw, ShieldCheck } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { getStoredAuthToken } from '@/lib/auth';
 
-type ProtectedAction = 'save-sync' | 'sync' | 'check' | 'save-pos';
+type ProtectedAction = 'save' | 'check' | 'sync';
 
 export function MasterDatabaseSettings({ onSaved }: { onSaved?: () => void }) {
-  const [mode,setMode]=useState('POS_SHARED');
-  const [version,setVersion]=useState(0);
-  const [saved,setSaved]=useState(false);
-  const [syncStatus,setSyncStatus]=useState('');
-  const [lastSuccess,setLastSuccess]=useState('');
-  const [sync,setSync]=useState({baseUrl:'',headerName:'X-API-Key',apiKey:'',agency:'',branch:'',pos:'',shop:'',intervalMinutes:60});
-  const [hasKey,setHasKey]=useState(false);
-  const [ownPath,setOwnPath]=useState('');
-  const [path,setPath]=useState('');
-  const [branch,setBranch]=useState('');
-  const [age,setAge]=useState(1440);
-  const [pin,setPin]=useState('');
-  const [newPin,setNewPin]=useState('');
-  const [pinConfirmation,setPinConfirmation]=useState('');
-  const [pinChangeRequired,setPinChangeRequired]=useState(false);
-  const [branches,setBranches]=useState<Array<{code:string;name?:string}>>([]);
-  const [checkedPath,setCheckedPath]=useState('');
-  const [message,setMessage]=useState('');
-  const [busy,setBusy]=useState(false);
-  const [pendingAction,setPendingAction]=useState<ProtectedAction|null>(null);
-  const [authorizationError,setAuthorizationError]=useState('');
-  async function request(url:string,body?:unknown) {
-    const r=await fetch(url,{method:body?'POST':'GET',headers:{'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
-    if(!r.headers.get('content-type')?.includes('application/json'))throw new Error('บริการตั้งค่าแหล่งข้อมูลยังไม่พร้อม กรุณาตรวจรุ่นของบริการ');
-    const data=await r.json();if(!r.ok)throw new Error(data.error||'ทำรายการไม่สำเร็จ');return data;
+  const [defaultPath, setDefaultPath] = useState('');
+  const [dataRoot, setDataRoot] = useState('');
+  const [pathWarning, setPathWarning] = useState('');
+  const [dbPath, setDbPath] = useState('');
+  const [branch, setBranch] = useState('');
+  const [age, setAge] = useState(1440);
+  const [apiConfigured, setApiConfigured] = useState(false);
+  const [hasKey, setHasKey] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [sync, setSync] = useState({
+    baseUrl: '',
+    headerName: 'X-API-Key',
+    apiKey: '',
+    agency: '',
+    branch: '',
+    pos: '',
+    shop: '',
+  });
+  const [syncStatus, setSyncStatus] = useState('');
+  const [lastSuccess, setLastSuccess] = useState('');
+  const [branches, setBranches] = useState<Array<{ code: string; name?: string }>>([]);
+  const [checkedPath, setCheckedPath] = useState('');
+  const [pin, setPin] = useState('');
+  const [newPin, setNewPin] = useState('');
+  const [pinConfirmation, setPinConfirmation] = useState('');
+  const [pinChangeRequired, setPinChangeRequired] = useState(false);
+  const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [pendingAction, setPendingAction] = useState<ProtectedAction | null>(null);
+  const [authorizationError, setAuthorizationError] = useState('');
+
+  async function request(url: string, body?: unknown) {
+    const r = await fetch(url, {
+      method: body !== undefined ? 'POST' : 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+    if (!r.headers.get('content-type')?.includes('application/json')) {
+      throw new Error('บริการตั้งค่าแหล่งข้อมูลยังไม่พร้อม กรุณาตรวจรุ่นของบริการ');
+    }
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'ทำรายการไม่สำเร็จ');
+    return data;
   }
-  useEffect(()=>{let active=true;request('/api/storage').then(s=>{if(active){setVersion(s.sourceVersion||0);setPinChangeRequired(Boolean(s.adminPinChangeRequired));setMode(s.mode||'POS_SHARED');setOwnPath(s.standalonePath||'');setSaved(s.mode==='STANDALONE');setHasKey(Boolean(s.sync?.hasApiKey));if(s.sync?.config?.baseUrl)setSync(prev=>({...prev,...s.sync.config,apiKey:''}));setPath(s.path);setBranch(s.branch);setAge(s.maxAgeMinutes);setMessage(s.mode==='STANDALONE'?(s.sync?.status||'รอดาวน์โหลดข้อมูลครั้งแรก'):s.connected?'เชื่อมต่อฐานข้อมูล StoreFront แบบอ่านอย่างเดียวแล้ว':s.error||'ตั้งค่าแหล่งข้อมูลก่อนเริ่มใช้งาน');}}).catch(e=>{if(active)setMessage(e.message);});return()=>{active=false;};},[]);
-  useEffect(()=>{
-    if(mode!=='STANDALONE'||!saved)return;
-    let active=true;
-    const refresh=async()=>{try{const s=await request('/api/storage');if(active){setSyncStatus(s.sync?.status||'');setLastSuccess(s.sync?.lastSuccess||'');}}catch{ /* Keep the last known download status during a temporary connection failure. */ }};
-    void refresh();const timer=window.setInterval(()=>{void refresh();},5000);
-    return()=>{active=false;window.clearInterval(timer);};
-  },[mode,saved]);
-  function pinFields(){if((pinChangeRequired||newPin)&&(!newPin||newPin!==pinConfirmation))throw new Error('กรอก PIN ใหม่และยืนยันให้ตรงกัน');return {pin,newPin};}
-  const actionTitle = pendingAction==='sync'?'ดาวน์โหลดข้อมูลตอนนี้':pendingAction==='check'?'ตรวจสอบการเชื่อมต่อ':'บันทึกการตั้งค่าแหล่งข้อมูล';
-  function beginAction(action:ProtectedAction){
-    let error='';
-    if(action==='save-sync'){
-      if(!ownPath.trim())error='กรุณาระบุไฟล์ฐานข้อมูลสำหรับดาวน์โหลด';
-      else if(!sync.baseUrl.trim()||!sync.branch.trim())error='กรุณาระบุ URL ของ API2PSMaster และรหัสสาขา';
-      else if(!sync.apiKey&&!hasKey)error='กรุณากรอก API Key สำหรับการเชื่อมต่อครั้งแรก';
-      else if(!Number.isInteger(sync.intervalMinutes)||sync.intervalMinutes<1||sync.intervalMinutes>1440)error='รอบดาวน์โหลดต้องเป็นจำนวนเต็ม 1–1440 นาที';
-    } else if(action==='sync'&&!saved)error='กรุณาบันทึกการเชื่อมต่อที่แก้ไขก่อนดาวน์โหลดข้อมูล';
-    else if(action==='check'&&!path.trim())error='กรุณาระบุไฟล์ฐานข้อมูล AdaAccD.db';
-    else if(action==='save-pos'&&(!branch||checkedPath!==path))error='กรุณาตรวจสอบการเชื่อมต่อและเลือกสาขาก่อนบันทึก';
-    if(error){setMessage(error);return;}
-    setPin('');setNewPin('');setPinConfirmation('');setAuthorizationError('');setPendingAction(action);
+
+  const refreshStatus = async () => {
+    const s = await request('/api/storage');
+    const appDefaultPath = String(s.defaultPath || s.standalonePath || '');
+    setDefaultPath(appDefaultPath);
+    setDataRoot(String(s.dataRoot || ''));
+    if (s.dataRootWritable === false) {
+      setPathWarning(
+        `โฟลเดอร์โปรแกรม (${s.dataRoot}) ไม่มีสิทธิ์เขียนไฟล์ กรุณาย้ายโปรแกรมออกจาก Program Files เช่น D:\\AdaBarprint`,
+      );
+    }
+    setPinChangeRequired(Boolean(s.adminPinChangeRequired));
+    setDbPath(String(s.path || appDefaultPath || ''));
+    setBranch(String(s.branch || ''));
+    setAge(Number(s.maxAgeMinutes || 1440));
+    setApiConfigured(Boolean(s.apiConfigured || s.sync?.config?.baseUrl));
+    setHasKey(Boolean(s.sync?.hasApiKey));
+    if (s.sync?.config) {
+      setSync((prev) => ({
+        ...prev,
+        baseUrl: s.sync.config.baseUrl || '',
+        headerName: s.sync.config.headerName || 'X-API-Key',
+        agency: s.sync.config.agency || '',
+        branch: s.sync.config.branch || s.branch || '',
+        pos: s.sync.config.pos || '',
+        shop: s.sync.config.shop || '',
+        apiKey: '',
+      }));
+    }
+    setSyncStatus(String(s.sync?.status || ''));
+    setLastSuccess(String(s.sync?.lastSuccess || ''));
+    setDirty(false);
+    return s;
+  };
+
+  useEffect(() => {
+    let active = true;
+    refreshStatus()
+      .then((s) => {
+        if (!active) return;
+        if (s.connected) {
+          setMessage('เชื่อมต่อฐานข้อมูลสินค้าพร้อมใช้งานแล้ว');
+        } else if (s.sync?.config?.baseUrl) {
+          setMessage(String(s.sync?.status || 'ตั้งค่า API2PSMaster แล้ว สามารถกด “ดาวน์โหลดข้อมูลตอนนี้” ได้'));
+        } else {
+          setMessage(String(s.error || 'กำหนดไฟล์ AdaAccD.db หรือ API2PSMaster แล้วกดบันทึก'));
+        }
+      })
+      .catch((e) => {
+        if (active) setMessage(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  function pinFields() {
+    if ((pinChangeRequired || newPin) && (!newPin || newPin !== pinConfirmation)) {
+      throw new Error('กรอก PIN ใหม่และยืนยันให้ตรงกัน');
+    }
+    return { pin, newPin };
   }
-  function closeAuthorization(){if(busy)return;setPendingAction(null);setPin('');setNewPin('');setPinConfirmation('');setAuthorizationError('');}
-  async function confirmAction(event:React.FormEvent){
-    event.preventDefault();if(busy||!pendingAction)return;
-    if(!pin.trim()){setAuthorizationError('กรุณากรอก PIN ผู้ดูแลระบบเพื่อยืนยัน');return;}
-    setBusy(true);setAuthorizationError('');
-    try{
-      if(pendingAction==='save-sync'){
-        const r=await request('/api/storage',{mode,path:ownPath,sync,maxAgeMinutes:age,...pinFields()});
-        setSaved(true);setHasKey(true);if(newPin)setPinChangeRequired(false);
-        setSync({...sync,apiKey:''});setMessage(r.message+' · ระบบจะดาวน์โหลดข้อมูลตามรอบที่ตั้งไว้');
-      }else if(pendingAction==='sync'){
-        const r=await request('/api/storage/sync',{pin});setMessage(r.message);setSyncStatus(r.message);
-      }else if(pendingAction==='check'){
-        const r=await request('/api/storage/check',{path,pin});setBranches(r.branches);setCheckedPath(path);
-        setMessage(r.branches.length===0?'พบฐานข้อมูล แต่ยังไม่มีข้อมูลสาขา กรุณาเปิด StoreFront และอัปเดตข้อมูลก่อน':`ตรวจโครงสร้างสำเร็จ · สินค้า ${r.productCount} รายการ · ผู้ใช้ ${r.userCount} ราย${r.productCount===0||r.userCount===0?' · ต้องอัปเดตข้อมูลจาก StoreFront ก่อนใช้งาน':' · กรุณายืนยันสาขาและบันทึก'}`);
-      }else{
-        const r=await request('/api/storage',{mode,path,branch,maxAgeMinutes:age,...pinFields()});
-        if(newPin)setPinChangeRequired(false);setMessage(r.message);onSaved?.();
+
+  const actionTitle =
+    pendingAction === 'check'
+      ? 'ตรวจสอบไฟล์ฐานข้อมูล AdaAccD.db'
+      : pendingAction === 'sync'
+        ? 'ดาวน์โหลดข้อมูลตอนนี้ (Manual Sync)'
+        : 'บันทึกการตั้งค่าแหล่งข้อมูล';
+
+  const runDirectSync = async () => {
+    if (dirty) {
+      setMessage('มีการแก้ไขค่าที่ยังไม่บันทึก กรุณากด “บันทึกการตั้งค่าแหล่งข้อมูล” ก่อนดาวน์โหลด');
+      return;
+    }
+    if (!apiConfigured) {
+      setMessage('ยังไม่ได้ตั้งค่า URL ของ API2PSMaster สำหรับดาวน์โหลด');
+      return;
+    }
+    if (!getStoredAuthToken()) {
+      beginAction('sync');
+      return;
+    }
+    setBusy(true);
+    setSyncStatus('กำลังดาวน์โหลด');
+    try {
+      const r = await request('/api/storage/sync', {});
+      setMessage(String(r.message || 'ดาวน์โหลดข้อมูลครบแล้ว'));
+      await refreshStatus();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'ดาวน์โหลดข้อมูลไม่สำเร็จ';
+      setMessage(msg);
+      setSyncStatus(msg);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  function beginAction(action: ProtectedAction) {
+    let error = '';
+    const trimmedPath = dbPath.trim();
+    if (action === 'check') {
+      if (!trimmedPath) error = 'กรุณาระบุพาธไฟล์ฐานข้อมูล AdaAccD.db';
+    } else if (action === 'sync') {
+      if (dirty) error = 'มีการแก้ไขค่าที่ยังไม่บันทึก กรุณากด “บันทึกการตั้งค่าแหล่งข้อมูล” ก่อนดาวน์โหลด';
+      else if (!apiConfigured) error = 'ยังไม่ได้ตั้งค่า URL ของ API2PSMaster สำหรับดาวน์โหลด';
+    } else if (action === 'save') {
+      const hasUrl = Boolean(sync.baseUrl.trim());
+      if (!trimmedPath && !defaultPath) {
+        error = 'กรุณาระบุไฟล์ฐานข้อมูล AdaAccD.db';
+      } else if (hasUrl) {
+        if (!(sync.baseUrl.startsWith('https://') || sync.baseUrl.startsWith('http://'))) {
+          error = 'URL ของ API2PSMaster ต้องขึ้นต้นด้วย http:// หรือ https://';
+        } else if (!branch.trim() && !sync.branch.trim()) {
+          error = 'กรุณาระบุรหัสสาขาสำหรับเชื่อมต่อ API2PSMaster';
+        } else if (!sync.apiKey && !hasKey) {
+          error = 'กรุณากรอก API Key สำหรับเชื่อมต่อ API2PSMaster';
+        }
       }
-      setPendingAction(null);setPin('');setNewPin('');setPinConfirmation('');
-    }catch(e){setAuthorizationError(e instanceof Error?e.message:'ทำรายการไม่สำเร็จ กรุณาลองใหม่');}
-    finally{setBusy(false);}
+    }
+    if (error) {
+      setMessage(error);
+      return;
+    }
+    setPin('');
+    setNewPin('');
+    setPinConfirmation('');
+    setAuthorizationError('');
+    setPendingAction(action);
   }
-  async function act(fn:()=>Promise<void>){setBusy(true);try{await fn();}catch(e){setMessage(e instanceof Error?e.message:String(e));}finally{setBusy(false);}}
-  return <section className="min-w-0 rounded-xl border border-slate-200 bg-white p-4 sm:p-5 space-y-4">
-    <div><h3 className="font-semibold text-teal-800">แหล่งข้อมูลสินค้า</h3><p className="mt-1 text-sm text-slate-600">เลือกใช้ข้อมูลจาก POS หรือดาวน์โหลดข้อมูลสำหรับเครื่องนี้</p></div>
-    <label className="block space-y-2 text-sm"><span>การใช้งานเครื่องนี้</span><select className="block w-full h-10 rounded-md border bg-white px-2" value={mode} disabled={busy} onChange={e=>{setMode(e.target.value);setSaved(false);}}><option value="POS_SHARED">ใช้ฐานข้อมูลของ StoreFront</option><option value="STANDALONE" disabled={version<2}>เครื่องแยกจาก POS — ดาวน์โหลดข้อมูลเอง</option></select></label>
-    <p className="text-sm text-slate-600">กรอกค่าที่ต้องการแล้วกดปุ่ม ระบบจะขอ PIN ผู้ดูแลเพื่อยืนยันก่อนบันทึก ตรวจสอบการเชื่อมต่อ หรือดาวน์โหลดข้อมูล</p>
-    {mode==='STANDALONE'?<>
-      <label className="block space-y-2 text-sm"><span>ไฟล์ฐานข้อมูลสำหรับดาวน์โหลด</span><Input value={ownPath} disabled={busy||version<3} onChange={e=>{setOwnPath(e.target.value);setSaved(false);}}/><span className="block text-xs text-slate-500">ระบุพาธเต็มลงท้ายด้วย AdaAccD.db ระบบสร้างไฟล์ใหม่ให้ ห้ามเลือกฐานข้อมูลที่ POS ใช้งานอยู่</span></label>
-      <div className="grid gap-4 sm:grid-cols-2">
-        {([{key:'baseUrl',label:'URL ของ API2PSMaster'},{key:'agency',label:'รหัสตัวแทน (Agency)'},{key:'branch',label:'รหัสสาขา'},{key:'pos',label:'รหัสเครื่อง POS'},{key:'apiKey',label:hasKey?'API Key (เว้นว่างเพื่อใช้ค่าเดิม)':'API Key'}] as const).map(field=><label key={field.key} className="block space-y-2 text-sm"><span>{field.label}</span><Input value={sync[field.key]} type={field.key==='apiKey'?'password':'text'} autoComplete="off" disabled={busy} onChange={e=>{setSync({...sync,[field.key]:e.target.value});setSaved(false);}}/></label>)}
-        <label className="block space-y-2 text-sm"><span>ดาวน์โหลดทุก (นาที)</span><Input type="number" min={1} max={1440} value={sync.intervalMinutes} disabled={busy} onChange={e=>{setSync({...sync,intervalMinutes:Number(e.target.value)});setSaved(false);}}/></label>
-      </div>
-      <details><summary className="text-sm cursor-pointer">ตั้งค่าขั้นสูงสำหรับผู้ดูแลระบบ</summary><p className="mt-2 text-xs text-slate-500">ใช้ค่าเดิมได้ เปลี่ยนเฉพาะเมื่อผู้ดูแล API แจ้งให้เปลี่ยน</p><label className="block mt-3 space-y-2 text-sm"><span>ชื่อ Header สำหรับ API Key</span><Input value={sync.headerName} disabled={busy} onChange={e=>{setSync({...sync,headerName:e.target.value});setSaved(false);}}/></label></details>
 
-      <div className="flex flex-wrap gap-2"><Button disabled={busy} onClick={()=>beginAction('save-sync')}>บันทึกการเชื่อมต่อ</Button><Button variant="outline" disabled={busy||syncStatus==='กำลังดาวน์โหลด'} onClick={()=>beginAction('sync')}>{busy?'กำลังดำเนินการ…':'ดาวน์โหลดข้อมูลตอนนี้'}</Button></div>
-      <div className="rounded-md bg-slate-50 p-3 text-sm space-y-1" aria-live="polite">
-        <p>สถานะดาวน์โหลด: {syncStatus||'ยังไม่ได้บันทึกการเชื่อมต่อ'}</p>
-        <p>สำเร็จล่าสุด: {lastSuccess?new Date(lastSuccess.replace(' ','T')+'Z').toLocaleString('th-TH'):'ยังไม่มี'}</p>
-        <p className="text-slate-600">ระบบตรวจรอบเมื่อบริการทำงาน และดาวน์โหลดซ้ำตามจำนวนนาทีที่บันทึกไว้ การดาวน์โหลดข้อมูลไม่ใช่การสั่งพิมพ์</p>
-      </div>
-    </>:<>
-    <label className="block space-y-2 text-sm"><span>ไฟล์ฐานข้อมูล AdaAccD.db</span><Input className="w-full min-w-0" value={path} onChange={e=>{setPath(e.target.value);setCheckedPath('');setBranches([]);}} placeholder="C:\ProgramData\AdaPos6.0\AdaStoreFront\Data\AdaAccD.db"/><span className="block text-xs text-slate-500">วางพาธเต็มของไฟล์บนเครื่อง POS แล้วกดตรวจสอบ ระบบจะไม่สร้างไฟล์หรือเขียนข้อมูลลงฐานนี้</span></label>
-    {'__TAURI_INTERNALS__' in window&&<Button variant="outline" disabled={busy} onClick={()=>act(async()=>{const selected=await invoke<string|null>('choose_master_database');if(selected){setPath(selected);setCheckedPath('');setBranches([]);}})}>เลือกไฟล์ฐานข้อมูล</Button>}
-    <Button variant="outline" disabled={busy} onClick={()=>beginAction('check')}>ตรวจสอบการเชื่อมต่อ</Button>
-    {checkedPath===path&&branches.length>0&&<div className="grid gap-4 sm:grid-cols-2">
-      <label className="space-y-2 text-sm"><span>สาขาของเครื่องพิมพ์</span><select className="block w-full h-10 rounded-md border bg-white px-2" value={branch} onChange={e=>setBranch(e.target.value)}><option value="">เลือกสาขา</option>{branches.map(b=><option key={b.code} value={b.code}>{b.code} · {b.name||b.code}</option>)}</select></label>
-      <label className="space-y-2 text-sm"><span>อายุข้อมูลสูงสุดสำหรับ Auto (นาที)</span><Input type="number" min={1} max={10080} value={age} onChange={e=>setAge(Number(e.target.value))}/></label>
+  function closeAuthorization() {
+    if (busy) return;
+    setPendingAction(null);
+    setPin('');
+    setNewPin('');
+    setPinConfirmation('');
+    setAuthorizationError('');
+  }
 
-      <div className="flex items-end"><Button className="bg-teal-700 text-white" disabled={busy} onClick={()=>beginAction('save-pos')}>บันทึกแหล่งข้อมูล</Button></div>
-    </div>}
-    </>}
-    <p className="text-sm break-words rounded-md bg-slate-50 p-3" role="status">{message}</p>
-    <p className="text-xs text-slate-500">การเปลี่ยนฐานหรือสาขาต้องไม่มีงานค้าง ระบบจะปิดตาราง Auto เพื่อให้ตรวจสอบก่อนเปิดใช้งานอีกครั้ง</p>
-    <Dialog open={pendingAction!==null} onOpenChange={open=>{if(!open)closeAuthorization();}}>
-      <DialogContent className="sm:max-w-md" onEscapeKeyDown={event=>{if(busy)event.preventDefault();}} onPointerDownOutside={event=>{if(busy)event.preventDefault();}}>
-        <DialogHeader><DialogTitle>ยืนยันด้วย PIN ผู้ดูแลระบบ</DialogTitle><DialogDescription>{actionTitle} · ใช้ PIN ผู้ดูแลของ AdaBarprint ไม่ใช่รหัสเข้าสู่ระบบ POS</DialogDescription></DialogHeader>
-        <form onSubmit={confirmAction} className="space-y-4">
-          <label className="block space-y-2 text-sm"><span>PIN ผู้ดูแลระบบ</span><Input autoFocus type="password" inputMode="numeric" autoComplete="off" value={pin} disabled={busy} onChange={e=>setPin(e.target.value)} aria-invalid={Boolean(authorizationError)} aria-describedby={authorizationError?'source-pin-error':undefined}/></label>
-          {(pendingAction==='save-sync'||pendingAction==='save-pos')&&<details open={pinChangeRequired||undefined}><summary className="text-sm cursor-pointer">{pinChangeRequired?'ตั้ง PIN ผู้ดูแลระบบใหม่ก่อนเริ่มใช้งาน':'เปลี่ยน PIN ผู้ดูแลระบบ (ถ้าต้องการ)'}</summary><div className="space-y-3 mt-3">
-            <label className="block space-y-2 text-sm"><span>PIN ใหม่ (ตัวเลข 6–12 หลัก)</span><Input type="password" inputMode="numeric" autoComplete="new-password" value={newPin} disabled={busy} onChange={e=>setNewPin(e.target.value)}/></label>
-            <label className="block space-y-2 text-sm"><span>ยืนยัน PIN ใหม่</span><Input type="password" inputMode="numeric" autoComplete="new-password" value={pinConfirmation} disabled={busy} onChange={e=>setPinConfirmation(e.target.value)}/></label>
-          </div></details>}
-          {authorizationError&&<p id="source-pin-error" role="alert" className="text-sm text-red-700 bg-red-50 rounded-md p-3">{authorizationError}</p>}
-          <div className="flex justify-end gap-2"><Button type="button" variant="outline" disabled={busy} onClick={closeAuthorization}>ยกเลิก</Button><Button type="submit" disabled={busy}>{busy?'กำลังดำเนินการ…':'ยืนยัน'+(pendingAction==='sync'?'ดาวน์โหลด':pendingAction==='check'?'ตรวจสอบ':'บันทึก')}</Button></div>
-        </form>
-      </DialogContent>
-    </Dialog>
-  </section>;
+  async function confirmAction(event: React.FormEvent) {
+    event.preventDefault();
+    if (busy || !pendingAction) return;
+    if (!pin.trim()) {
+      setAuthorizationError('กรุณากรอก PIN ผู้ดูแลระบบเพื่อยืนยัน');
+      return;
+    }
+    setBusy(true);
+    setAuthorizationError('');
+    try {
+      if (pendingAction === 'check') {
+        const r = await request('/api/storage/check', { path: dbPath.trim(), pin });
+        const branchList = Array.isArray(r.branches) ? r.branches : [];
+        setBranches(branchList);
+        setCheckedPath(dbPath.trim());
+        if (!branch.trim() && branchList.length === 1 && branchList[0]?.code) {
+          setBranch(branchList[0].code);
+          setSync((prev) => ({ ...prev, branch: branchList[0].code }));
+        }
+        setMessage(
+          branchList.length === 0
+            ? 'พบไฟล์ฐานข้อมูล แต่ยังไม่มีข้อมูลสาขา'
+            : `ตรวจโครงสร้าง DB สำเร็จ · สินค้า ${r.productCount} รายการ · ผู้ใช้ ${r.userCount} ราย`,
+        );
+      } else if (pendingAction === 'sync') {
+        const r = await request('/api/storage/sync', { pin });
+        setMessage(String(r.message || 'ดาวน์โหลดข้อมูลครบแล้ว'));
+        await refreshStatus();
+      } else {
+        const effectiveBranch = branch.trim() || sync.branch.trim();
+        const hasUrl = Boolean(sync.baseUrl.trim());
+        const payload = {
+          mode: 'UNIFIED',
+          path: dbPath.trim() || defaultPath,
+          branch: effectiveBranch,
+          maxAgeMinutes: age,
+          sync: hasUrl
+            ? {
+                ...sync,
+                baseUrl: sync.baseUrl.trim(),
+                branch: effectiveBranch,
+              }
+            : null,
+          ...pinFields(),
+        };
+        const r = await request('/api/storage', payload);
+        if (newPin) setPinChangeRequired(false);
+        setApiConfigured(hasUrl);
+        setDirty(false);
+        if (hasUrl) {
+          setHasKey(true);
+          setSync((prev) => ({ ...prev, apiKey: '' }));
+        }
+        setMessage(r.message);
+        await refreshStatus();
+        onSaved?.();
+      }
+      setPendingAction(null);
+      setPin('');
+      setNewPin('');
+      setPinConfirmation('');
+    } catch (e) {
+      setAuthorizationError(e instanceof Error ? e.message : 'ทำรายการไม่สำเร็จ กรุณาลองใหม่');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function act(fn: () => Promise<void>) {
+    setBusy(true);
+    try {
+      await fn();
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="min-w-0 rounded-xl border border-slate-200 bg-white p-4 sm:p-5 space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="font-semibold text-teal-800 flex items-center gap-1.5">
+          <ShieldCheck className="h-4 w-4 text-[#007a87]" />
+          แหล่งข้อมูลสินค้า &amp; API
+        </h3>
+        {dataRoot && (
+          <span className="text-xs text-slate-500">
+            Application Path: <code className="rounded bg-slate-100 px-1.5 py-0.5">{dataRoot}</code>
+          </span>
+        )}
+      </div>
+
+      {pathWarning && (
+        <p role="alert" className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+          {pathWarning}
+        </p>
+      )}
+
+      {/* ส่วนที่ 1: ไฟล์ฐานข้อมูลสินค้า AdaAccD.db */}
+      <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-sm font-semibold text-slate-800">1. ฐานข้อมูลสินค้า (AdaAccD.db)</span>
+          <div className="flex flex-wrap gap-2">
+            {defaultPath && (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-8 text-xs bg-white"
+                disabled={busy}
+                onClick={() => {
+                  setDbPath(defaultPath);
+                  setCheckedPath('');
+                  setBranches([]);
+                  setDirty(true);
+                }}
+              >
+                <RefreshCw className="h-3.5 w-3.5 mr-1" />
+                ใช้ Path มาตรฐานข้างโปรแกรม
+              </Button>
+            )}
+            {'__TAURI_INTERNALS__' in window && (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-8 text-xs bg-white"
+                disabled={busy}
+                onClick={() =>
+                  act(async () => {
+                    const selected = await invoke<string | null>('choose_master_database');
+                    if (selected) {
+                      setDbPath(selected);
+                      setCheckedPath('');
+                      setBranches([]);
+                      setDirty(true);
+                    }
+                  })
+                }
+              >
+                <FolderOpen className="h-3.5 w-3.5 mr-1" />
+                เลือกไฟล์...
+              </Button>
+            )}
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="h-8 text-xs bg-white"
+              disabled={busy}
+              onClick={() => beginAction('check')}
+            >
+              ตรวจสอบไฟล์ DB
+            </Button>
+          </div>
+        </div>
+
+        <label className="block space-y-1.5 text-sm">
+          <span className="text-slate-700">ไฟล์ฐานข้อมูล AdaAccD.db</span>
+          <Input
+            className="w-full min-w-0 bg-white font-mono text-xs"
+            value={dbPath}
+            disabled={busy}
+            placeholder={defaultPath || 'เช่น D:\\AdaBarprint\\Data\\AdaAccD.db'}
+            onChange={(e) => {
+              setDbPath(e.target.value);
+              setCheckedPath('');
+              setBranches([]);
+              setDirty(true);
+            }}
+          />
+        </label>
+      </div>
+
+      {/* ส่วนที่ 2: ข้อมูลสาขา & เชื่อมต่อ API2PSMaster */}
+      <div className="rounded-lg border border-slate-200 p-4 space-y-3">
+        <span className="text-sm font-semibold text-slate-800 block">
+          2. ข้อมูลสาขา &amp; เชื่อมต่อ API2PSMaster (ไม่บังคับ)
+        </span>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="block space-y-1.5 text-sm">
+            <span className="text-slate-700">รหัสสาขา</span>
+            {checkedPath === dbPath.trim() && branches.length > 0 ? (
+              <select
+                className="block w-full h-9 rounded-md border border-slate-300 bg-white px-2 text-sm"
+                value={branch}
+                disabled={busy}
+                onChange={(e) => {
+                  setBranch(e.target.value);
+                  setSync((prev) => ({ ...prev, branch: e.target.value }));
+                  setDirty(true);
+                }}
+              >
+                <option value="">-- เลือกสาขา --</option>
+                {branches.map((b) => (
+                  <option key={b.code} value={b.code}>
+                    {b.code} · {b.name || b.code}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <Input
+                className="bg-white h-9 text-sm"
+                value={branch}
+                disabled={busy}
+                placeholder="เช่น 00001"
+                onChange={(e) => {
+                  setBranch(e.target.value);
+                  setSync((prev) => ({ ...prev, branch: e.target.value }));
+                  setDirty(true);
+                }}
+              />
+            )}
+          </label>
+
+          <label className="block space-y-1.5 text-sm">
+            <span className="text-slate-700">รหัสตัวแทน (Agency)</span>
+            <Input
+              value={sync.agency}
+              disabled={busy}
+              placeholder="เช่น 00001"
+              onChange={(e) => {
+                setSync({ ...sync, agency: e.target.value });
+                setDirty(true);
+              }}
+            />
+          </label>
+
+          <label className="block space-y-1.5 text-sm">
+            <span className="text-slate-700">URL ของ API2PSMaster (ไม่บังคับ)</span>
+            <Input
+              value={sync.baseUrl}
+              disabled={busy}
+              placeholder="http://.../API2PSMaster/V6"
+              autoComplete="off"
+              onChange={(e) => {
+                setSync({ ...sync, baseUrl: e.target.value });
+                setDirty(true);
+              }}
+            />
+          </label>
+
+          <label className="block space-y-1.5 text-sm">
+            <span className="text-slate-700">
+              {hasKey ? 'API Key (เว้นว่างเพื่อใช้ค่าเดิม)' : 'API Key'}
+            </span>
+            <Input
+              type="password"
+              value={sync.apiKey}
+              disabled={busy}
+              autoComplete="off"
+              onChange={(e) => {
+                setSync({ ...sync, apiKey: e.target.value });
+                setDirty(true);
+              }}
+            />
+          </label>
+
+          <label className="block space-y-1.5 text-sm">
+            <span className="text-slate-700">รหัสเครื่อง POS (ไม่บังคับ)</span>
+            <Input
+              value={sync.pos}
+              disabled={busy}
+              placeholder="ปล่อยว่างหากไม่ใช่เครื่อง POS"
+              onChange={(e) => {
+                setSync({ ...sync, pos: e.target.value });
+                setDirty(true);
+              }}
+            />
+          </label>
+        </div>
+
+        <details className="pt-1">
+          <summary className="text-xs text-slate-500 cursor-pointer">
+            ตั้งค่าขั้นสูง (Header Name)
+          </summary>
+          <label className="block mt-2 space-y-1.5 text-sm max-w-xs">
+            <span className="text-xs text-slate-600">ชื่อ Header สำหรับ API Key</span>
+            <Input
+              className="h-8 text-xs"
+              value={sync.headerName}
+              disabled={busy}
+              onChange={(e) => {
+                setSync({ ...sync, headerName: e.target.value });
+                setDirty(true);
+              }}
+            />
+          </label>
+        </details>
+      </div>
+
+      {/* ปุ่มดำเนินการ: บันทึก + ดาวน์โหลดข้อมูลตอนนี้ (Manual Sync) */}
+      <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+        <Button
+          type="button"
+          variant="outline"
+          disabled={busy || syncStatus === 'กำลังดาวน์โหลด'}
+          onClick={() => void runDirectSync()}
+        >
+          <Download className="h-4 w-4 mr-1.5" />
+          {syncStatus === 'กำลังดาวน์โหลด' ? 'กำลังดาวน์โหลด…' : 'ดาวน์โหลดข้อมูลตอนนี้ (Manual Sync)'}
+        </Button>
+        <Button
+          type="button"
+          className="bg-[#007a87] hover:bg-[#00606b] text-white"
+          disabled={busy}
+          onClick={() => beginAction('save')}
+        >
+          {busy ? 'กำลังบันทึก…' : 'บันทึกการตั้งค่าแหล่งข้อมูล'}
+        </Button>
+      </div>
+
+      <div className="rounded-md bg-slate-50 p-3 text-xs text-slate-600 space-y-1" aria-live="polite">
+        <p>
+          โหมดเชื่อมต่อ:{' '}
+          <strong className="text-slate-800">
+            {apiConfigured ? 'API2PSMaster (Manual Sync)' : 'ฐานข้อมูลโดยตรง / นำเข้า Master'}
+          </strong>
+        </p>
+        {syncStatus && <p>สถานะ: {syncStatus}</p>}
+        {lastSuccess && (
+          <p>
+            อัปเดตล่าสุด:{' '}
+            {lastSuccess.includes('T') || lastSuccess.includes('-')
+              ? new Date(lastSuccess.replace(' ', 'T') + (lastSuccess.endsWith('Z') ? '' : 'Z')).toLocaleString('th-TH')
+              : lastSuccess}
+          </p>
+        )}
+      </div>
+
+      <p className="text-sm break-words rounded-md bg-slate-50 border border-slate-200 p-3" role="status">
+        {message}
+      </p>
+
+      <Dialog
+        open={pendingAction !== null}
+        onOpenChange={(open) => {
+          if (!open) closeAuthorization();
+        }}
+      >
+        <DialogContent
+          className="sm:max-w-md"
+          onEscapeKeyDown={(event) => {
+            if (busy) event.preventDefault();
+          }}
+          onPointerDownOutside={(event) => {
+            if (busy) event.preventDefault();
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>ยืนยันด้วย PIN ผู้ดูแลระบบ (IT / Admin)</DialogTitle>
+            <DialogDescription>
+              {actionTitle} · ใช้ PIN ผู้ดูแลของ AdaBarprint ไม่ใช่รหัสเข้าสู่ระบบ POS
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={confirmAction} className="space-y-4">
+            <label className="block space-y-2 text-sm">
+              <span>PIN ผู้ดูแลระบบ</span>
+              <Input
+                autoFocus
+                type="password"
+                inputMode="numeric"
+                autoComplete="off"
+                value={pin}
+                disabled={busy}
+                onChange={(e) => setPin(e.target.value)}
+                aria-invalid={Boolean(authorizationError)}
+                aria-describedby={authorizationError ? 'source-pin-error' : undefined}
+              />
+            </label>
+            {pendingAction === 'save' && (
+              <details open={pinChangeRequired || undefined}>
+                <summary className="text-sm cursor-pointer">
+                  {pinChangeRequired ? 'ตั้ง PIN ผู้ดูแลระบบใหม่ก่อนเริ่มใช้งาน' : 'เปลี่ยน PIN ผู้ดูแลระบบ (ถ้าต้องการ)'}
+                </summary>
+                <div className="space-y-3 mt-3">
+                  <label className="block space-y-2 text-sm">
+                    <span>PIN ใหม่ (ตัวเลข 6–12 หลัก)</span>
+                    <Input
+                      type="password"
+                      inputMode="numeric"
+                      autoComplete="new-password"
+                      value={newPin}
+                      disabled={busy}
+                      onChange={(e) => setNewPin(e.target.value)}
+                    />
+                  </label>
+                  <label className="block space-y-2 text-sm">
+                    <span>ยืนยัน PIN ใหม่</span>
+                    <Input
+                      type="password"
+                      inputMode="numeric"
+                      autoComplete="new-password"
+                      value={pinConfirmation}
+                      disabled={busy}
+                      onChange={(e) => setPinConfirmation(e.target.value)}
+                    />
+                  </label>
+                </div>
+              </details>
+            )}
+            {authorizationError && (
+              <p id="source-pin-error" role="alert" className="text-sm text-red-700 bg-red-50 rounded-md p-3">
+                {authorizationError}
+              </p>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="outline" disabled={busy} onClick={closeAuthorization}>
+                ยกเลิก
+              </Button>
+              <Button type="submit" disabled={busy}>
+                {busy ? 'กำลังดำเนินการ…' : pendingAction === 'sync' ? 'ยืนยันดาวน์โหลด' : pendingAction === 'check' ? 'ยืนยันตรวจสอบ' : 'ยืนยันบันทึก'}
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
+    </section>
+  );
 }

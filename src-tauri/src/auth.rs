@@ -122,6 +122,42 @@ pub async fn ensure_auth_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+pub async fn has_active_session(pool: &SqlitePool, headers: &HeaderMap) -> bool {
+    let Some(token) = bearer_token(headers) else {
+        return false;
+    };
+    matches!(load_valid_session(pool, &token).await, Ok(session) if session.FTSesLocked == 0)
+}
+
+pub async fn get_admin_status(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    let pin_change_required = crate::storage::admin_pin_change_required(&st.pool).await;
+    let granted = if let Some(token) = bearer_token(&headers) {
+        if let Ok(session) = load_valid_session(&st.pool, &token).await {
+            if session.FTSesLocked == 0 {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM ABAdminGrant WHERE token_hash=? AND expires>unixepoch()",
+                )
+                .bind(&session.FTSesTokenHash)
+                .fetch_one(&st.pool)
+                .await
+                .unwrap_or(0)
+                    > 0
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    Json(json!({
+        "adminGranted": granted,
+        "pinChangeRequired": pin_change_required
+    }))
+    .into_response()
+}
+
 pub async fn grant_admin(pool: &SqlitePool, headers: &HeaderMap) -> Result<(), String> {
     let token=bearer_token(headers).ok_or("กรุณาเข้าสู่ระบบก่อนยืนยันสิทธิ์ผู้ดูแล")?;
     let session=load_valid_session(pool,&token).await.map_err(|(_,m)|m)?;
@@ -130,6 +166,17 @@ pub async fn grant_admin(pool: &SqlitePool, headers: &HeaderMap) -> Result<(), S
     sqlx::query("INSERT INTO ABAdminGrant(token_hash,expires) VALUES(?,unixepoch()+600) ON CONFLICT(token_hash) DO UPDATE SET expires=excluded.expires")
         .bind(session.FTSesTokenHash).execute(pool).await.map_err(|e|e.to_string())?;
     Ok(())
+}
+
+pub async fn revoke_admin(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(token) = bearer_token(&headers) {
+        let token_hash = hash_token(&token);
+        let _ = sqlx::query("DELETE FROM ABAdminGrant WHERE token_hash = ?")
+            .bind(&token_hash)
+            .execute(&st.pool)
+            .await;
+    }
+    Json(json!({ "ok": true, "adminGranted": false })).into_response()
 }
 
 fn normalize_credential_type(raw: Option<&str>) -> &'static str {
@@ -272,7 +319,7 @@ pub async fn require_api_session(
                     return (StatusCode::UNAUTHORIZED, Json(json!({"error":"แหล่งข้อมูลเปลี่ยนแล้ว กรุณาเข้าสู่ระบบใหม่"}))).into_response();
                 }
                 let changes_settings=request.method()!=axum::http::Method::GET && (
-                    path.starts_with("/api/config/") && path!="/api/config/admin-verify"
+                    path.starts_with("/api/config/") && !matches!(path, "/api/config/admin-verify" | "/api/config/admin-revoke")
                     || ["/api/paper-sizes/","/api/preprints/","/api/lan-printers/","/api/label-sizes/","/api/templates/","/api/schedules/"].iter().any(|prefix|path.starts_with(prefix))
                     || matches!(path,"/api/seed"|"/api/printers"|"/api/agent/register"|"/api/print-center/rule"|"/api/print-center/rules"|"/api/print-center/sync"|"/api/print-center/action"));
                 if changes_settings {
@@ -752,6 +799,10 @@ pub async fn post_auth_unlock(
 pub async fn post_auth_logout(State(st): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(token) = bearer_token(&headers) {
         let token_hash = hash_token(&token);
+        let _ = sqlx::query("DELETE FROM ABAdminGrant WHERE token_hash = ?")
+            .bind(&token_hash)
+            .execute(&st.pool)
+            .await;
         let _ = sqlx::query("DELETE FROM TCNTLabelAuthSession WHERE FTSesTokenHash = ?")
             .bind(&token_hash)
             .execute(&st.pool)

@@ -86,7 +86,7 @@ pub async fn init_db_and_router() -> Result<(Router, SqlitePool), sqlx::Error> {
     {
         scheduler_worker::spawn_scheduler_loop(pool.clone());
     }
-    if std::env::var("ADABARPRINT_DISABLE_SYNC_WORKER").as_deref()!=Ok("1"){standalone::spawn(pool.clone());}
+    // Auto-sync background polling disabled per review: updates happen only via Manual Download or Import Master.
     Ok((build_router(pool.clone()), pool))
 }
 
@@ -101,6 +101,8 @@ pub fn build_router(pool: SqlitePool) -> Router {
         .route("/api/print-center", get(print_center::get_center))
         .route("/api/print-center/rule", post(print_center::save_rule))
         .route("/api/print-center/rules", post(print_center::save_rules))
+        .route("/api/print-center/profile/delete", post(print_center::delete_rule))
+        .route("/api/print-center/run-profile", post(print_center::run_profile_api))
         .route("/api/print-center/preview", post(print_center::preview_rule))
         .route("/api/print-center/manual-candidates", post(print_center::manual_candidates))
         .route("/api/print-center/enqueue", post(print_center::enqueue_rule))
@@ -153,6 +155,7 @@ pub fn build_router(pool: SqlitePool) -> Router {
         .route("/api/history", get(get_history))
         .route("/api/history/:jobId", get(get_history_job))
         .route("/api/import", post(post_import))
+        .route("/api/import/master", post(post_import_master))
         .route("/api/print/build-line", post(post_build_line))
         .route("/api/print/create-job", post(post_create_job))
         .route("/api/print/send", post(print_center::enqueue_lan))
@@ -171,7 +174,9 @@ pub fn build_router(pool: SqlitePool) -> Router {
             .route("/api/schedules/runs/:runId/load-to-manual", post(post_load_failed_to_manual))
             .route("/api/sync/status", get(get_sync_status))
             .route("/api/sync/trigger", post(print_center::request_sync))
-            .route("/api/config/admin-verify", post(post_verify_admin_pin));
+            .route("/api/config/admin-status", get(auth::get_admin_status))
+            .route("/api/config/admin-verify", post(post_verify_admin_pin))
+            .route("/api/config/admin-revoke", post(auth::revoke_admin));
     }
 
     router
@@ -181,24 +186,122 @@ pub fn build_router(pool: SqlitePool) -> Router {
         .with_state(state)
 }
 
+/// Extract a Profile Code passed via Windows Task Scheduler / CLI (e.g., `AdaBarprint.exe 001` or `--profile 001`).
+pub fn parse_cli_profile_arg(args: &[String]) -> Option<String> {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].trim();
+        if let Some(val) = arg.strip_prefix("--profile=") {
+            let clean = val.trim();
+            if !clean.is_empty() {
+                return Some(clean.to_string());
+            }
+        } else if let Some(val) = arg.strip_prefix("/profile:") {
+            let clean = val.trim();
+            if !clean.is_empty() {
+                return Some(clean.to_string());
+            }
+        } else if arg == "--profile" || arg == "-p" {
+            if let Some(next) = args.get(i + 1) {
+                let clean = next.trim();
+                if !clean.is_empty() {
+                    return Some(clean.to_string());
+                }
+            }
+        } else if !arg.starts_with('-') && !arg.starts_with('/') && !arg.is_empty() {
+            return Some(arg.to_string());
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Run a saved Print Profile headlessly from CLI and exit with 0 on success or 1 on error.
+pub fn run_profile_cli(profile_code: &str) -> i32 {
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[AdaBarprint CLI] Failed to initialize Tokio runtime: {e}");
+            return 1;
+        }
+    };
+    rt.block_on(async move {
+        db::load_env();
+        let pool = match db::connect_db().await {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[AdaBarprint CLI] Database connection failed: {e}");
+                return 1;
+            }
+        };
+        if let Err(e) = db::ensure_label_schema(&pool).await {
+            eprintln!("[AdaBarprint CLI] Schema initialization failed: {e}");
+            pool.close().await;
+            return 1;
+        }
+        if let Err(e) = print_center::ensure_schema(&pool).await {
+            eprintln!("[AdaBarprint CLI] Print center schema failed: {e}");
+            pool.close().await;
+            return 1;
+        }
+        let outcome = print_center::execute_profile_cli(&pool, profile_code).await;
+        let log_line = match &outcome {
+            Ok(val) => format!("[{}] PROFILE={} OK {}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), profile_code, val),
+            Err(err_msg) => format!("[{}] PROFILE={} ERROR {}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), profile_code, err_msg),
+        };
+        let log_dir = storage::data_root().join("Logs");
+        let _ = std::fs::create_dir_all(&log_dir);
+        let log_file = log_dir.join(format!("cli-{}.log", chrono::Local::now().format("%Y-%m-%d")));
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_file) {
+            use std::io::Write;
+            let _ = f.write_all(log_line.as_bytes());
+        }
+        pool.close().await;
+        match outcome {
+            Ok(val) => {
+                println!("{val}");
+                0
+            }
+            Err(err_msg) => {
+                eprintln!("{err_msg}");
+                1
+            }
+        }
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let (router, db_pool) = tauri::async_runtime::block_on(async { init_db_and_router().await })
-        .expect("Failed to initialize AdaBarprint storage");
+    let exit_pool_holder: std::sync::Arc<std::sync::OnceLock<SqlitePool>> =
+        std::sync::Arc::new(std::sync::OnceLock::new());
+    let setup_pool_holder = exit_pool_holder.clone();
 
-    let mut router_opt = Some(router);
+    let mut builder = tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![storage::choose_master_database]);
 
-    let app = tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![storage::choose_master_database])
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.unminimize();
                 let _ = win.show();
                 let _ = win.set_focus();
             }
-        }))
+        }));
+    }
+
+    let app = builder
         .setup(move |app| {
-            let router = router_opt.take().expect("Router already initialized");
+            #[cfg(mobile)]
+            {
+                let app_data_dir = app.path().app_data_dir()?;
+                storage::set_app_data_root(app_data_dir);
+            }
+
+            let (router, db_pool) =
+                tauri::async_runtime::block_on(async { init_db_and_router().await })
+                    .expect("Failed to initialize AdaBarprint storage");
+            let _ = setup_pool_holder.set(db_pool);
 
             let listener = tauri::async_runtime::block_on(async {
                 if cfg!(debug_assertions) {
@@ -234,7 +337,7 @@ pub fn run() {
                 }
             });
 
-            let initial_url: tauri::Url = if cfg!(debug_assertions) {
+            let initial_url: tauri::Url = if cfg!(dev) {
                 "http://localhost:5173/AdaBarprint"
                     .parse()
                     .expect("Invalid devUrl")
@@ -244,26 +347,47 @@ pub fn run() {
                     .expect("Invalid local URL")
             };
 
-            let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(initial_url))
+            let win_builder =
+                WebviewWindowBuilder::new(app, "main", WebviewUrl::External(initial_url));
+            #[cfg(desktop)]
+            let win_builder = win_builder
                 .title("AdaPos 6.0 PrintBar — ระบบพิมพ์ป้ายราคาและบาร์โค้ด")
                 .inner_size(1366.0, 860.0)
                 .min_inner_size(1024.0, 680.0)
-                .maximized(true)
-                .build()?;
+                .maximized(true);
+            let win = win_builder.build()?;
 
+            #[cfg(desktop)]
             let _ = win.set_focus();
+            #[cfg(mobile)]
+            let _ = win;
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error while building AdaBarprint Tauri application");
 
-    let exit_pool = db_pool.clone();
     app.run(move |_app_handle, event| {
         if let tauri::RunEvent::Exit = event {
-            let pool = exit_pool.clone();
-            tauri::async_runtime::block_on(async move {
-                pool.close().await;
-            });
+            if let Some(pool) = exit_pool_holder.get() {
+                let pool = pool.clone();
+                tauri::async_runtime::block_on(async move {
+                    pool.close().await;
+                });
+            }
         }
     });
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::parse_cli_profile_arg;
+
+    #[test]
+    fn parses_profile_code_from_positional_and_flag_args() {
+        assert_eq!(parse_cli_profile_arg(&[]), None);
+        assert_eq!(parse_cli_profile_arg(&["001".into()]), Some("001".into()));
+        assert_eq!(parse_cli_profile_arg(&["--profile".into(), "002".into()]), Some("002".into()));
+        assert_eq!(parse_cli_profile_arg(&["--profile=003".into()]), Some("003".into()));
+        assert_eq!(parse_cli_profile_arg(&["/profile:PROMO_A".into()]), Some("PROMO_A".into()));
+    }
 }

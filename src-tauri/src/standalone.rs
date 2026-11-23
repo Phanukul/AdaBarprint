@@ -12,9 +12,11 @@ use sqlx::{sqlite::SqliteConnectOptions, Connection, SqlitePool};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    process::Stdio,
     time::Duration,
 };
+#[cfg(target_os = "windows")]
+use std::process::Stdio;
+#[cfg(target_os = "windows")]
 use tokio::io::AsyncWriteExt;
 type Result<T> = std::result::Result<T, String>;
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -93,41 +95,120 @@ pub fn validate_config(c: &SyncConfig) -> Result<()> {
             .header_name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        || !(1..=1440).contains(&c.interval_minutes)
     {
-        return Err("ระบุสาขา ชื่อ Header และรอบดาวน์โหลด 1–1440 นาที".into());
+        return Err("ระบุสาขาและชื่อ Header ให้ถูกต้อง".into());
     }
     Ok(())
 }
 // Windows DPAPI binds the stored credential to the Windows account running the service.
-pub async fn protect(secret: &str, decrypt: bool) -> Result<String> {
-    let script = if decrypt {
-        "[void][Reflection.Assembly]::LoadWithPartialName('System.Security'); $s=[Console]::In.ReadToEnd(); $b=[Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String($s),$null,[Security.Cryptography.DataProtectionScope]::CurrentUser); [Console]::OutputEncoding=[Text.UTF8Encoding]::new(); [Console]::Write([Text.Encoding]::UTF8.GetString($b))"
-    } else {
-        "[void][Reflection.Assembly]::LoadWithPartialName('System.Security'); $s=[Console]::In.ReadToEnd(); $b=[Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($s),$null,[Security.Cryptography.DataProtectionScope]::CurrentUser); [Console]::Write([Convert]::ToBase64String($b))"
-    };
-    let mut cmd = tokio::process::Command::new("powershell.exe");
-    #[cfg(windows)]
-    cmd.creation_flags(0x08000000);
-    let mut child = cmd
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| "ไม่สามารถใช้ Windows Credential Protection".to_string())?;
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(secret.as_bytes())
-        .await
-        .map_err(|e| e.to_string())?;
-    let out = child.wait_with_output().await.map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err("อ่านข้อมูลยืนยันตัวตนไม่ได้ กรุณาระบุ API Key ใหม่ด้วยบัญชี Windows ที่ใช้รันบริการ".into());
+// Non-Windows (Android/iOS/Unix) stores an app-sandboxed AES-128-CBC secret key under `data_root()`.
+fn load_or_create_local_key_at(root: &Path) -> Result<[u8; 16]> {
+    let key_path = root.join(".secret.key");
+    if key_path.is_file() {
+        let raw = std::fs::read(&key_path).map_err(|_| "ไม่สามารถอ่านคีย์เข้ารหัสภายในแอป".to_string())?;
+        if raw.len() == 16 {
+            let mut key = [0u8; 16];
+            key.copy_from_slice(&raw);
+            return Ok(key);
+        }
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().into())
+    if let Some(parent) = key_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let key = *uuid::Uuid::new_v4().as_bytes();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&key_path)
+            .map_err(|e| e.to_string())?;
+        f.write_all(&key).map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&key_path, &key).map_err(|e| e.to_string())?;
+    }
+    Ok(key)
+}
+
+fn protect_local_at(root: &Path, secret: &str, decrypt: bool) -> Result<String> {
+    use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
+    type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
+
+    let key = load_or_create_local_key_at(root)?;
+    if decrypt {
+        let encoded = secret
+            .strip_prefix("local:")
+            .ok_or_else(|| "ข้อมูลยืนยันตัวตนไม่รองรับบนระบบปฏิบัติการนี้ กรุณาระบุใหม่".to_string())?;
+        let raw = B64
+            .decode(encoded.trim())
+            .map_err(|_| "อ่านข้อมูลยืนยันตัวตนไม่สำเร็จ".to_string())?;
+        if raw.len() < 17 {
+            return Err("อ่านข้อมูลยืนยันตัวตนไม่สำเร็จ".into());
+        }
+        let (iv, ct) = raw.split_at(16);
+        let dec = Aes128CbcDec::new_from_slices(&key, iv)
+            .map_err(|_| "ไม่สามารถถอดรหัสข้อมูลยืนยันตัวตน".to_string())?;
+        let plain = dec
+            .decrypt_padded_vec_mut::<Pkcs7>(ct)
+            .map_err(|_| "อ่านข้อมูลยืนยันตัวตนไม่ได้ กรุณาระบุใหม่".to_string())?;
+        String::from_utf8(plain).map_err(|_| "ข้อมูลยืนยันตัวตนไม่ถูกต้อง".to_string())
+    } else {
+        let iv = *uuid::Uuid::new_v4().as_bytes();
+        let enc = Aes128CbcEnc::new_from_slices(&key, &iv)
+            .map_err(|_| "ไม่สามารถเข้ารหัสข้อมูลยืนยันตัวตน".to_string())?;
+        let ct = enc.encrypt_padded_vec_mut::<Pkcs7>(secret.as_bytes());
+        let mut combined = Vec::with_capacity(16 + ct.len());
+        combined.extend_from_slice(&iv);
+        combined.extend_from_slice(&ct);
+        Ok(format!("local:{}", B64.encode(combined)))
+    }
+}
+
+pub async fn protect(secret: &str, decrypt: bool) -> Result<String> {
+    #[cfg(target_os = "windows")]
+    {
+        if decrypt && secret.starts_with("local:") {
+            return protect_local_at(&crate::storage::data_root(), secret, true);
+        }
+        let script = if decrypt {
+            "[void][Reflection.Assembly]::LoadWithPartialName('System.Security'); $s=[Console]::In.ReadToEnd(); $b=[Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String($s),$null,[Security.Cryptography.DataProtectionScope]::CurrentUser); [Console]::OutputEncoding=[Text.UTF8Encoding]::new(); [Console]::Write([Text.Encoding]::UTF8.GetString($b))"
+        } else {
+            "[void][Reflection.Assembly]::LoadWithPartialName('System.Security'); $s=[Console]::In.ReadToEnd(); $b=[Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($s),$null,[Security.Cryptography.DataProtectionScope]::CurrentUser); [Console]::Write([Convert]::ToBase64String($b))"
+        };
+        let mut cmd = tokio::process::Command::new("powershell.exe");
+        cmd.creation_flags(0x08000000);
+        let mut child = cmd
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| "ไม่สามารถใช้ Windows Credential Protection".to_string())?;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(secret.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+        let out = child.wait_with_output().await.map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err("อ่านข้อมูลยืนยันตัวตนไม่ได้ กรุณาระบุ API Key ใหม่ด้วยบัญชี Windows ที่ใช้รันบริการ".into());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().into())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        protect_local_at(&crate::storage::data_root(), secret, decrypt)
+    }
 }
 /// A standalone destination must be a local, print-owned master; never adopt a POS database.
 pub async fn prepare_destination(path: &Path) -> Result<()> {
@@ -169,15 +250,6 @@ pub async fn create_master(path: &Path) -> Result<()> {
     sqlx::query("CREATE TABLE IF NOT EXISTS ABMasterIdentity(id INTEGER PRIMARY KEY,agency TEXT,branch TEXT,pos TEXT)").execute(&mut c).await.map_err(|e|e.to_string())?;
     c.close().await.map_err(|e| e.to_string())
 }
-fn esc(s: &str) -> String {
-    format!(
-        "\"{}\"",
-        s.replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\r', "\\r")
-            .replace('\n', "\\n")
-    )
-}
 fn enc(s: &str) -> String {
     s.bytes()
         .map(|b| {
@@ -198,34 +270,32 @@ fn base(c: &SyncConfig) -> String {
     }
 }
 async fn http(c: &SyncConfig, url: &str, body: Option<Value>) -> Result<Value> {
-    let mut config=format!("url = {}\nheader = {}\nheader = \"Content-Type: application/json\"\nsilent\nshow-error\nfail\nmax-time = 90\nmax-redirs = 0\n",esc(url),esc(&format!("{}: {}",c.header_name,c.api_key)));
-    if let Some(b) = body {
-        config += &format!("request = \"POST\"\ndata = {}\n", esc(&b.to_string()));
-    }
-    let mut cmd = tokio::process::Command::new(if cfg!(windows) { "curl.exe" } else { "curl" });
-    #[cfg(windows)]
-    cmd.creation_flags(0x08000000);
-    let mut child = cmd
-        .args(["--config", "-"])
-        .kill_on_drop(true)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| "ไม่พบ curl สำหรับเชื่อม API".to_string())?;
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(config.as_bytes())
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(90))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "ไม่สามารถสร้างตัวเชื่อมต่อ API".to_string())?;
+    let mut req = if let Some(b) = body {
+        client.post(url).json(&b)
+    } else {
+        client.get(url)
+    };
+    req = req
+        .header(&c.header_name, &c.api_key)
+        .header("Content-Type", "application/json");
+    let resp = req
+        .send()
         .await
-        .map_err(|e| e.to_string())?;
-    let out = child.wait_with_output().await.map_err(|e| e.to_string())?;
-    if !out.status.success() {
+        .map_err(|_| "เชื่อม API ไม่สำเร็จ ตรวจ URL เครือข่าย และสิทธิ์ API Key".to_string())?;
+    if !resp.status().is_success() {
         return Err("เชื่อม API ไม่สำเร็จ ตรวจ URL เครือข่าย และสิทธิ์ API Key".into());
     }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|_| "เชื่อม API ไม่สำเร็จ ตรวจ URL เครือข่าย และสิทธิ์ API Key".to_string())?;
     let v: Value =
-        serde_json::from_slice(&out.stdout).map_err(|_| "API ไม่ได้ตอบกลับเป็น JSON".to_string())?;
+        serde_json::from_slice(&bytes).map_err(|_| "API ไม่ได้ตอบกลับเป็น JSON".to_string())?;
     if !["001", "1"].contains(&v["rtCode"].as_str().unwrap_or("")) {
         return Err(format!("API ไม่ยืนยันข้อมูลครบ (รหัส {})", v["rtCode"]));
     }
@@ -239,7 +309,11 @@ fn payload(v: Value) -> Result<Value> {
     Ok(p)
 }
 fn product_body(c: &SyncConfig) -> Value {
-    json!({"ptAgnCode":c.agency,"ptBchCode":c.branch,"ptPosCode":c.pos,"ptShpCode":c.shop,"pdDate":"1999-01-01 00:00:00","pnRow":0,"pnStartRow":0})
+    let mut body = json!({"ptAgnCode":c.agency,"ptBchCode":c.branch,"ptShpCode":c.shop,"pdDate":"1999-01-01 00:00:00","pnRow":0,"pnStartRow":0});
+    if !c.pos.trim().is_empty() {
+        body["ptPosCode"] = json!(c.pos.trim());
+    }
+    body
 }
 async fn download(c: &SyncConfig, t: &Task) -> Result<Value> {
     let mut uri = t.uri.clone();
@@ -251,13 +325,18 @@ async fn download(c: &SyncConfig, t: &Task) -> Result<Value> {
     ] {
         uri = uri.replace(k, &enc(v));
     }
+    let pos_qs = if c.pos.trim().is_empty() {
+        String::new()
+    } else {
+        format!("&ptPosCode={}", enc(c.pos.trim()))
+    };
     let url = format!(
-        "{}{}{}ptBchCode={}&ptPosCode={}",
+        "{}{}{}ptBchCode={}{}",
         base(c),
         uri,
         if uri.contains('?') { "&" } else { "?" },
         enc(&c.branch),
-        enc(&c.pos)
+        pos_qs
     );
     if t.table == "TCNMPdt" {
         let count = http(
@@ -317,7 +396,11 @@ async fn download(c: &SyncConfig, t: &Task) -> Result<Value> {
         return Ok(all);
     }
     if t.table == "TCNTPdtPrice4PDT" {
-        let mut p=payload(http(c,&url,Some(json!({"ptAgnCode":c.agency,"ptBchCode":c.branch,"ptPosCode":c.pos,"ptContractVersion":"3","ptSyncMode":"FULL"}))).await?)?;
+        let mut req_body = json!({"ptAgnCode":c.agency,"ptBchCode":c.branch,"ptContractVersion":"3","ptSyncMode":"FULL"});
+        if !c.pos.trim().is_empty() {
+            req_body["ptPosCode"] = json!(c.pos.trim());
+        }
+        let mut p=payload(http(c,&url,Some(req_body)).await?)?;
         if p.get("raPdtPrice4PDT").is_none() {
             p["raPdtPrice4PDT"] = p["raItems"].clone();
         }
@@ -525,9 +608,27 @@ pub async fn apply_snapshots(
     result
 }
 pub async fn sync_now(pool: &SqlitePool) -> Result<()> {
+    let source_cfg: Option<(String, String)> = sqlx::query_as("SELECT mode, config FROM ABSource WHERE id=1")
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let has_api = source_cfg
+        .as_ref()
+        .and_then(|(m, raw)| {
+            if m != "STANDALONE" {
+                return None;
+            }
+            serde_json::from_str::<SyncConfig>(raw)
+                .ok()
+                .filter(|c| !c.base_url.trim().is_empty())
+        })
+        .is_some();
+    if !has_api {
+        return Err("ยังไม่ได้ตั้งค่าการเชื่อมต่อ API2PSMaster สำหรับดาวน์โหลด (เครื่องนี้ใช้งานฐานข้อมูลโดยตรง หรือนำเข้า Master)".into());
+    }
     let locked=sqlx::query("UPDATE ABSource SET lease_until=unixepoch()+1800,status='กำลังดาวน์โหลด' WHERE id=1 AND mode='STANDALONE' AND lease_until<unixepoch()").execute(pool).await.map_err(|e|e.to_string())?.rows_affected();
     if locked == 0 {
-        return Err("ยังไม่ได้เลือกโหมดดาวน์โหลดเอง หรือมีการดาวน์โหลดอยู่".into());
+        return Err("มีการดาวน์โหลดข้อมูลกำลังทำงานอยู่ กรุณารอสักครู่".into());
     }
     let result = tokio::time::timeout(Duration::from_secs(1500), async {
         let raw: String = sqlx::query_scalar("SELECT config FROM ABSource WHERE id=1")
@@ -559,13 +660,24 @@ pub async fn sync_now(pool: &SqlitePool) -> Result<()> {
 }
 #[derive(Deserialize)]
 pub struct Trigger {
+    #[serde(default)]
     pub pin: String,
 }
-pub async fn trigger(State(st): State<AppState>, Json(body): Json<Trigger>) -> Response {
-    if !crate::storage::valid_pin(&st.pool, &body.pin).await {
+pub async fn trigger(
+    State(st): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: Option<Json<Trigger>>,
+) -> Response {
+    let pin = body.map(|b| b.pin.clone()).unwrap_or_default();
+    let authorized = if !pin.trim().is_empty() {
+        crate::storage::valid_pin(&st.pool, &pin).await
+    } else {
+        crate::auth::has_active_session(&st.pool, &headers).await
+    };
+    if !authorized {
         return (
             StatusCode::UNAUTHORIZED,
-            Json(json!({"error":"PIN ผู้ดูแลระบบไม่ถูกต้อง"})),
+            Json(json!({"error":"PIN ผู้ดูแลระบบไม่ถูกต้อง หรือกรุณาเข้าสู่ระบบก่อนดาวน์โหลด"})),
         )
             .into_response();
     }
@@ -706,6 +818,16 @@ mod tests {
         let encrypted = protect("test-only-secret", false).await.unwrap();
         assert_ne!(encrypted, "test-only-secret");
         assert_eq!(protect(&encrypted, true).await.unwrap(), "test-only-secret");
+    }
+    #[test]
+    fn local_credentials_roundtrip_without_plaintext_storage() {
+        let root = std::env::temp_dir().join(format!("barprint-secret-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let encrypted = protect_local_at(&root, "test-mobile-secret", false).unwrap();
+        assert!(encrypted.starts_with("local:"));
+        assert_ne!(encrypted, "test-mobile-secret");
+        assert_eq!(protect_local_at(&root, &encrypted, true).unwrap(), "test-mobile-secret");
+        let _ = std::fs::remove_dir_all(&root);
     }
     #[tokio::test]
     #[ignore]

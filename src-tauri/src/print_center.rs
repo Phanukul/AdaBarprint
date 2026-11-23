@@ -11,7 +11,9 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use chrono::{Datelike, Local, NaiveTime};
+#[cfg(test)]
+use chrono::Datelike;
+use chrono::{Local, NaiveTime};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{FromRow, SqlitePool};
@@ -32,26 +34,104 @@ fn uid() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+fn default_true() -> bool {
+    true
+}
+fn default_time() -> String {
+    "00:00".into()
+}
+fn default_days() -> String {
+    "1111111".into()
+}
+fn default_protocol() -> String {
+    "WINDOWS".into()
+}
+fn default_port() -> u16 {
+    9100
+}
+fn default_dpi() -> u32 {
+    203
+}
+fn default_qty() -> i64 {
+    1
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PrintProfileTarget {
+    pub size: String,
+    pub template: String,
+    pub printer: String,
+    #[serde(default)]
+    pub tray: String,
+    #[serde(default = "default_protocol")]
+    pub protocol: String,
+    #[serde(default)]
+    pub ip: String,
+    #[serde(default = "default_port")]
+    pub port: u16,
+    #[serde(default = "default_dpi")]
+    pub dpi: u32,
+    #[serde(default = "default_qty")]
+    pub quantity: i64,
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PrintRule {
     pub id: String,
+    #[serde(default)]
+    pub code: String,
     pub name: String,
+    #[serde(default = "default_true")]
     pub enabled: bool,
     pub branch: String,
     pub source: String,
+    #[serde(default = "default_time")]
     pub time: String,
+    #[serde(default = "default_days")]
     pub days: String,
+    #[serde(default)]
     pub size: String,
+    #[serde(default)]
     pub template: String,
+    #[serde(default)]
     pub printer: String,
+    #[serde(default)]
     pub tray: String,
+    #[serde(default = "default_protocol")]
     pub protocol: String,
+    #[serde(default)]
     pub ip: String,
+    #[serde(default = "default_port")]
     pub port: u16,
+    #[serde(default = "default_dpi")]
     pub dpi: u32,
+    #[serde(default = "default_qty")]
     pub quantity: i64,
+    #[serde(default)]
     pub catch_up: bool,
+    #[serde(default)]
+    pub offset_days: i32,
+    #[serde(default)]
+    pub targets: Vec<PrintProfileTarget>,
+}
+
+fn effective_targets(r: &PrintRule) -> Vec<PrintProfileTarget> {
+    if !r.targets.is_empty() {
+        return r.targets.clone();
+    }
+    vec![PrintProfileTarget {
+        size: r.size.clone(),
+        template: r.template.clone(),
+        printer: r.printer.clone(),
+        tray: r.tray.clone(),
+        protocol: r.protocol.clone(),
+        ip: r.ip.clone(),
+        port: r.port,
+        dpi: r.dpi,
+        quantity: r.quantity,
+    }]
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -117,7 +197,30 @@ async fn rules(pool: &SqlitePool) -> Result<Vec<PrintRule>> {
         .await
         .map_err(|e| e.to_string())?;
     let mut result=Vec::new();
-    for raw in rows {let r:PrintRule=serde_json::from_str(&raw).map_err(|e|e.to_string())?;result.push(r);}Ok(result)
+    let mut next_seq: usize = 1;
+    let mut used_codes = std::collections::HashSet::new();
+    for raw in &rows {
+        if let Ok(r) = serde_json::from_str::<PrintRule>(raw) {
+            if !r.code.trim().is_empty() {
+                used_codes.insert(r.code.trim().to_ascii_uppercase());
+            }
+        }
+    }
+    for raw in rows {
+        let mut r: PrintRule = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        if r.code.trim().is_empty() {
+            loop {
+                let candidate = format!("{next_seq:03}");
+                next_seq += 1;
+                if used_codes.insert(candidate.clone()) {
+                    r.code = candidate;
+                    break;
+                }
+            }
+        }
+        result.push(r);
+    }
+    Ok(result)
 }
 async fn rule(pool: &SqlitePool, id: &str) -> Result<PrintRule> {
     rules(pool)
@@ -138,7 +241,14 @@ pub async fn get_center(State(st): State<AppState>) -> Response {
 }
 async fn validate_rule(pool: &SqlitePool, r: &PrintRule) -> Result<()> {
     if r.id.trim().is_empty() || r.name.trim().is_empty() || r.branch.trim().is_empty() {
-        return Err("กรุณาระบุชื่องานและสาขา".into());
+        return Err("กรุณาระบุชื่อ Profile และสาขา".into());
+    }
+    let code = r.code.trim();
+    if code.is_empty() || code.len() > 24 || !code.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        return Err("กรุณาระบุรหัส Profile เป็นตัวเลขหรือตัวอักษรภาษาอังกฤษ 1–24 ตัว (ห้ามเว้นวรรค)".into());
+    }
+    if !(-30..=30).contains(&r.offset_days) {
+        return Err("ค่าชดเชยวัน (Offset) ต้องอยู่ระหว่าง -30 ถึง +30".into());
     }
     if ![
         "PRICE_CHG",
@@ -151,42 +261,65 @@ async fn validate_rule(pool: &SqlitePool, r: &PrintRule) -> Result<()> {
     {
         return Err("ประเภทข้อมูลไม่รองรับ".into());
     }
-    NaiveTime::parse_from_str(&r.time, "%H:%M").map_err(|_| "เวลาไม่ถูกต้อง")?;
-    if r.days.len() != 7 || !r.days.bytes().all(|b| b == b'0' || b == b'1') || !r.days.contains('1')
+    if !r.time.trim().is_empty() {
+        NaiveTime::parse_from_str(&r.time, "%H:%M").map_err(|_| "เวลาไม่ถูกต้อง")?;
+    }
+    if !r.days.trim().is_empty()
+        && (r.days.len() != 7 || !r.days.bytes().all(|b| b == b'0' || b == b'1') || !r.days.contains('1'))
     {
         return Err("เลือกวันอย่างน้อยหนึ่งวัน".into());
     }
-    if r.printer.trim().is_empty() || !(1..=999).contains(&r.quantity) {
-        return Err("ระบุเครื่องพิมพ์และจำนวน 1–999".into());
-    }
     let branch = crate::storage::configured_branch(pool).await;
     if branch.is_empty() || branch != r.branch {
-        return Err("สาขาของตารางพิมพ์ต้องตรงกับแหล่งข้อมูลที่ตั้งไว้".into());
+        return Err("สาขาของ Profile ต้องตรงกับแหล่งข้อมูลที่ตั้งไว้".into());
     }
-    if !r.ip.is_empty() {
-        r.ip.parse::<std::net::IpAddr>()
-            .map_err(|_| "IP เครื่องพิมพ์ไม่ถูกต้อง")?;
-        if r.port == 0 {
-            return Err("Port ไม่ถูกต้อง".into());
+    let targets = effective_targets(r);
+    if targets.is_empty() {
+        return Err("กรุณาเพิ่มแบบป้ายและเครื่องพิมพ์อย่างน้อย 1 รายการ".into());
+    }
+    for (idx, t) in targets.iter().enumerate() {
+        let prefix = if targets.len() > 1 {
+            format!("รายการกระดาษที่ {}: ", idx + 1)
+        } else {
+            String::new()
+        };
+        if t.printer.trim().is_empty() || !(1..=999).contains(&t.quantity) {
+            return Err(format!("{prefix}ระบุเครื่องพิมพ์และจำนวน 1–999"));
         }
+        if !t.ip.is_empty() {
+            t.ip.parse::<std::net::IpAddr>()
+                .map_err(|_| format!("{prefix}IP เครื่องพิมพ์ไม่ถูกต้อง"))?;
+            if t.port == 0 {
+                return Err(format!("{prefix}Port ไม่ถูกต้อง"));
+            }
+        }
+        load_layout_for(pool, &t.size, &t.template)
+            .await
+            .map_err(|e| format!("{prefix}{e}"))?;
     }
-    load_layout(pool, r).await?;
     Ok(())
 }
 async fn load_layout(
     pool: &SqlitePool,
     r: &PrintRule,
 ) -> Result<(TCNMLabelSize, Vec<crate::templates::TemplateElement>)> {
+    load_layout_for(pool, &r.size, &r.template).await
+}
+async fn load_layout_for(
+    pool: &SqlitePool,
+    size_code: &str,
+    template_code: &str,
+) -> Result<(TCNMLabelSize, Vec<crate::templates::TemplateElement>)> {
     let size = sqlx::query_as::<_, TCNMLabelSize>(
         "SELECT * FROM TCNMLabelSize WHERE FTLbsCode=? AND FTLbsStaUse='1'",
     )
-    .bind(&r.size)
+    .bind(size_code)
     .fetch_optional(pool)
     .await
     .map_err(|e| e.to_string())?
     .ok_or("ขนาดป้ายไม่พบหรือปิดใช้งาน")?;
     let raw:Option<String>=sqlx::query_scalar("SELECT FTLtmLayout FROM TCNMLabelTmpl WHERE FTLtmCode=? AND FTLbsCode=? AND FTLtmStaUse='1'")
-      .bind(&r.template).bind(&r.size).fetch_optional(pool).await.map_err(|e|e.to_string())?.flatten();
+      .bind(template_code).bind(size_code).fetch_optional(pool).await.map_err(|e|e.to_string())?.flatten();
     let raw = raw.ok_or("ไม่พบ Template ที่เลือกสำหรับขนาดนี้ กรุณาบันทึกแบบป้ายก่อน")?;
     let layout: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
     if layout["designMode"] == "preprint" {
@@ -220,16 +353,21 @@ async fn persist_bulk(pool: &SqlitePool, body: BulkRules) -> Result<()> {
     if branch.is_empty() || body.branch!=branch || body.preferences["branch"].as_str()!=Some(branch.as_str()) {
         return Err("สาขาของการตั้งค่าต้องตรงกับแหล่งข้อมูล StoreFront".into());
     }
-    if body.rules.len()>100 { return Err("บันทึกได้ไม่เกิน 100 ตารางต่อครั้ง".into()); }
+    if body.rules.len()>100 { return Err("บันทึกได้ไม่เกิน 100 Profile ต่อครั้ง".into()); }
     let old=rules(pool).await?;
     let mut ids=std::collections::HashSet::new();
+    let mut codes=std::collections::HashSet::new();
     for r in &body.rules {
-        if !ids.insert(r.id.clone()) {return Err("พบรหัสตารางซ้ำในชุดบันทึก".into());}
-        if r.branch!=branch {return Err("พบตารางของสาขาอื่นในชุดบันทึก".into());}
+        if !ids.insert(r.id.clone()) {return Err("พบรหัสภายในซ้ำในชุดบันทึก".into());}
+        if !r.code.trim().is_empty() && !codes.insert(r.code.trim().to_ascii_uppercase()) {
+            return Err(format!("พบรหัส Profile \"{}\" ซ้ำกัน", r.code.trim()));
+        }
+        if r.branch!=branch {return Err("พบ Profile ของสาขาอื่นในชุดบันทึก".into());}
         if let Some(previous)=old.iter().find(|x|x.id==r.id) {
-            if previous.branch!=branch {return Err("ไม่สามารถแก้ไขตารางของสาขาอื่น".into());}
-            // Allow stopping an existing rule even if its template/printer was removed.
+            if previous.branch!=branch {return Err("ไม่สามารถแก้ไข Profile ของสาขาอื่น".into());}
+            // Allow stopping an existing rule even if its template/printer was removed or legacy code was empty.
             let mut stopped=previous.clone();stopped.enabled=false;
+            if r.code.trim().is_empty() { stopped.code = String::new(); }
             if !r.enabled && serde_json::to_value(&stopped).unwrap()==serde_json::to_value(r).unwrap() {continue;}
         }
         validate_rule(pool,r).await.map_err(|e|format!("{}: {}",r.name,e))?;
@@ -250,18 +388,53 @@ pub async fn save_rules(State(st): State<AppState>, Json(body): Json<BulkRules>)
     match persist_bulk(&st.pool,body).await {Ok(())=>Json(json!({"ok":true})).into_response(),Err(e)=>err(e)}
 }
 
-pub async fn save_rule(State(st): State<AppState>, Json(r): Json<PrintRule>) -> Response {
+pub async fn save_rule(State(st): State<AppState>, Json(mut r): Json<PrintRule>) -> Response {
+    r.code = r.code.trim().to_string();
+    let targets = effective_targets(&r);
+    if let Some(first) = targets.first() {
+        r.size = first.size.clone();
+        r.template = first.template.clone();
+        r.printer = first.printer.clone();
+        r.tray = first.tray.clone();
+        r.protocol = first.protocol.clone();
+        r.ip = first.ip.clone();
+        r.port = first.port;
+        r.dpi = first.dpi;
+        r.quantity = first.quantity;
+    }
+    r.targets = targets;
     if let Err(e) = validate_rule(&st.pool, &r).await {
         return err(e);
+    }
+    if let Ok(existing) = rules(&st.pool).await {
+        if existing.iter().any(|x| x.id != r.id && x.code.eq_ignore_ascii_case(&r.code)) {
+            return err(format!("รหัส Profile \"{}\" ถูกใช้งานแล้ว กรุณาใช้รหัสอื่น", r.code));
+        }
     }
     match sqlx::query("INSERT INTO ABPrintRule(id,config) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config")
       .bind(&r.id).bind(serde_json::to_string(&r).unwrap()).execute(&st.pool).await {
         Ok(_)=>{
           let key=format!("ruleSince:{}",r.id);
           if setting(&st.pool,&key).await.is_empty(){let _=put(&st.pool,&key,&Local::now().format("%Y-%m-%d").to_string()).await;}
-          Json(json!({"ok":true})).into_response()
+          Json(json!({"ok":true,"rule":r})).into_response()
         },Err(e)=>err(e)
       }
+}
+
+pub async fn delete_rule(State(st): State<AppState>, Json(body): Json<Value>) -> Response {
+    let id = body["id"].as_str().unwrap_or("").trim();
+    if id.is_empty() {
+        return err("ไม่พบรหัส Profile ที่ต้องการลบ");
+    }
+    match sqlx::query("DELETE FROM ABPrintRule WHERE id=?")
+        .bind(id)
+        .execute(&st.pool)
+        .await
+    {
+        Ok(res) if res.rows_affected() > 0 => Json(json!({"ok":true})).into_response(),
+        Ok(_) => err("ไม่พบ Profile ที่ต้องการลบ"),
+        Err(e) => err(e),
+    }
 }
 fn schedule(r: &PrintRule) -> TCNTLabelSchedule {
     TCNTLabelSchedule {
@@ -295,32 +468,45 @@ async fn candidates(
     pool: &SqlitePool,
     r: &PrintRule,
 ) -> Result<Vec<crate::delta_engine::DeltaCandidate>> {
-    let today = Local::now().format("%Y-%m-%d").to_string();
-    let since = setting(pool, &format!("ruleSince:{}", r.id)).await;
-    let since = if since.is_empty() {
-        today.as_str()
-    } else {
-        since.as_str()
-    };
+    let first = effective_targets(r)
+        .into_iter()
+        .next()
+        .ok_or_else(|| "ไม่มีรายการแบบป้ายใน Profile".to_string())?;
+    candidates_for_target(pool, r, &first).await
+}
+
+async fn candidates_for_target(
+    pool: &SqlitePool,
+    r: &PrintRule,
+    target: &PrintProfileTarget,
+) -> Result<Vec<crate::delta_engine::DeltaCandidate>> {
+    let target_date = crate::delta_engine::target_date_with_offset(Local::now().date_naive(), r.offset_days);
+    let mut sched = schedule(r);
+    sched.FTLscLbsCode = target.size.clone();
     let mut items =
-        crate::delta_engine::compute_delta_candidates_since(pool, &schedule(r), &today, since)
+        crate::delta_engine::compute_profile_candidates_exact(pool, &sched, &target_date)
             .await
             .map_err(|e| e.to_string())?
             .items;
-    let (_, els) = load_layout(pool, r).await?;
+    let (_, els) = load_layout_for(pool, &target.size, &target.template).await?;
+    let (price_date, verify_promo) = match r.source.as_str() {
+        "PRICE_CHG" => (target_date.clone(), false),
+        "PROMO_END_REVERT" => (crate::delta_engine::next_day(&target_date), true),
+        _ => (target_date.clone(), true),
+    };
     for it in &mut items {
-        it.lbs_code = r.size.clone();
-        it.qty = r.quantity;
-        // Share the existing manual data/price builder; only scheduling and transport differ.
+        it.lbs_code = target.size.clone();
+        it.qty = target.quantity;
+        // Share the existing manual data/price builder; only offset targeting and Base Price/Price Off differ.
         let request = crate::routes::BuildLineBody {
             barcode: it.bar_code.clone(),
             pdt_code: Some(it.pdt_code.clone()),
-            qty: Some(r.quantity),
+            qty: Some(target.quantity),
             bch_code: r.branch.clone(),
             pri_type: "1".into(),
-            verify: Some(true),
-            override_lbs: Some(r.size.clone()),
-            effective_date: Some(today.clone()),
+            verify: Some(verify_promo),
+            override_lbs: Some(target.size.clone()),
+            effective_date: Some(price_date.clone()),
             price_group: None,
         };
         let response =
@@ -360,21 +546,14 @@ async fn candidates(
                     r.id,
                     r.branch,
                     hash_ctx,
-                    r.quantity,
+                    target.quantity,
                     serde_json::to_string(&els).unwrap()
                 )
                 .as_bytes()
             )
         );
         it.context = Some(ctx);
-        let old: Option<String> =
-            sqlx::query_scalar("SELECT hash FROM ABPrintWatermark WHERE rule=? AND barcode=?")
-                .bind(&r.id)
-                .bind(&it.bar_code)
-                .fetch_optional(pool)
-                .await
-                .map_err(|e| e.to_string())?;
-        it.skipped_dup = old.as_deref() == Some(&it.price_hash);
+        it.skipped_dup = false;
     }
     items.retain(|it| {
         !(r.source == "PROMO_START" && it.pri_type != "2")
@@ -385,7 +564,7 @@ async fn candidates(
 #[derive(Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct ManualCandidates { pub source:String, pub date:String, pub size:String, pub quantity:i64 }
-// Read only: the same event selector as Auto, without a schedule watermark or enqueue.
+// Read only: uses exact Effective Date matching without watermark skipping.
 pub async fn manual_candidates(State(st):State<AppState>,Json(body):Json<ManualCandidates>)->Response {
     let result=async {
         if !["PRICE_CHG","PROMO_START","PROMO_END_REVERT","NEW_PDT"].contains(&body.source.as_str()) {return Err("เหตุการณ์ไม่ถูกต้อง".to_string());}
@@ -393,11 +572,16 @@ pub async fn manual_candidates(State(st):State<AppState>,Json(body):Json<ManualC
         if !(1..=999).contains(&body.quantity){return Err("จำนวนต้องอยู่ระหว่าง 1–999".into());}
         let branch=crate::storage::configured_branch(&st.pool).await;
         if branch.is_empty(){return Err("กรุณาตั้งค่าแหล่งข้อมูล StoreFront".into());}
-        let r=PrintRule{id:"manual-preview".into(),name:"ค้นหาสินค้า".into(),enabled:false,branch:branch.clone(),source:body.source.clone(),time:"00:00".into(),days:"1111111".into(),size:body.size.clone(),template:String::new(),printer:String::new(),tray:String::new(),protocol:"WINDOWS".into(),ip:String::new(),port:9100,dpi:203,quantity:body.quantity,catch_up:false};
-        let delta=crate::delta_engine::compute_delta_candidates_since(&st.pool,&schedule(&r),&body.date,&body.date).await.map_err(|e|e.to_string())?;
+        let r=PrintRule{id:"manual-preview".into(),code:"MANUAL".into(),name:"ค้นหาสินค้า".into(),enabled:false,branch:branch.clone(),source:body.source.clone(),time:"00:00".into(),days:"1111111".into(),size:body.size.clone(),template:String::new(),printer:String::new(),tray:String::new(),protocol:"WINDOWS".into(),ip:String::new(),port:9100,dpi:203,quantity:body.quantity,catch_up:false,offset_days:0,targets:vec![]};
+        let delta=crate::delta_engine::compute_profile_candidates_exact(&st.pool,&schedule(&r),&body.date).await.map_err(|e|e.to_string())?;
+        let (price_date, verify_promo) = match body.source.as_str() {
+            "PRICE_CHG" => (body.date.clone(), false),
+            "PROMO_END_REVERT" => (crate::delta_engine::next_day(&body.date), true),
+            _ => (body.date.clone(), true),
+        };
         let mut lines=vec![];
         for item in delta.items {
-            let response=crate::routes::post_build_line(State(st.clone()),Json(crate::routes::BuildLineBody{barcode:item.bar_code,pdt_code:Some(item.pdt_code),qty:Some(body.quantity),bch_code:branch.clone(),pri_type:"1".into(),verify:Some(true),override_lbs:Some(body.size.clone()),effective_date:Some(body.date.clone()),price_group:None})).await;
+            let response=crate::routes::post_build_line(State(st.clone()),Json(crate::routes::BuildLineBody{barcode:item.bar_code,pdt_code:Some(item.pdt_code),qty:Some(body.quantity),bch_code:branch.clone(),pri_type:"1".into(),verify:Some(verify_promo),override_lbs:Some(body.size.clone()),effective_date:Some(price_date.clone()),price_group:None})).await;
             let ok=response.status().is_success();
             let bytes=axum::body::to_bytes(response.into_body(),4*1024*1024).await.map_err(|e|e.to_string())?;
             let line:Value=serde_json::from_slice(&bytes).map_err(|e|e.to_string())?;
@@ -415,13 +599,34 @@ pub async fn preview_rule(State(st): State<AppState>, Json(r): Json<PrintRule>) 
     if let Err(e) = validate_rule(&st.pool, &r).await {
         return err(e);
     }
-    match candidates(&st.pool, &r).await {
-        Ok(items) => Json(
-            json!({"items":items,"asOf":now(),"master":crate::storage::status(&st.pool).await}),
-        )
-        .into_response(),
-        Err(e) => err(e),
+    let targets = effective_targets(&r);
+    let mut groups = Vec::with_capacity(targets.len());
+    let mut first_items = Vec::new();
+    for (idx, t) in targets.iter().enumerate() {
+        match candidates_for_target(&st.pool, &r, t).await {
+            Ok(items) => {
+                if idx == 0 {
+                    first_items = items.clone();
+                }
+                groups.push(json!({
+                    "size": t.size,
+                    "template": t.template,
+                    "printer": t.printer,
+                    "tray": t.tray,
+                    "quantity": t.quantity,
+                    "items": items
+                }));
+            }
+            Err(e) => return err(e),
+        }
     }
+    Json(json!({
+        "items": first_items,
+        "groups": groups,
+        "asOf": now(),
+        "master": crate::storage::status(&st.pool).await
+    }))
+    .into_response()
 }
 async fn insert_job(
     pool: &SqlitePool,
@@ -868,9 +1073,7 @@ async fn worker_tick(pool: &SqlitePool) -> Result<()> {
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())
 }
-async fn scheduler_tick(pool: &SqlitePool) -> Result<()> {
-    scheduler_tick_at(pool, Local::now()).await
-}
+#[cfg(test)]
 async fn scheduler_tick_at(pool: &SqlitePool, n: chrono::DateTime<Local>) -> Result<()> {
     let mut rs = rules(pool).await?;
     let prefs:Value=serde_json::from_str(&setting(pool,&format!("bulk:{}",crate::storage::configured_branch(pool).await)).await).unwrap_or(Value::Null);
@@ -1128,6 +1331,7 @@ mod tests {
         ] {
             let r = PrintRule {
                 id: id.into(),
+                code: id.into(),
                 name: id.into(),
                 enabled: true,
                 branch: "B01".into(),
@@ -1144,6 +1348,8 @@ mod tests {
                 dpi: 203,
                 quantity: 1,
                 catch_up,
+                offset_days: 0,
+                targets: vec![],
             };
             sqlx::query("INSERT INTO ABPrintRule(id,config) VALUES(?,?)")
                 .bind(id)
@@ -1162,7 +1368,245 @@ mod tests {
         assert_eq!(names, vec!["old", "A", "B"]);
         assert_eq!(status(&p, &head).await, "BLOCKED");
     }
+
+    #[tokio::test]
+    async fn multi_target_profile_validates_and_normalizes_targets() {
+        let p = fixture().await;
+        sqlx::raw_sql(
+            "CREATE TABLE ABStorage(id INTEGER PRIMARY KEY,branch TEXT);
+             INSERT INTO ABStorage VALUES(1,'B01');
+             CREATE TABLE TCNMLabelSize(FTLbsCode TEXT PRIMARY KEY, FTLbsGroup TEXT, FTLbsName TEXT, FCLbsWidth REAL, FCLbsHeight REAL, FNLbsCol INTEGER, FNLbsRow INTEGER, FCLbsMagTop REAL, FCLbsMagLeft REAL, FCLbsMagBottom REAL, FCLbsMagRight REAL, FCLbsGapH REAL, FCLbsGapV REAL, FNLbsQtyPageNor INTEGER, FNLbsQtyPagePmt INTEGER, FTLbsTmplNor TEXT, FTLbsTmplPmt TEXT, FTLbsHhtCode TEXT, FTLbsStaUse TEXT, FTLbsPaperSize TEXT, FCLbsPaperWidth REAL, FCLbsPaperHeight REAL, FCLbsOffsetX REAL, FCLbsOffsetY REAL, FTPprCode TEXT, FTLbsStdTmplNor TEXT, FTLbsStdTmplPmt TEXT, FTLbsRmk TEXT, FDCreateOn TEXT, FTCreateBy TEXT, FDLastUpdOn TEXT, FTLastUpdBy TEXT);
+             CREATE TABLE TCNMLabelTmpl(FTLtmCode TEXT PRIMARY KEY, FTLtmName TEXT, FTLbsCode TEXT, FTLtmPriType TEXT, FTLtmLayout TEXT, FTLtmStaUse TEXT, FTLtmMode TEXT, FTPprCode TEXT);
+             INSERT INTO TCNMLabelSize(FTLbsCode,FTLbsGroup,FTLbsName,FCLbsWidth,FCLbsHeight,FTLbsStaUse) VALUES('S1','1','25x30',25,30,'1'),('S2','1','Small',40,20,'1');
+             INSERT INTO TCNMLabelTmpl(FTLtmCode,FTLtmName,FTLbsCode,FTLtmLayout,FTLtmStaUse) VALUES('T1','25x30 Nor','S1','{\"elements\":[{\"type\":\"text\"}]}','1'),('T2','Small Nor','S2','{\"elements\":[{\"type\":\"text\"}]}','1');"
+        ).execute(&p).await.unwrap();
+
+        let rule = PrintRule {
+            id: "prof-multi".into(),
+            code: "001".into(),
+            name: "ราคาเปลี่ยน 2 กระดาษ".into(),
+            enabled: true,
+            branch: "B01".into(),
+            source: "PRICE_CHG".into(),
+            time: "00:00".into(),
+            days: "1111111".into(),
+            size: String::new(),
+            template: String::new(),
+            printer: String::new(),
+            tray: String::new(),
+            protocol: "WINDOWS".into(),
+            ip: String::new(),
+            port: 9100,
+            dpi: 203,
+            quantity: 1,
+            catch_up: false,
+            offset_days: 0,
+            targets: vec![
+                PrintProfileTarget {
+                    size: "S1".into(),
+                    template: "T1".into(),
+                    printer: "Printer-A".into(),
+                    tray: "Tray 1".into(),
+                    protocol: "WINDOWS".into(),
+                    ip: String::new(),
+                    port: 9100,
+                    dpi: 203,
+                    quantity: 1,
+                },
+                PrintProfileTarget {
+                    size: "S2".into(),
+                    template: "T2".into(),
+                    printer: "Printer-B".into(),
+                    tray: String::new(),
+                    protocol: "WINDOWS".into(),
+                    ip: String::new(),
+                    port: 9100,
+                    dpi: 203,
+                    quantity: 2,
+                },
+            ],
+        };
+
+        let res = save_rule(State(AppState { pool: p.clone() }), Json(rule)).await;
+        assert!(res.status().is_success());
+        let saved = rules(&p).await.unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].code, "001");
+        assert_eq!(effective_targets(&saved[0]).len(), 2);
+        assert_eq!(saved[0].size, "S1");
+        assert_eq!(effective_targets(&saved[0])[1].printer, "Printer-B");
+        assert_eq!(effective_targets(&saved[0])[1].quantity, 2);
+    }
 }
+pub async fn run_profile_api(State(st): State<AppState>, Json(body): Json<Value>) -> Response {
+    let key = body["code"]
+        .as_str()
+        .or_else(|| body["id"].as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if key.is_empty() {
+        return err("กรุณาระบุรหัส Profile ที่ต้องการสั่งพิมพ์");
+    }
+    match execute_profile_cli(&st.pool, &key).await {
+        Ok(res) => Json(res).into_response(),
+        Err(e) => err(e),
+    }
+}
+
+pub async fn execute_profile_cli(pool: &SqlitePool, profile_code_or_id: &str) -> Result<Value> {
+    let needle = profile_code_or_id.trim();
+    if needle.is_empty() {
+        return Err("กรุณาระบุรหัส Profile".into());
+    }
+    let all = rules(pool).await?;
+    let r = all
+        .into_iter()
+        .find(|x| x.code.eq_ignore_ascii_case(needle) || x.id == needle)
+        .ok_or_else(|| format!("ไม่พบ Profile รหัส \"{needle}\""))?;
+
+    validate_rule(pool, &r).await?;
+    let target_date = crate::delta_engine::target_date_with_offset(
+        Local::now().date_naive(),
+        r.offset_days,
+    );
+    let today = Local::now().format("%Y-%m-%d").to_string();
+    let targets = effective_targets(&r);
+    let mut total_items = 0usize;
+    let mut units: Vec<(String, Value)> = Vec::new();
+
+    for target in &targets {
+        let (lbs, elements) = load_layout_for(pool, &target.size, &target.template).await?;
+        let items = candidates_for_target(pool, &r, target).await?;
+        total_items += items.len();
+        if items.is_empty() {
+            continue;
+        }
+        let route = ResolvedPrinterRoute {
+            lbs_code: target.size.clone(),
+            pri_type: "1".into(),
+            protocol: target.protocol.clone(),
+            printer_name: target.printer.clone(),
+            tray_name: target.tray.clone(),
+            lan_ip: if target.ip.is_empty() { None } else { Some(target.ip.clone()) },
+            lan_port: target.port,
+            dpi: target.dpi,
+        };
+        let mut pages: Vec<Value> = vec![];
+        for it in &items {
+            let ctx = it.context.clone().ok_or("ไม่มี snapshot ข้อมูลป้าย")?;
+            for _ in 0..target.quantity {
+                pages.push(ctx.clone());
+            }
+        }
+        let page_size = if target.ip.is_empty() {
+            (lbs.FNLbsCol.max(1) * lbs.FNLbsRow.max(1)) as usize
+        } else {
+            1
+        };
+        for chunk in pages.chunks(page_size) {
+            let payload = json!({
+                "route": route,
+                "size": lbs,
+                "elements": elements,
+                "contexts": chunk,
+                "marks": [],
+                "date": today
+            });
+            units.push(("AUTO".into(), payload));
+        }
+    }
+
+    let job_name = format!("[{}] {}", r.code, r.name);
+    let initial_status = if units.is_empty() { "EMPTY" } else { "QUEUED" };
+    let job_id = insert_job(
+        pool,
+        "PROFILE",
+        &job_name,
+        serde_json::to_value(&r).unwrap_or(Value::Null),
+        None,
+        initial_status,
+        units.clone(),
+    )
+    .await?;
+
+    if units.is_empty() {
+        return Ok(json!({
+            "ok": true,
+            "jobId": job_id,
+            "profileCode": r.code,
+            "profileName": r.name,
+            "targetDate": target_date,
+            "status": "EMPTY",
+            "itemCount": 0,
+            "totalUnits": 0,
+            "printedUnits": 0
+        }));
+    }
+
+    let mut printed_units = 0usize;
+    for (seq, (kind, payload)) in units.into_iter().enumerate() {
+        let seq_i64 = seq as i64;
+        sqlx::query("UPDATE ABPrintUnit SET status='SENDING' WHERE job=? AND seq=?")
+            .bind(&job_id)
+            .bind(seq_i64)
+            .execute(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        match send_unit(pool, &kind, payload, &job_id, seq_i64).await {
+            Ok(()) => {
+                printed_units += 1;
+                sqlx::query("UPDATE ABPrintUnit SET status='SUBMITTED' WHERE job=? AND seq=?")
+                    .bind(&job_id)
+                    .bind(seq_i64)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                sqlx::query("UPDATE ABPrintJob SET completed=? WHERE id=?")
+                    .bind(printed_units as i64)
+                    .bind(&job_id)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            Err(e) => {
+                sqlx::query("UPDATE ABPrintUnit SET status='UNKNOWN',error=? WHERE job=? AND seq=?")
+                    .bind(&e)
+                    .bind(&job_id)
+                    .bind(seq_i64)
+                    .execute(pool)
+                    .await
+                    .map_err(|err2| err2.to_string())?;
+                sqlx::query("UPDATE ABPrintJob SET status='NEEDS_REVIEW',error=? WHERE id=?")
+                    .bind(&e)
+                    .bind(&job_id)
+                    .execute(pool)
+                    .await
+                    .map_err(|err2| err2.to_string())?;
+                return Err(format!("ส่งพิมพ์ Profile [{}] ไม่สำเร็จ: {}", r.code, e));
+            }
+        }
+    }
+
+    sqlx::query("UPDATE ABPrintJob SET status='SUBMITTED',completed=total WHERE id=?")
+        .bind(&job_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(json!({
+        "ok": true,
+        "jobId": job_id,
+        "profileCode": r.code,
+        "profileName": r.name,
+        "targetDate": target_date,
+        "status": "SUBMITTED",
+        "itemCount": total_items,
+        "totalUnits": printed_units,
+        "printedUnits": printed_units
+    }))
+}
+
 pub fn spawn(pool: SqlitePool) {
     tokio::spawn(async move {
         if let Err(e) = ensure_schema(&pool).await {
@@ -1208,13 +1652,11 @@ pub fn spawn(pool: SqlitePool) {
         loop {
             if pool.is_closed() {
                 worker.abort();
-
                 break;
             }
             let _ = put(&pool, "heartbeat", &now()).await;
-            if let Err(e) = scheduler_tick(&pool).await {
-                eprintln!("print schedule: {e}");
-            }
+            // In-app timed scheduler loop disabled: scheduled Profiles are triggered externally
+            // via Windows Task Scheduler / AdaSchedule passing the Profile Code as a CLI argument.
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     });

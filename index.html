@@ -4,6 +4,97 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>AdaPos 6.0 PrintBar — ระบบพิมพ์ป้ายราคาและบาร์โค้ด</title>
+    <script>
+      (function () {
+        var g = typeof globalThis !== "undefined" ? globalThis : window;
+        if (typeof g.Iterator === "undefined") {
+          g.Iterator = function Iterator() {};
+        }
+        if (typeof g.Iterator.prototype.join !== "function") {
+          g.Iterator.prototype.join = function (sep) {
+            return Array.from(this).join(sep);
+          };
+        }
+        if (typeof Promise.withResolvers !== "function") {
+          Promise.withResolvers = function () {
+            var resolve, reject;
+            var promise = new Promise(function (res, rej) { resolve = res; reject = rej; });
+            return { promise: promise, resolve: resolve, reject: reject };
+          };
+        }
+        if (typeof Object.hasOwn !== "function") {
+          Object.hasOwn = function (o, k) {
+            return Object.prototype.hasOwnProperty.call(o, k);
+          };
+        }
+        if (typeof g.structuredClone !== "function") {
+          g.structuredClone = function clone(v) {
+            if (v === null || typeof v !== "object") return v;
+            if (v instanceof Date) return new Date(v.getTime());
+            if (ArrayBuffer.isView(v)) return new v.constructor(v);
+            if (v instanceof ArrayBuffer) return v.slice(0);
+            if (Array.isArray(v)) return v.map(clone);
+            var out = {};
+            for (var k in v) if (Object.prototype.hasOwnProperty.call(v, k)) out[k] = clone(v[k]);
+            return out;
+          };
+        }
+        if (typeof g.crypto !== "undefined" && typeof g.crypto.randomUUID !== "function") {
+          g.crypto.randomUUID = function () {
+            var b = new Uint8Array(16);
+            g.crypto.getRandomValues(b);
+            b[6] = (b[6] & 15) | 64;
+            b[8] = (b[8] & 63) | 128;
+            var h = Array.from(b, function (x) { return x.toString(16).padStart(2, "0"); }).join("");
+            return h.slice(0, 8) + "-" + h.slice(8, 12) + "-" + h.slice(12, 16) + "-" + h.slice(16, 20) + "-" + h.slice(20);
+          };
+        }
+        if (typeof String.prototype.replaceAll !== "function") {
+          String.prototype.replaceAll = function (s, r) {
+            return s instanceof RegExp ? this.replace(s, r) : this.split(s).join(r);
+          };
+        }
+        var atFn = function (i) {
+          var n = Math.trunc(i) || 0;
+          if (n < 0) n += this.length;
+          return n < 0 || n >= this.length ? undefined : this[n];
+        };
+        [Array.prototype, String.prototype, Int8Array.prototype, Uint8Array.prototype, Int32Array.prototype, Float32Array.prototype, Float64Array.prototype].forEach(function (p) {
+          if (p && typeof p.at !== "function") Object.defineProperty(p, "at", { value: atFn, configurable: true, writable: true });
+        });
+        if (typeof Array.prototype.findLast !== "function") {
+          Array.prototype.findLast = function (fn, thisArg) {
+            for (var i = this.length - 1; i >= 0; i--) if (fn.call(thisArg, this[i], i, this)) return this[i];
+          };
+        }
+        if (typeof Math.sumPrecise !== "function") {
+          Math.sumPrecise = function (items) {
+            var s = 0;
+            for (var x of items) s += x;
+            return s;
+          };
+        }
+        [Map.prototype, WeakMap.prototype].forEach(function (p) {
+          if (typeof p.getOrInsert !== "function") {
+            p.getOrInsert = function (k, v) { if (!this.has(k)) this.set(k, v); return this.get(k); };
+          }
+          if (typeof p.getOrInsertComputed !== "function") {
+            p.getOrInsertComputed = function (k, fn) { if (!this.has(k)) this.set(k, fn(k)); return this.get(k); };
+          }
+        });
+        if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any !== "function") {
+          AbortSignal.any = function (signals) {
+            var c = new AbortController();
+            signals.forEach(function (s) {
+              if (!s) return;
+              if (s.aborted) c.abort(s.reason);
+              else s.addEventListener("abort", function () { c.abort(s.reason); }, { once: true });
+            });
+            return c.signal;
+          };
+        }
+      })();
+    </script>
   </head>
   <body class="antialiased bg-background text-foreground">
     <div id="root"></div>

@@ -1,122 +1,789 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { SearchableSelect } from '@/components/ui/searchable-select';
-import {resolveTemplateRoute} from '@/lib/printProfile';
+import { resolveTemplateRoute } from '@/lib/printProfile';
 import { Input } from '@/components/ui/input';
-import { api, Field, purposes, selectClass, section, templateProblem, type Props, type Rule, type Center, type Template, type Candidate } from './autoPrintShared';
+import {
+  api,
+  Field,
+  purposes,
+  selectClass,
+  section,
+  templateProblem,
+  type Props,
+  type ProfileTarget,
+  type Rule,
+  type Center,
+  type Template,
+  type Candidate,
+} from './autoPrintShared';
 
-type Row = { id:string; source:string; selected:boolean; template:string; time:string; printerOverride:boolean; days?:string; quantity?:number; catchUp?:boolean; original?:Rule; route?:Pick<Rule,'printer'|'tray'|'protocol'|'ip'|'port'|'dpi'> };
-type Preferences = { branch:string; enabled:boolean; time:string; days:string; quantity:number; catchUp:boolean; normal:string; promo:string; rows:Row[] };
-const standardSources=['PRICE_CHG','PROMO_START','PROMO_END_REVERT','NEW_PDT'];
-const dayNames=['จ.','อ.','พ.','พฤ.','ศ.','ส.','อา.'];
-const timePattern=/^([01]\d|2[0-3]):[0-5]\d$/;
-function TimeInput({value,onChange,label}:{value:string;onChange:(v:string)=>void;label:string}) {
-  return <span className="flex items-center gap-1"><select aria-label={`${label} ชั่วโมง`} className={selectClass} value={value.split(':')[0]} onChange={e=>onChange(`${e.target.value}:${value.split(':')[1]||'00'}`)}>{Array.from({length:24},(_,i)=>String(i).padStart(2,'0')).map(v=><option key={v}>{v}</option>)}</select><span>:</span><select aria-label={`${label} นาที`} className={selectClass} value={value.split(':')[1]} onChange={e=>onChange(`${value.split(':')[0]||'01'}:${e.target.value}`)}>{Array.from({length:60},(_,i)=>String(i).padStart(2,'0')).map(v=><option key={v}>{v}</option>)}</select></span>;
+const EVENT_CHOICES = [
+  {
+    value: 'PRICE_CHG',
+    label: 'ราคาสินค้าเปลี่ยน',
+    shortLabel: 'ราคาสินค้าเปลี่ยน',
+  },
+  {
+    value: 'PROMO_START',
+    label: 'เริ่มโปรโมชัน',
+    shortLabel: 'เริ่มโปรโมชัน',
+  },
+  {
+    value: 'PROMO_END_REVERT',
+    label: 'สิ้นสุดโปรโมชัน',
+    shortLabel: 'สิ้นสุดโปรโมชัน',
+  },
+  {
+    value: 'NEW_PDT',
+    label: 'มีสินค้าใหม่',
+    shortLabel: 'มีสินค้าใหม่',
+  },
+] as const;
+
+const OFFSET_CHOICES = [
+  { value: 0, label: 'วันนี้ (0)' },
+  { value: 1, label: 'พรุ่งนี้ (+1)' },
+  { value: -1, label: 'เมื่อวาน (-1)' },
+] as const;
+
+function nextProfileCode(existing: Rule[]): string {
+  const used = new Set(existing.map((r) => r.code.trim().toUpperCase()));
+  for (let n = 1; n <= 999; n++) {
+    const cand = String(n).padStart(3, '0');
+    if (!used.has(cand)) return cand;
+  }
+  return String(existing.length + 1).padStart(3, '0');
 }
-export function AutoPrintBulkSettings(p:Props & {center:Center;templates:Template[];onSaved:()=>Promise<void>}) {
-  const branch=p.center.master?.branch||p.sysOptions.find(o=>o.FTSopCode==='DefaultBranch')?.FTSopValue||'';
-  const existing=p.center.rules.filter(r=>r.branch===branch);
-  const [form,setForm]=useState<Preferences>(()=>{
-    const saved=p.center.bulkSettings as Preferences|undefined;
-    const previous=saved?.branch===branch&&Array.isArray(saved.rows)?saved:undefined;
-    const first=existing[0];
-    const defaults={branch,enabled:existing.some(r=>r.enabled),time:first?.time||'01:00',days:first?.days||'1111111',quantity:first?.quantity||1,catchUp:first?.catchUp??true,normal:'',promo:''};
-    return {...defaults,...previous,rows:standardSources.map<Row>(source=>{
-      const candidates=existing.filter(r=>r.source===source);
-      const prior=previous?.rows.find(row=>row.source===source&&candidates.some(r=>r.id===row.id&&r.enabled))||previous?.rows.find(row=>row.source===source);
-      const original=candidates.find(r=>r.id===prior?.id)||candidates.find(r=>r.enabled)||candidates[0];
-      if(prior)return {...prior,id:original?.id||prior.id,original,selected:original?.enabled||Boolean(prior.selected&&(prior.template||original?.template))};
-      if(original)return {id:original.id,source,selected:original.enabled,template:original.template,time:original.time===defaults.time?'':original.time,printerOverride:true,days:original.days===defaults.days?undefined:original.days,quantity:original.quantity===defaults.quantity?undefined:original.quantity,catchUp:original.catchUp===defaults.catchUp?undefined:original.catchUp,original};
-      return {id:crypto.randomUUID(),source,selected:false,template:'',time:'',printerOverride:false};
-    })};
-  });
-  const [busy,setBusy]=useState(false);
-  const [error,setError]=useState('');
-  const [dirty,setDirty]=useState(false);
-  const [preview,setPreview]=useState<Array<{name:string;items:Candidate[]}>|null>(null);
-  const [confirmEnable,setConfirmEnable]=useState(false);
-  const mismatch=!branch||form.branch!==branch||Boolean(p.authUser.branchId&&p.authUser.branchId!==branch);
-  const update=(patch:Partial<Preferences>)=>{setForm(f=>({...f,...patch}));setDirty(true);setError('');setPreview(null);setConfirmEnable(false);};
-  const updateRow=(id:string,patch:Partial<Row>)=>update({rows:form.rows.map(r=>r.id===id?{...r,...patch}:r)});
-  const printerOptions=[...p.windowsPrinters.map(w=>({name:w.name,protocol:'WINDOWS',ip:'',port:9100,dpi:203,trays:w.trays||[]})),...p.printers.filter(x=>x.enabled&&x.ip!=='Windows'&&x.brand!=='WINDOWS'&&x.brand!=='SAMSUNG').map(x=>({name:x.name,protocol:x.brand,ip:x.ip,port:x.port,dpi:x.dpi,trays:[] as string[]}))];
-  const templateOptions=p.templates.map(t=>{const size=p.allLabelSizes.find(s=>s.FTLbsCode===t.FTLbsCode);return {value:t.FTLtmCode,label:t.FTLtmName,keywords:`${t.FTLtmCode} ${t.FTLbsCode} ${size?.FTLbsName||''}`,badge:size?`${size.FCLbsWidth}×${size.FCLbsHeight} มม.`:undefined};});
-  const resolve=(row:Row):Rule=>{
-    const code=row.template||row.original?.template||(row.source==='PROMO_START'?form.promo:form.normal)||'';
-    const template=p.templates.find(t=>t.FTLtmCode===code);
-    const route=row.route||row.original||{printer:'',tray:'',protocol:'WINDOWS',ip:'',port:9100,dpi:203};
-    return {id:row.id,name:row.original?.name||purposes[row.source]?.name||row.source,source:row.source,branch,enabled:form.enabled&&row.selected,
-      time:row.time||form.time,days:row.days||form.days,quantity:row.quantity??form.quantity,catchUp:row.catchUp??form.catchUp,
-      template:code,size:template?.FTLbsCode||'',printer:route.printer,tray:route.tray,protocol:route.protocol,ip:route.ip,port:route.port,dpi:route.dpi};
+
+function targetDatePreview(offsetDays: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + (Number.isFinite(offsetDays) ? offsetDays : 0));
+  return d.toISOString().slice(0, 10);
+}
+
+function emptyTarget(): ProfileTarget {
+  return {
+    size: '',
+    template: '',
+    printer: '',
+    tray: '',
+    protocol: 'WINDOWS',
+    ip: '',
+    port: 9100,
+    dpi: 203,
+    quantity: 1,
   };
-  const validate=()=>{
-    if(mismatch)return 'สาขาของการตั้งค่าไม่ตรงกับแหล่งข้อมูล กรุณาเปิดหน้านี้ใหม่หลังตรวจสอบสาขา';
-    if(!timePattern.test(form.time)||!form.days.includes('1'))return 'กรุณาระบุเวลาและเลือกวันพิมพ์อย่างน้อยหนึ่งวัน';
-    if(!Number.isInteger(form.quantity)||form.quantity<1||form.quantity>999)return 'จำนวนป้ายต้องเป็นจำนวนเต็ม 1–999';
-    if(form.enabled&&!form.rows.some(r=>r.selected))return 'เลือกประเภทงานอย่างน้อยหนึ่งรายการก่อนเปิดใช้งาน';
-    for(const row of form.rows.filter(r=>r.selected)){
-      const rule=resolve(row);const template=p.templates.find(t=>t.FTLtmCode===rule.template);const name=purposes[row.source]?.title||row.source;
-      if(!template)return `${name}: กรุณาเลือกแบบป้ายสำหรับงานนี้`;
-      if(templateProblem(template))return `${name}: ${templateProblem(template)}`;
-      if(!p.allLabelSizes.some(s=>s.FTLbsCode===rule.size&&s.FTLbsStaUse==='1'))return `${name}: ขนาดป้ายถูกปิดใช้งาน`;
-      if(!rule.printer)return `${name}: กรุณาเลือกเครื่องพิมพ์สำหรับงานนี้`;
-      if(!timePattern.test(rule.time))return `${name}: เวลาไม่ถูกต้อง`;
+}
+
+export function normalizeTargets(rule: Rule): ProfileTarget[] {
+  if (Array.isArray(rule.targets) && rule.targets.length > 0) {
+    return rule.targets.map((t) => ({ ...t }));
+  }
+  return [
+    {
+      size: rule.size || '',
+      template: rule.template || '',
+      printer: rule.printer || '',
+      tray: rule.tray || '',
+      protocol: rule.protocol || 'WINDOWS',
+      ip: rule.ip || '',
+      port: rule.port || 9100,
+      dpi: rule.dpi || 203,
+      quantity: rule.quantity || 1,
+    },
+  ];
+}
+
+export function AutoPrintBulkSettings(
+  p: Props & { center: Center; templates: Template[]; onSaved: () => Promise<void> }
+) {
+  const branch =
+    p.center.master?.branch ||
+    p.sysOptions.find((o) => o.FTSopCode === 'DefaultBranch')?.FTSopValue ||
+    '';
+
+  const profiles = useMemo(
+    () =>
+      p.center.rules
+        .filter((r) => !branch || r.branch === branch)
+        .sort((a, b) => (a.code || a.id).localeCompare(b.code || b.id)),
+    [p.center.rules, branch]
+  );
+
+  const [editing, setEditing] = useState<Rule | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [preview, setPreview] = useState<{
+    title: string;
+    targetDate: string;
+    groups: Array<{ template: string; size: string; printer: string; items: Candidate[] }>;
+  } | null>(null);
+
+  const printerOptions = useMemo(
+    () => [
+      ...p.windowsPrinters.map((w) => ({
+        name: w.name,
+        protocol: 'WINDOWS',
+        ip: '',
+        port: 9100,
+        dpi: 203,
+        trays: w.trays || [],
+      })),
+      ...p.printers
+        .filter((x) => x.enabled && x.ip !== 'Windows' && x.brand !== 'WINDOWS' && x.brand !== 'SAMSUNG')
+        .map((x) => ({
+          name: x.name,
+          protocol: x.brand,
+          ip: x.ip,
+          port: x.port,
+          dpi: x.dpi,
+          trays: [] as string[],
+        })),
+    ],
+    [p.windowsPrinters, p.printers]
+  );
+
+  const templateOptions = useMemo(
+    () =>
+      p.templates.map((t) => {
+        const size = p.allLabelSizes.find((s) => s.FTLbsCode === t.FTLbsCode);
+        return {
+          value: t.FTLtmCode,
+          label: t.FTLtmName,
+          keywords: `${t.FTLtmCode} ${t.FTLbsCode} ${size?.FTLbsName || ''}`,
+          badge: size ? `${size.FCLbsWidth}×${size.FCLbsHeight} มม.` : undefined,
+        };
+      }),
+    [p.templates, p.allLabelSizes]
+  );
+
+  const startNewProfile = (source = 'PRICE_CHG') => {
+    const code = nextProfileCode(profiles);
+    const ev = EVENT_CHOICES.find((e) => e.value === source);
+    setError('');
+    setPreview(null);
+    setEditing({
+      id: crypto.randomUUID(),
+      code,
+      name: `${ev?.shortLabel || 'โปรไฟล์'} (${code})`,
+      enabled: true,
+      branch,
+      source,
+      time: '00:00',
+      days: '1111111',
+      size: '',
+      template: '',
+      printer: '',
+      tray: '',
+      protocol: 'WINDOWS',
+      ip: '',
+      port: 9100,
+      dpi: 203,
+      quantity: 1,
+      catchUp: false,
+      offsetDays: source === 'PROMO_END_REVERT' ? -1 : 0,
+      targets: [emptyTarget()],
+    });
+  };
+
+  const openEditProfile = (rule: Rule, appendExtraPaper = false) => {
+    setError('');
+    const list = normalizeTargets(rule);
+    if (appendExtraPaper) {
+      list.push(emptyTarget());
+    }
+    setEditing({
+      ...rule,
+      targets: list,
+    });
+  };
+
+  const updateEditingTarget = (index: number, patch: Partial<ProfileTarget>) => {
+    if (!editing) return;
+    const list = normalizeTargets(editing);
+    list[index] = { ...list[index], ...patch };
+    const first = list[0];
+    setEditing({
+      ...editing,
+      size: first.size,
+      template: first.template,
+      printer: first.printer,
+      tray: first.tray,
+      protocol: first.protocol,
+      ip: first.ip,
+      port: first.port,
+      dpi: first.dpi,
+      quantity: first.quantity,
+      targets: list,
+    });
+  };
+
+  const addPaperTarget = () => {
+    if (!editing) return;
+    const list = normalizeTargets(editing);
+    list.push(emptyTarget());
+    setEditing({ ...editing, targets: list });
+  };
+
+  const removePaperTarget = (index: number) => {
+    if (!editing) return;
+    const list = normalizeTargets(editing);
+    if (list.length <= 1) return;
+    list.splice(index, 1);
+    const first = list[0];
+    setEditing({
+      ...editing,
+      size: first.size,
+      template: first.template,
+      printer: first.printer,
+      tray: first.tray,
+      protocol: first.protocol,
+      ip: first.ip,
+      port: first.port,
+      dpi: first.dpi,
+      quantity: first.quantity,
+      targets: list,
+    });
+  };
+
+  const validateProfile = (rule: Rule): string => {
+    if (!branch) return 'กรุณาตั้งค่าแหล่งข้อมูลและสาขาก่อนสร้าง Profile';
+    const cleanCode = rule.code.trim();
+    if (!cleanCode || cleanCode.length > 24 || !/^[A-Za-z0-9_-]+$/.test(cleanCode)) {
+      return 'กรุณาระบุรหัส Profile เป็นตัวเลขหรือภาษาอังกฤษ 1–24 ตัว (ห้ามเว้นวรรค)';
+    }
+    if (profiles.some((x) => x.id !== rule.id && x.code.trim().toUpperCase() === cleanCode.toUpperCase())) {
+      return `รหัส Profile "${cleanCode}" ถูกใช้งานแล้ว กรุณาเปลี่ยนรหัสใหม่`;
+    }
+    if (!rule.name.trim()) return 'กรุณาระบุชื่อ Profile';
+    const targets = normalizeTargets(rule);
+    if (!targets.length) return 'กรุณาเพิ่มแบบป้ายและเครื่องพิมพ์อย่างน้อย 1 รายการ';
+
+    for (let i = 0; i < targets.length; i++) {
+      const t = targets[i];
+      const prefix = targets.length > 1 ? `กระดาษ/แบบป้ายที่ ${i + 1}: ` : '';
+      if (!t.template) return `${prefix}กรุณาเลือกแบบป้าย`;
+      const tmpl = p.templates.find((x) => x.FTLtmCode === t.template);
+      if (!tmpl) return `${prefix}ไม่พบแบบป้ายที่เลือก`;
+      const prob = templateProblem(tmpl);
+      if (prob) return `${prefix}${prob}`;
+      if (!p.allLabelSizes.some((s) => s.FTLbsCode === t.size && s.FTLbsStaUse === '1')) {
+        return `${prefix}ขนาดป้ายของแบบนี้ถูกปิดใช้งาน`;
+      }
+      if (!t.printer.trim()) return `${prefix}กรุณาเลือกเครื่องพิมพ์`;
+      if (!Number.isInteger(t.quantity) || t.quantity < 1 || t.quantity > 999) {
+        return `${prefix}จำนวนป้ายต้องเป็นจำนวนเต็ม 1–999`;
+      }
     }
     return '';
   };
-  const check=async()=>{
-    const message=validate();if(message){setError(message);return;}
-    setBusy(true);setError('');setPreview(null);
-    try{const result:Array<{name:string;items:Candidate[]}>=[];for(const row of form.rows.filter(r=>r.selected)){const d=await api('/api/print-center/preview',resolve(row));result.push({name:purposes[row.source]?.title||row.source,items:d.items});}setPreview(result);}catch(e){setError(e instanceof Error?e.message:String(e));}finally{setBusy(false);}
+
+  const buildPayload = (rule: Rule): Rule => {
+    const targets = normalizeTargets(rule);
+    const first = targets[0] || emptyTarget();
+    return {
+      ...rule,
+      code: rule.code.trim(),
+      branch,
+      enabled: true,
+      size: first.size,
+      template: first.template,
+      printer: first.printer,
+      tray: first.tray,
+      protocol: first.protocol,
+      ip: first.ip,
+      port: first.port,
+      dpi: first.dpi,
+      quantity: first.quantity,
+      targets,
+    };
   };
-  const save=async(confirmed=false)=>{
-    const message=validate();if(message){setError(message);return;}
-    if(form.enabled&&!confirmed){setConfirmEnable(true);return;}
-    setBusy(true);setError('');
-    try{
-      // Keep old IDs/watermarks. Unselected old rules are disabled, never deleted.
-      const rules=[...form.rows.flatMap(row=>row.selected?[resolve(row)]:existing.some(r=>r.id===row.id)?[{...existing.find(r=>r.id===row.id)!,enabled:false}]:[]),...existing.filter(r=>!form.rows.some(row=>row.id===r.id)).map(r=>({...r,enabled:false}))];
-      await api('/api/print-center/rules',{branch,rules,preferences:{...form,rows:form.rows.map(row=>({...row,original:rules.find(r=>r.id===row.id)}))}});
-      setForm(f=>({...f,rows:f.rows.map(row=>({...row,original:rules.find(r=>r.id===row.id)||row.original}))}));
-      setDirty(false);setConfirmEnable(false);toast.success('บันทึกการตั้งค่าแล้ว');
+
+  const handleSaveProfile = async () => {
+    if (!editing) return;
+    const msg = validateProfile(editing);
+    if (msg) {
+      setError(msg);
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const payload = buildPayload(editing);
+      await api('/api/print-center/rule', payload);
+      toast.success(`บันทึก Profile "${payload.code}" เรียบร้อยแล้ว`);
+      setEditing(null);
       await p.onSaved();
-    }catch(e){setError(e instanceof Error?e.message:String(e));}finally{setBusy(false);}
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
   };
-  return <div className="space-y-4 min-w-0">
-    <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold text-lg">ตั้งค่าพิมพ์อัตโนมัติ</h2><p className="text-sm text-slate-500 mt-1">เลือกเหตุการณ์และแบบป้ายในหน้าเดียว ระบบค้นหารายการสินค้าให้ตามวันที่มีผล</p></div><span className="text-sm text-slate-500">สาขา {branch}</span></div>
-    <div className="flex flex-wrap items-center gap-2 text-sm text-slate-500"><span className={`h-2 w-2 rounded-full ${p.center.master?.autoReady?'bg-emerald-500':'bg-slate-400'}`}/><span>{p.center.master?.autoReady?'ข้อมูลพร้อมใช้งาน':p.center.master?.connected?'เชื่อมต่อ StoreFront แล้ว':'ยังไม่เชื่อมต่อ StoreFront'}</span><Button variant="link" size="sm" className="text-teal-700" onClick={p.onOpenConnection}>รายละเอียดแหล่งข้อมูล</Button></div>
-    {existing.some(r=>r.enabled&&!form.rows.some(row=>row.id===r.id))&&<p className="text-sm text-amber-800">พบตารางเดิมเพิ่มเติม เมื่อบันทึกจะปิดตารางที่ไม่ได้แสดง เพื่อให้เหลือหนึ่งตารางต่อเหตุการณ์ ประวัติเดิมยังอยู่</p>}
-    {error&&<p role="alert" className="bg-red-50 text-red-700 p-4 rounded-lg">{error}</p>}
-    <fieldset disabled={busy||mismatch} className="min-w-0 space-y-4">
-    <section className={section}><h3 className="font-semibold">ค่าร่วมสำหรับทุกประเภท</h3><div className="grid gap-4 md:grid-cols-2 xl:grid-cols-2">
-      <Field label="เวลาเริ่มพิมพ์ (24 ชม.)"><TimeInput value={form.time} label="เวลาเริ่มพิมพ์" onChange={time=>update({time})}/></Field>
 
+  const handleDeleteProfile = async (rule: Rule) => {
+    setBusy(true);
+    setError('');
+    try {
+      await api('/api/print-center/profile/delete', { id: rule.id });
+      toast.success(`ลบ Profile "${rule.code}" แล้ว`);
+      if (editing?.id === rule.id) setEditing(null);
+      await p.onSaved();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
-      <Field label="จำนวนป้ายต่อรายการ"><Input type="number" min={1} max={999} value={form.quantity} onChange={e=>update({quantity:Number(e.target.value)})}/></Field>
-    </div><div className="flex flex-wrap gap-2 items-center text-sm"><span className="font-medium mr-2">วันพิมพ์</span><Button variant="outline" size="sm" onClick={()=>update({days:'1111111'})}>ทุกวัน</Button><Button variant="outline" size="sm" onClick={()=>update({days:'1111100'})}>จันทร์–ศุกร์</Button>{dayNames.map((d,i)=><label key={d} className="flex items-center gap-1 rounded border px-2 py-2"><input type="checkbox" className="accent-teal-700" checked={form.days[i]==='1'} onChange={()=>update({days:form.days.split('').map((v,j)=>i===j?(v==='1'?'0':'1'):v).join('')})}/>{d}</label>)}</div>
-      <label className="flex items-start gap-2 text-sm"><input type="checkbox" className="mt-1 accent-teal-700" checked={form.catchUp} onChange={e=>update({catchUp:e.target.checked})}/>เมื่อเปิดเครื่องหลังเวลาที่ตั้ง ให้พิมพ์รอบที่พลาดของวันนี้</label>
-    </section>
-    <section className={section}>
-    <h3 className="font-semibold">งานพิมพ์ตามเหตุการณ์</h3><p className="text-sm text-slate-500">เลือกเฉพาะเหตุการณ์ที่ต้องการใช้งาน ไม่ต้องตั้งค่าครบทั้ง 4 เหตุการณ์</p>
-    {form.rows.map(row=>{const rule=resolve(row);const template=p.templates.find(t=>t.FTLtmCode===rule.template);const printer=printerOptions.find(x=>x.name===rule.printer);return <article key={row.id} className="rounded-lg border p-3 space-y-3 text-sm">
-      <div className="flex flex-wrap items-center justify-between gap-2"><label className="flex items-center gap-2"><input type="checkbox" className="accent-teal-700" checked={row.selected} onChange={e=>updateRow(row.id,{selected:e.target.checked})}/><b>{purposes[row.source]?.title||row.source}</b></label></div>
-      {row.selected&&<>
-      <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-3">
-        <Field label="แบบป้าย"><SearchableSelect ariaLabel={`แบบป้าย ${purposes[row.source]?.title}`} value={rule.template} options={templateOptions} placeholder="เลือกแบบป้าย" searchPlaceholder="ค้นหาชื่อหรือขนาดป้าย…" onValueChange={template=>updateRow(row.id,{template})}/></Field>
-        <Field label="เครื่องพิมพ์"><SearchableSelect ariaLabel={`เครื่องพิมพ์ ${purposes[row.source]?.title}`} value={rule.printer} options={[...printerOptions.map(x=>({value:x.name,label:x.name})),...(rule.printer&&!printer?[{value:rule.printer,label:rule.printer+' (ที่บันทึกไว้)'}]:[])]} placeholder="เลือกเครื่องพิมพ์" onValueChange={name=>{const pr=printerOptions.find(x=>x.name===name);if(pr)updateRow(row.id,{route:{printer:pr.name,tray:'',protocol:pr.protocol,ip:pr.ip,port:pr.port,dpi:pr.dpi}});}}/></Field>
-        <Field label="ถาดกระดาษ"><SearchableSelect ariaLabel={`ถาด ${purposes[row.source]?.title}`} disabled={!rule.printer} value={rule.tray} options={[{value:'',label:'ถาดเริ่มต้น'},...(printer?.trays||[]).map(t=>({value:t,label:p.formatTrayLabel(t)})),...(rule.tray&&!printer?.trays.includes(rule.tray)?[{value:rule.tray,label:p.formatTrayLabel(rule.tray)}]:[])]} onValueChange={tray=>updateRow(row.id,{route:{...rule,tray}})}/></Field>
-        <Field label="เวลา"><select className={selectClass} value={row.time?'custom':'shared'} onChange={e=>updateRow(row.id,{time:e.target.value==='custom'?form.time:''})}><option value="shared">ใช้เวลาหลัก {form.time}</option><option value="custom">กำหนดเวลาเฉพาะ</option></select>{row.time&&<TimeInput label={purposes[row.source]?.title||row.source} value={row.time} onChange={time=>updateRow(row.id,{time})}/>}</Field>
+  const handlePreview = async (rule: Rule) => {
+    const msg = validateProfile(rule);
+    if (msg) {
+      setError(msg);
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const payload = buildPayload(rule);
+      const res = await api('/api/print-center/preview', payload);
+      const groups = Array.isArray(res.groups)
+        ? res.groups
+        : [{ template: payload.template, size: payload.size, printer: payload.printer, items: Array.isArray(res.items) ? res.items : [] }];
+      setPreview({
+        title: `[${payload.code}] ${payload.name} — ${purposes[payload.source]?.title || payload.source}`,
+        targetDate: targetDatePreview(payload.offsetDays),
+        groups,
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRunProfileNow = async (rule: Rule) => {
+    setBusy(true);
+    setError('');
+    try {
+      const res = await api('/api/print-center/run-profile', { code: rule.code, id: rule.id });
+      if (res.status === 'EMPTY') {
+        toast.info(`Profile [${rule.code}]: ไม่พบรายการสินค้าที่เข้าเงื่อนไข ณ วันที่ ${res.targetDate}`);
+      } else {
+        toast.success(`ส่งพิมพ์ Profile [${rule.code}] สำเร็จ (${res.itemCount} รายการ / ${res.printedUnits} ชุด)`);
+      }
+      await p.onSaved();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4 min-w-0">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="font-semibold text-lg">จัดการ Profile การพิมพ์</h2>
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-slate-500">สาขา {branch || '-'}</span>
+          <Button className="bg-teal-700 hover:bg-teal-800 text-white" disabled={busy || !branch} onClick={() => startNewProfile('PRICE_CHG')}>
+            + เพิ่ม Profile ใหม่
+          </Button>
+        </div>
       </div>
-      <Button variant="link" size="sm" disabled={!rule.template} onClick={()=>{const m=p.driverMappings.find(x=>x.lbsCode===rule.size);if(!m){setError('ยังไม่ได้ตั้งค่าเครื่องพิมพ์ของแบบป้ายนี้');return;}const route=resolveTemplateRoute(m,rule.template,template?.FTLtmPriType||'1');const pr=printerOptions.find(x=>x.name===route.printer);if(!pr){setError('ไม่พบเครื่องพิมพ์ของแบบป้ายนี้ กรุณาเลือกเครื่องพิมพ์');return;}updateRow(row.id,{route:{...route,ip:pr.ip,port:pr.port,dpi:pr.dpi}});}}>นำค่าเครื่องพิมพ์จากแบบป้ายมาใช้</Button>
-      {template&&templateProblem(template)&&<p className="text-amber-800 text-xs">{templateProblem(template)}</p>}
-      {(row.days!==undefined||row.quantity!==undefined||row.catchUp!==undefined)&&<div className="text-xs text-slate-500">ค่าจากตารางเดิม: วัน {dayNames.filter((_,i)=>(row.days||form.days)[i]==='1').join(' ')} · {rule.quantity} ป้าย · ชดเชยรอบ {rule.catchUp?'เปิด':'ปิด'} <Button variant="link" size="sm" onClick={()=>updateRow(row.id,{days:undefined,quantity:undefined,catchUp:undefined})}>ใช้ค่าหลัก</Button></div>}
-      </>}
-    </article>;})}
-    <p className="text-sm text-slate-500">งานก่อนหน้าทำจนจบก่อนเริ่มงานถัดไป</p></section>
-    <section className={section}><label className="flex items-start gap-3"><input type="checkbox" className="mt-1 accent-teal-700" checked={form.enabled} onChange={e=>update({enabled:e.target.checked})}/><span className="text-sm"><b>เปิดพิมพ์อัตโนมัติหลังบันทึก</b><span className="block mt-1 text-slate-500">{form.enabled?'จะเปิดใช้งานเฉพาะประเภทที่เลือก และอาจเริ่มรอบที่พลาดของวันนี้':'บันทึกการตั้งค่าไว้ก่อน โดยยังไม่พิมพ์อัตโนมัติ'}</span></span></label></section>
-    </fieldset>
-    {preview&&<section className={section}><h3 className="font-semibold">ผลตรวจรายการสินค้า — ยังไม่ได้สั่งพิมพ์</h3>{preview.map((group,i)=><details key={i} className="border rounded-lg p-3"><summary className="cursor-pointer text-sm">{group.name}: เข้าเงื่อนไข {group.items.filter(x=>!x.skippedDup).length} จาก {group.items.length} รายการ</summary><div className="max-h-60 overflow-auto text-sm">{group.items.map((x,j)=><p key={j} className="border-t py-2">{x.barCode} · {x.pdtName} · {x.salePrice.toFixed(2)} บาท{x.skippedDup?' · เคยส่งข้อมูลชุดนี้แล้ว':''}</p>)}</div></details>)}<p className="text-xs text-slate-500">ผลตรวจขึ้นกับข้อมูลและวันที่มีผลในขณะนี้ กรุณาตรวจสอบเวลาที่ดาวน์โหลดข้อมูลสำเร็จล่าสุด</p></section>}
-    {confirmEnable&&<div role="alert" className="rounded-lg border border-amber-300 bg-amber-50 p-4 space-y-3 text-sm"><p>ยืนยันเปิดพิมพ์อัตโนมัติสำหรับ {form.rows.filter(r=>r.selected).length} ประเภท? หากเปิดชดเชยรอบที่พลาด ระบบอาจเริ่มพิมพ์หลังบันทึก</p><Button disabled={busy} className="bg-teal-700" onClick={()=>void save(true)}>ยืนยันบันทึกและเปิดใช้งาน</Button> <Button disabled={busy} variant="outline" onClick={()=>setConfirmEnable(false)}>กลับไปตรวจสอบ</Button></div>}
-    <div className="sticky bottom-0 z-10 rounded-lg border bg-white p-3 flex flex-wrap items-center justify-between gap-3"><div className="text-sm text-slate-500">{(p.center.bulkVersion!==1||p.center.separateSettingsVersion!==1)?<details><summary className="cursor-pointer">ยังบันทึกไม่ได้ · ตรวจสอบบริการ</summary><p className="mt-2 max-w-lg">บริการที่เปิดอยู่ยังเป็นรุ่นเดิม ต้องอัปเดตบริการเพื่อบันทึกการตั้งค่า Auto ที่แยกจากพิมพ์เอง</p></details>:dirty?'มีการเปลี่ยนแปลงที่ยังไม่บันทึก':'เลือกใช้เฉพาะเหตุการณ์ที่ต้องการ แล้วบันทึกครั้งเดียว'}</div><div className="flex flex-wrap gap-2"><Button variant="outline" disabled={busy||mismatch||!form.rows.some(r=>r.selected)} onClick={()=>void check()}>ตรวจรายการสินค้า (ไม่พิมพ์)</Button><Button className="bg-teal-700 hover:bg-teal-800 text-white" disabled={busy||mismatch||(p.center.bulkVersion!==1||p.center.separateSettingsVersion!==1)} onClick={()=>void save()}>{busy?'กำลังดำเนินการ…':'บันทึกการตั้งค่า'}</Button></div></div>
-  </div>;
+
+      {error && (
+        <p role="alert" className="bg-red-50 border border-red-200 text-red-700 p-3 rounded-lg text-sm">
+          {error}
+        </p>
+      )}
+
+      {editing && (
+        <section className={section}>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-2">
+            <h3 className="font-semibold text-base text-teal-800">
+              {profiles.some((x) => x.id === editing.id) ? `แก้ไข Profile [${editing.code}]` : 'สร้าง Profile ใหม่'}
+            </h3>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <Field label="รหัส Profile *">
+              <Input
+                value={editing.code}
+                maxLength={24}
+                placeholder="001"
+                className="font-mono font-bold"
+                onChange={(e) => setEditing({ ...editing, code: e.target.value })}
+              />
+            </Field>
+            <Field label="ชื่อ Profile *">
+              <Input
+                value={editing.name}
+                placeholder="เช่น ราคาเปลี่ยน"
+                onChange={(e) => setEditing({ ...editing, name: e.target.value })}
+              />
+            </Field>
+            <Field label="ประเภทราคา *">
+              <select
+                className={selectClass}
+                value={editing.source}
+                onChange={(e) => {
+                  const source = e.target.value;
+                  const suggestedOffset = source === 'PROMO_END_REVERT' ? -1 : editing.offsetDays;
+                  setEditing({ ...editing, source, offsetDays: suggestedOffset });
+                }}
+              >
+                {EVENT_CHOICES.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Offset วัน (n)">
+              <select
+                className={selectClass}
+                value={[-1, 0, 1].includes(editing.offsetDays) ? String(editing.offsetDays) : 'custom'}
+                onChange={(e) => {
+                  if (e.target.value !== 'custom') {
+                    setEditing({ ...editing, offsetDays: Number(e.target.value) });
+                  }
+                }}
+              >
+                {OFFSET_CHOICES.map((opt) => (
+                  <option key={opt.value} value={String(opt.value)}>
+                    {opt.label}
+                  </option>
+                ))}
+                <option value="custom">กำหนดวันชดเชยเอง...</option>
+              </select>
+              {![-1, 0, 1].includes(editing.offsetDays) && (
+                <Input
+                  type="number"
+                  min={-30}
+                  max={30}
+                  value={editing.offsetDays}
+                  onChange={(e) => setEditing({ ...editing, offsetDays: Number(e.target.value) || 0 })}
+                  className="mt-1"
+                />
+              )}
+            </Field>
+          </div>
+
+          <div className="space-y-3 pt-2 border-t">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h4 className="font-semibold text-sm text-slate-800">
+                กระดาษ / แบบป้าย ({normalizeTargets(editing).length} รายการ)
+              </h4>
+              <Button type="button" size="sm" variant="outline" className="border-teal-600 text-teal-700" onClick={addPaperTarget}>
+                + เพิ่มกระดาษ / แบบป้าย
+              </Button>
+            </div>
+
+            {normalizeTargets(editing).map((target, idx) => {
+              const targetTemplate = p.templates.find((x) => x.FTLtmCode === target.template);
+              const targetPrinter = printerOptions.find((x) => x.name === target.printer);
+              const totalTargets = normalizeTargets(editing).length;
+              return (
+                <article key={idx} className="rounded-lg border border-slate-200 bg-slate-50/60 p-3 space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-slate-700">
+                      กระดาษ / แบบป้ายที่ {idx + 1}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="link"
+                        size="sm"
+                        className="h-auto p-0 text-xs text-teal-700"
+                        disabled={!target.template}
+                        onClick={() => {
+                          const m = p.driverMappings.find((x) => x.lbsCode === target.size);
+                          if (!m) {
+                            setError('ยังไม่ได้ตั้งค่าเครื่องพิมพ์ของแบบป้ายนี้ในหน้า เครื่องพิมพ์ตามแบบป้าย');
+                            return;
+                          }
+                          const route = resolveTemplateRoute(m, target.template, targetTemplate?.FTLtmPriType || '1');
+                          const pr = printerOptions.find((x) => x.name === route.printer);
+                          if (!pr) {
+                            setError('ไม่พบเครื่องพิมพ์ที่ผูกไว้กับแบบป้ายนี้');
+                            return;
+                          }
+                          updateEditingTarget(idx, {
+                            printer: pr.name,
+                            tray: route.tray,
+                            protocol: pr.protocol,
+                            ip: pr.ip,
+                            port: pr.port,
+                            dpi: pr.dpi,
+                          });
+                          toast.success('ดึงค่าเครื่องพิมพ์และถาดจากแบบป้ายแล้ว');
+                        }}
+                      >
+                        ดึงค่าจาก &ldquo;เครื่องพิมพ์ตามแบบป้าย&rdquo;
+                      </Button>
+                      {totalTargets > 1 && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 px-2 text-xs text-red-600 hover:bg-red-50"
+                          onClick={() => removePaperTarget(idx)}
+                        >
+                          ลบแถวนี้
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                    <Field label="แบบป้าย *">
+                      <SearchableSelect
+                        ariaLabel={`แบบป้าย ${idx + 1}`}
+                        value={target.template}
+                        options={templateOptions}
+                        placeholder="เลือกแบบป้าย"
+                        searchPlaceholder="ค้นหาชื่อหรือขนาดป้าย..."
+                        onValueChange={(tmplCode) => {
+                          const t = p.templates.find((x) => x.FTLtmCode === tmplCode);
+                          updateEditingTarget(idx, {
+                            template: tmplCode,
+                            size: t?.FTLbsCode || '',
+                          });
+                        }}
+                      />
+                    </Field>
+
+                    <Field label="เครื่องพิมพ์ *">
+                      <SearchableSelect
+                        ariaLabel={`เครื่องพิมพ์ ${idx + 1}`}
+                        value={target.printer}
+                        options={[
+                          ...printerOptions.map((x) => ({ value: x.name, label: x.name })),
+                          ...(target.printer && !targetPrinter
+                            ? [{ value: target.printer, label: `${target.printer} (ที่บันทึกไว้)` }]
+                            : []),
+                        ]}
+                        placeholder="เลือกเครื่องพิมพ์"
+                        onValueChange={(name) => {
+                          const pr = printerOptions.find((x) => x.name === name);
+                          if (pr) {
+                            updateEditingTarget(idx, {
+                              printer: pr.name,
+                              tray: '',
+                              protocol: pr.protocol,
+                              ip: pr.ip,
+                              port: pr.port,
+                              dpi: pr.dpi,
+                            });
+                          }
+                        }}
+                      />
+                    </Field>
+
+                    <Field label="ถาดกระดาษ">
+                      <SearchableSelect
+                        ariaLabel={`ถาดกระดาษ ${idx + 1}`}
+                        disabled={!target.printer}
+                        value={target.tray}
+                        options={[
+                          { value: '', label: 'ถาดเริ่มต้น' },
+                          ...(targetPrinter?.trays || []).map((t) => ({ value: t, label: p.formatTrayLabel(t) })),
+                          ...(target.tray && !targetPrinter?.trays.includes(target.tray)
+                            ? [{ value: target.tray, label: p.formatTrayLabel(target.tray) }]
+                            : []),
+                        ]}
+                        onValueChange={(tray) => updateEditingTarget(idx, { tray })}
+                      />
+                    </Field>
+
+                    <Field label="จำนวนป้ายต่อรายการ">
+                      <Input
+                        type="number"
+                        min={1}
+                        max={999}
+                        value={target.quantity}
+                        onChange={(e) =>
+                          updateEditingTarget(idx, { quantity: Math.max(1, Number(e.target.value) || 1) })
+                        }
+                      />
+                    </Field>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+
+          <div className="flex flex-wrap justify-end gap-2 pt-2 border-t">
+            <Button type="button" variant="outline" disabled={busy} onClick={() => setEditing(null)}>
+              ยกเลิก
+            </Button>
+            <Button type="button" variant="outline" disabled={busy} onClick={() => void handlePreview(editing)}>
+              ตรวจรายการสินค้า (ไม่พิมพ์)
+            </Button>
+            <Button
+              type="button"
+              className="bg-teal-700 hover:bg-teal-800 text-white"
+              disabled={busy}
+              onClick={() => void handleSaveProfile()}
+            >
+              {busy ? 'กำลังบันทึก...' : 'บันทึก Profile'}
+            </Button>
+          </div>
+        </section>
+      )}
+
+      {/* แสดง Profile แบ่งตาม 4 เหตุการณ์ราคา เพื่อให้เพิ่มกระดาษ/Profile ในราคานั้นๆ ได้ทันที */}
+      <div className="space-y-4">
+        {EVENT_CHOICES.map((ev) => {
+          const eventProfiles = profiles.filter((r) => r.source === ev.value);
+          return (
+            <section key={ev.value} className={section}>
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-2.5">
+                <h3 className="font-semibold text-base text-slate-800">
+                  {ev.shortLabel} <span className="text-xs font-normal text-slate-500">({eventProfiles.length} Profile)</span>
+                </h3>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="border-teal-700 text-teal-700 hover:bg-teal-50"
+                  disabled={busy || !branch}
+                  onClick={() => startNewProfile(ev.value)}
+                >
+                  + เพิ่ม Profile ในราคานี้
+                </Button>
+              </div>
+
+              {eventProfiles.length === 0 ? (
+                <p className="text-xs text-slate-400 py-3">ยังไม่มี Profile</p>
+              ) : (
+                <div className="space-y-3">
+                  {eventProfiles.map((rule) => {
+                    const targets = normalizeTargets(rule);
+                    const offsetLabel =
+                      rule.offsetDays > 0 ? `+${rule.offsetDays}` : String(rule.offsetDays || 0);
+                    return (
+                      <article key={rule.id} className="rounded-lg border border-slate-200 p-3 space-y-2.5 bg-white">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-2.5">
+                            <span className="rounded bg-teal-50 border border-teal-200 px-2 py-0.5 font-mono font-bold text-teal-800 text-sm">
+                              รหัส {rule.code}
+                            </span>
+                            <span className="font-semibold text-sm text-slate-800">{rule.name}</span>
+                            <span className="rounded bg-slate-100 px-2 py-0.5 font-mono text-xs text-slate-700">
+                              Offset {offsetLabel} วัน
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="border-teal-600 text-teal-700 text-xs"
+                              disabled={busy}
+                              onClick={() => openEditProfile(rule, true)}
+                            >
+                              + เพิ่มกระดาษ/แบบป้าย
+                            </Button>
+                            <Button size="sm" variant="outline" className="text-xs" disabled={busy} onClick={() => void handlePreview(rule)}>
+                              ตรวจสินค้า
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="text-xs text-teal-700"
+                              disabled={busy}
+                              onClick={() => void handleRunProfileNow(rule)}
+                            >
+                              พิมพ์ตอนนี้
+                            </Button>
+                            <Button size="sm" variant="outline" className="text-xs" disabled={busy} onClick={() => openEditProfile(rule, false)}>
+                              แก้ไข
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="text-xs text-red-600 hover:bg-red-50"
+                              disabled={busy}
+                              onClick={() => void handleDeleteProfile(rule)}
+                            >
+                              ลบ
+                            </Button>
+                          </div>
+                        </div>
+
+                        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 text-xs">
+                          {targets.map((t, i) => {
+                            const tmpl = p.templates.find((x) => x.FTLtmCode === t.template);
+                            return (
+                              <div key={i} className="rounded border border-slate-100 bg-slate-50 px-2.5 py-2 space-y-0.5">
+                                <div className="font-medium text-slate-800">
+                                  กระดาษ {i + 1}: {tmpl?.FTLtmName || t.template || '-'}
+                                </div>
+                                <div className="text-slate-600">
+                                  เครื่องพิมพ์: {t.printer || '-'}
+                                  {t.tray ? ` (${p.formatTrayLabel(t.tray)})` : ''} · {t.quantity} ดวง/รายการ
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          );
+        })}
+      </div>
+
+      {preview && (
+        <section className={section}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="font-semibold">
+              ผลตรวจรายการสินค้า: {preview.title} (วันเป้าหมาย {preview.targetDate})
+            </h3>
+            <Button size="sm" variant="ghost" onClick={() => setPreview(null)}>
+              ปิดตัวอย่าง
+            </Button>
+          </div>
+          <div className="space-y-3">
+            {preview.groups.map((grp, gIdx) => {
+              const tmpl = p.templates.find((x) => x.FTLtmCode === grp.template);
+              return (
+                <div key={gIdx} className="border rounded-md overflow-hidden">
+                  <div className="bg-slate-100 px-3 py-2 text-xs font-semibold flex flex-wrap justify-between gap-2">
+                    <span>
+                      แบบป้าย: {tmpl?.FTLtmName || grp.template} · เครื่องพิมพ์: {grp.printer}
+                    </span>
+                    <span>เข้าเงื่อนไข {grp.items.length} รายการ</span>
+                  </div>
+                  {grp.items.length === 0 ? (
+                    <p className="text-xs text-slate-500 p-4 text-center">
+                      ไม่พบรายการสินค้าที่เข้าเงื่อนไขในวันเป้าหมาย {preview.targetDate}
+                    </p>
+                  ) : (
+                    <div className="max-h-56 overflow-auto divide-y text-sm">
+                      {grp.items.map((item, idx) => (
+                        <div key={idx} className="px-3 py-2 flex flex-wrap items-center justify-between gap-2">
+                          <span>
+                            <strong className="font-mono">{item.barCode}</strong> · {item.pdtName}
+                          </span>
+                          <span className="font-mono font-semibold text-teal-800">
+                            {item.salePrice.toFixed(2)} บาท
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+    </div>
+  );
 }
