@@ -249,44 +249,35 @@ async fn compute_delta_candidates_impl(
     let mut cand_map: BTreeMap<(String, String), (String, String)> = BTreeMap::new(); // (pdt_code, bar_code) -> (trigger_src, pdt_name)
 
     if rule_enabled(&schedule.FTLscTriggerRules, "ALL_PRODUCTS") {
-        let bars = sqlx::query_as::<_, BarBasicRow>("SELECT b.FTPdtCode,b.FTBarCode,l.FTPdtName FROM TCNMPdtBar b LEFT JOIN TCNMPdt_L l ON l.FTPdtCode=b.FTPdtCode AND l.FNLngID=1 WHERE COALESCE(b.FTBarStaUse,'1')='1'")
-            .fetch_all(pool).await?;
-        for b in bars { cand_map.insert((b.pdt_code,b.bar_code),("ALL_PRODUCTS".into(),b.pdt_name.unwrap_or_default())); }
+        return Err(sqlx::Error::Protocol("รองรับงานพิมพ์ 4 ประเภทเท่านั้น: ราคาเปลี่ยน สินค้าใหม่ เริ่มโปรโมชั่น และสิ้นสุดโปรโมชั่น".into()));
     }
 
     // Case 1: PRICE_CHG (TCNTPdtPrice4PDT or approved TCNTPdtAdjPriHD effective on biz_date)
     if rule_enabled(&schedule.FTLscTriggerRules, "PRICE_CHG") {
-        let pdt_codes: Vec<(String,)> = sqlx::query_as(
-            r#"
-            SELECT DISTINCT FTPdtCode FROM (
-                SELECT FTPdtCode FROM TCNTPdtPrice4PDT
-                WHERE FTPghDocType = '1'
-                  AND substr(COALESCE(FDPghDStart, ''), 1, 10) BETWEEN ? AND ?
+        let bars: Vec<BarBasicRow> = sqlx::query_as(
+            r#"SELECT DISTINCT b.FTPdtCode, b.FTBarCode, pl.FTPdtName
+            FROM TCNMPdtBar b
+            LEFT JOIN TCNMPdt_L pl ON pl.FTPdtCode=b.FTPdtCode AND pl.FNLngID=1
+            JOIN (
+                SELECT FTPdtCode, FTPunCode, FTPplCode, FTBchCode FROM TCNTPdtPrice4PDT
+                WHERE FTPghDocType='1' AND substr(COALESCE(FDPghDStart,''),1,10) BETWEEN ? AND ?
                 UNION
-                SELECT dt.FTPdtCode
-                FROM TCNTPdtAdjPriDT dt
-                JOIN TCNTPdtAdjPriHD hd
-                  ON hd.FTBchCode = dt.FTBchCode AND hd.FTXphDocNo = dt.FTXphDocNo
-                WHERE COALESCE(hd.FTXphStaApv, '1') = '1'
-                  AND (? = '' OR COALESCE(hd.FTBchCode, '') = '' OR hd.FTBchCode = ?)
-                  AND substr(COALESCE(hd.FDXphDStart, ''), 1, 10) BETWEEN ? AND ?
-            )
-            "#,
-        )
-        .bind(since).bind(biz_date)
-        .bind(&eff_bch)
-        .bind(&eff_bch)
-        .bind(since).bind(biz_date)
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
-
-        for (pdt_code,) in pdt_codes {
-            for b in collect_bars_for_pdt(pool, &pdt_code).await {
-                cand_map
-                    .entry((b.pdt_code, b.bar_code))
-                    .or_insert(("PRICE_CHG".to_string(), b.pdt_name.unwrap_or_default()));
-            }
+                SELECT dt.FTPdtCode, dt.FTPunCode, hd.FTPplCode, hd.FTBchCode
+                FROM TCNTPdtAdjPriDT dt JOIN TCNTPdtAdjPriHD hd
+                  ON hd.FTAgnCode=dt.FTAgnCode AND hd.FTBchCode=dt.FTBchCode AND hd.FTXphDocNo=dt.FTXphDocNo
+                WHERE COALESCE(hd.FTXphStaApv,'1')='1'
+                  AND substr(COALESCE(hd.FDXphDStart,''),1,10) BETWEEN ? AND ?
+            ) changed ON changed.FTPdtCode=b.FTPdtCode
+              AND (COALESCE(changed.FTPunCode,'')='' OR changed.FTPunCode=b.FTPunCode)
+            WHERE COALESCE(b.FTBarStaUse,'1')='1'
+              AND (COALESCE(changed.FTPplCode,'')='' OR changed.FTPplCode=?)
+              AND (COALESCE(changed.FTBchCode,'')='' OR changed.FTBchCode=?)"#,
+        ).bind(since).bind(biz_date).bind(since).bind(biz_date)
+         .bind(eff_ppl.as_deref().unwrap_or("")).bind(&eff_bch)
+         .fetch_all(pool).await?;
+        for b in bars {
+            cand_map.entry((b.pdt_code, b.bar_code))
+                .or_insert(("PRICE_CHG".into(), b.pdt_name.unwrap_or_default()));
         }
     }
 
@@ -295,7 +286,7 @@ async fn compute_delta_candidates_impl(
         let col_v6 = if by_stop { "hd.FDPmhDStop" } else { "hd.FDPmhDStart" };
         let col_v5 = if by_stop { "hd.FDPmhDStop" } else { "hd.FDPmhDStart" };
 
-        let mut q_v6 = format!(
+        let q_v6 = format!(
             r#"
             SELECT DISTINCT gd.FTPmdRefCode, COALESCE(gd.FTPmdRefType, '1') AS RefType
             FROM TCNTPmtHD hd
@@ -309,9 +300,6 @@ async fn compute_delta_candidates_impl(
             col_v6
         );
         let canonical=crate::promo_v6::uses_canonical_rules(pool).await;
-        if canonical {
-            q_v6=format!("SELECT DISTINCT COALESCE(json_extract(ref.value,'$.code'),'*'),json_extract(ref.value,'$.type') FROM TCNTPmtHD hd,json_each(hd.FTPmhRuleJson,'$.groups') grp,json_each(grp.value,'$.include') ref WHERE COALESCE(hd.FTPmhStaActive,'1')='1' AND COALESCE(hd.FTPmhStaDoc,'')!='9' AND COALESCE(hd.FTPmhStaPrcDoc,'1') IN ('','1') AND hd.FNPmhVersion=(SELECT MAX(v.FNPmhVersion) FROM TCNTPmtHD v WHERE v.FTAgnCode=hd.FTAgnCode AND v.FTPmhDocNo=hd.FTPmhDocNo) AND substr(COALESCE({},''),1,10) BETWEEN ? AND ?",col_v6);
-        }
         let q_v5 = format!(
             r#"
             SELECT DISTINCT COALESCE(NULLIF(NULLIF(dt.FTPmdBarCode, ''), '*'), dt.FTPmdRefCode) AS RefCode,
@@ -327,11 +315,12 @@ async fn compute_delta_candidates_impl(
             col_v5
         );
 
-        let refs_result = sqlx::query_as::<_,(String,String)>(&q_v6)
+        let mut refs = if canonical {
+            crate::promo_v6::canonical_event_barcodes(pool, since_date, target_date, by_stop).await?
+        } else { sqlx::query_as::<_,(String,String)>(&q_v6)
             .bind(since_date).bind(target_date)
             .fetch_all(pool)
-            .await;
-        let mut refs=if canonical {refs_result?} else {refs_result.unwrap_or_default()};
+            .await.unwrap_or_default() };
         let v5_refs: Vec<(String, String)> = sqlx::query_as(&q_v5)
             .bind(bch_code)
             .bind(bch_code)
@@ -473,6 +462,26 @@ async fn compute_delta_candidates_impl(
         )
         .await?;
 
+        if exact_profile_mode && trigger_src == "PRICE_CHG" {
+            // Compare published prices in the same unit/group. A first price
+            // has no previous publication and still needs a label.
+            let previous: Option<f64> = sqlx::query_scalar(
+                "SELECT CAST(pr.FCPgdPriceRet AS REAL) FROM TCNTPdtPrice4PDT pr
+                 JOIN TCNMPdtBar b ON b.FTPdtCode=pr.FTPdtCode AND b.FTBarCode=?
+                 WHERE pr.FTPdtCode=? AND pr.FTPghDocType='1' AND pr.FCPgdPriceRet IS NOT NULL
+                   AND (COALESCE(pr.FTPunCode,'')='' OR pr.FTPunCode=b.FTPunCode)
+                   AND (COALESCE(pr.FTPplCode,'')='' OR pr.FTPplCode=?)
+                   AND (COALESCE(pr.FTBchCode,'')='' OR pr.FTBchCode=?)
+                   AND substr(COALESCE(pr.FDPghDStart,''),1,10)<=?
+                   AND (COALESCE(pr.FDPghDStop,'')='' OR substr(pr.FDPghDStop,1,10)>=?)
+                 ORDER BY CASE WHEN COALESCE(pr.FTPplCode,'')=? THEN 0 ELSE 1 END,
+                          CASE WHEN pr.FTPunCode=b.FTPunCode THEN 0 ELSE 1 END,
+                          substr(pr.FDPghDStart,1,10) DESC, pr.FDCreateOn DESC LIMIT 1"
+            ).bind(&bar_code).bind(&pdt_code).bind(eff_ppl.as_deref().unwrap_or(""))
+             .bind(&eff_bch).bind(&yesterday).bind(&yesterday).bind(eff_ppl.as_deref().unwrap_or(""))
+             .fetch_optional(pool).await?;
+            if previous.is_some_and(|p| (p * 100.0).round() == (eff.normal_price * 100.0).round()) { continue; }
+        }
         if exact_profile_mode && trigger_src == "PROMO_END_REVERT" && eff.pri_type == "2" {
             // Still covered by a replacement promotion on revert day -> do not print Base Price revert.
             continue;
@@ -566,9 +575,9 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS TCNMPdt (FTPdtCode TEXT PRIMARY KEY, FTPdtStaActive TEXT, FTPgpChain TEXT, FTPtyCode TEXT, FTPbnCode TEXT, FTPmoCode TEXT, FDCreateOn TEXT, FTCreateBy TEXT, FDLastUpdOn TEXT, FTLastUpdBy TEXT)",
             "CREATE TABLE IF NOT EXISTS TCNMPdt_L (FTPdtCode TEXT, FNLngID INTEGER, FTPdtName TEXT, FTPdtNameOth TEXT, FTPdtNameABB TEXT, FTPdtRmk TEXT, PRIMARY KEY (FTPdtCode, FNLngID))",
             "CREATE TABLE IF NOT EXISTS TCNMPdtBar (FTPdtCode TEXT, FTBarCode TEXT, FTPunCode TEXT, FTBarStaUse TEXT, FTBarStaAlwSale TEXT, FDCreateOn TEXT, FTCreateBy TEXT, FDLastUpdOn TEXT, FTLastUpdBy TEXT, FNBarRefSeq INTEGER, PRIMARY KEY (FTPdtCode, FTBarCode, FNBarRefSeq))",
-            "CREATE TABLE IF NOT EXISTS TCNTPdtPrice4PDT (FTAgnCode TEXT, FTPdtCode TEXT, FTPunCode TEXT, FDPghDStart TEXT, FTPghTStart TEXT, FTPplCode TEXT, FDPghDStop TEXT, FTPghTStop TEXT, FTPghDocNo TEXT, FTPghDocType TEXT, FTPghStaAdj TEXT, FCPgdPriceRet REAL, FCPgdPriceWhs REAL, FCPgdPriceNet REAL, FDLastUpdOn TEXT, FTLastUpdBy TEXT, FDCreateOn TEXT, FTCreateBy TEXT)",
-            "CREATE TABLE IF NOT EXISTS TCNTPdtAdjPriHD (FTBchCode TEXT, FTXphDocNo TEXT, FDXphDStart TEXT, FDXphDStop TEXT, FTXphStaApv TEXT, FDCreateOn TEXT)",
-            "CREATE TABLE IF NOT EXISTS TCNTPdtAdjPriDT (FTBchCode TEXT, FTXphDocNo TEXT, FNXpdSeq INTEGER, FTPdtCode TEXT, FCXpdPriceRet REAL)",
+            "CREATE TABLE IF NOT EXISTS TCNTPdtPrice4PDT (FTAgnCode TEXT, FTBchCode TEXT, FTPdtCode TEXT, FTPunCode TEXT, FDPghDStart TEXT, FTPghTStart TEXT, FTPplCode TEXT, FDPghDStop TEXT, FTPghTStop TEXT, FTPghDocNo TEXT, FTPghDocType TEXT, FTPghStaAdj TEXT, FCPgdPriceRet REAL, FCPgdPriceWhs REAL, FCPgdPriceNet REAL, FDLastUpdOn TEXT, FTLastUpdBy TEXT, FDCreateOn TEXT, FTCreateBy TEXT)",
+            "CREATE TABLE IF NOT EXISTS TCNTPdtAdjPriHD (FTAgnCode TEXT DEFAULT '', FTPplCode TEXT, FTBchCode TEXT, FTXphDocNo TEXT, FDXphDStart TEXT, FDXphDStop TEXT, FTXphStaApv TEXT, FDCreateOn TEXT)",
+            "CREATE TABLE IF NOT EXISTS TCNTPdtAdjPriDT (FTAgnCode TEXT DEFAULT '', FTPunCode TEXT, FTBchCode TEXT, FTXphDocNo TEXT, FNXpdSeq INTEGER, FTPdtCode TEXT, FCXpdPriceRet REAL)",
             "CREATE TABLE IF NOT EXISTS TCNTPdtPmtHD (FTBchCode TEXT, FTPmhDocNo TEXT, FDPmhDStart TEXT, FDPmhDStop TEXT, FTPmhStaClosed TEXT, FTPmhStaApv TEXT)",
             "CREATE TABLE IF NOT EXISTS TCNTPdtPmtHD_L (FTBchCode TEXT, FTPmhDocNo TEXT, FNLngID INTEGER, FTPmhName TEXT, FTPmhNameSlip TEXT, FTPmhRmk TEXT)",
             "CREATE TABLE IF NOT EXISTS TCNTPdtPmtDT (FTBchCode TEXT, FTPmhDocNo TEXT, FNPmdSeq INTEGER, FTPmdGrpName TEXT, FTPmdRefCode TEXT, FTPmdBarCode TEXT)",

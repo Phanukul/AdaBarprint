@@ -476,6 +476,7 @@ pub async fn apply_snapshots(
     .map_err(|e| e.to_string())?;
     let result:Result<()>=async {
     let mut tx = c.begin().await.map_err(|e| e.to_string())?;
+    let mut effective_agency = cfg.agency.trim().to_string();
     let mut cleared = std::collections::HashSet::new();
     for t in tasks() {
         let data = &bundles
@@ -520,7 +521,8 @@ pub async fn apply_snapshots(
                     .contains(&key.as_str())
                 {
                     if let Some(agency) = mapped.get("FTAgnCode").and_then(Value::as_str) {
-                        if !agency.is_empty() && agency != cfg.agency {
+                        if effective_agency.is_empty() { effective_agency = agency.trim().to_string(); }
+                        if !agency.is_empty() && agency != effective_agency {
                             return Err(format!("ข้อมูลราคา API ข้าม Agency: {table}"));
                         }
                     }
@@ -596,7 +598,7 @@ pub async fn apply_snapshots(
         .map_err(|e| e.to_string())?;
     }
     sqlx::query("INSERT OR REPLACE INTO ABMasterIdentity VALUES(1,?,?,?)")
-        .bind(&cfg.agency)
+        .bind(&effective_agency)
         .bind(&cfg.branch)
         .bind(&cfg.pos)
         .execute(&mut *tx)

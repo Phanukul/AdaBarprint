@@ -60,7 +60,7 @@ function nextProfileCode(existing: Rule[]): string {
 function targetDatePreview(offsetDays: number): string {
   const d = new Date();
   d.setDate(d.getDate() + (Number.isFinite(offsetDays) ? offsetDays : 0));
-  return d.toISOString().slice(0, 10);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 function emptyTarget(): ProfileTarget {
@@ -372,7 +372,7 @@ export function AutoPrintBulkSettings(
       if (res.status === 'EMPTY') {
         toast.info(`Profile [${rule.code}]: ไม่พบรายการสินค้าที่เข้าเงื่อนไข ณ วันที่ ${res.targetDate}`);
       } else {
-        toast.success(`ส่งพิมพ์ Profile [${rule.code}] สำเร็จ (${res.itemCount} รายการ / ${res.printedUnits} ชุด)`);
+        toast.success(`เพิ่ม Profile [${rule.code}] เข้าคิวแล้ว (${res.itemCount} รายการ / ${res.totalUnits} ชุด) ตรวจสถานะการส่งได้ในคิวงานพิมพ์`);
       }
       await p.onSaved();
     } catch (e) {
@@ -447,7 +447,9 @@ export function AutoPrintBulkSettings(
                 className={selectClass}
                 value={[-1, 0, 1].includes(editing.offsetDays) ? String(editing.offsetDays) : 'custom'}
                 onChange={(e) => {
-                  if (e.target.value !== 'custom') {
+                  if (e.target.value === 'custom') {
+                    setEditing({ ...editing, offsetDays: 2 });
+                  } else {
                     setEditing({ ...editing, offsetDays: Number(e.target.value) });
                   }
                 }}

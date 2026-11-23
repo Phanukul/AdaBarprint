@@ -255,7 +255,6 @@ async fn validate_rule(pool: &SqlitePool, r: &PrintRule) -> Result<()> {
         "PROMO_START",
         "PROMO_END_REVERT",
         "NEW_PDT",
-        "ALL_PRODUCTS",
     ]
     .contains(&r.source.as_str())
     {
@@ -353,7 +352,6 @@ async fn persist_bulk(pool: &SqlitePool, body: BulkRules) -> Result<()> {
     if branch.is_empty() || body.branch!=branch || body.preferences["branch"].as_str()!=Some(branch.as_str()) {
         return Err("สาขาของการตั้งค่าต้องตรงกับแหล่งข้อมูล StoreFront".into());
     }
-    if body.rules.len()>100 { return Err("บันทึกได้ไม่เกิน 100 Profile ต่อครั้ง".into()); }
     let old=rules(pool).await?;
     let mut ids=std::collections::HashSet::new();
     let mut codes=std::collections::HashSet::new();
@@ -639,11 +637,14 @@ async fn insert_job(
 ) -> Result<String> {
     let id = uid();
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-    let inserted=sqlx::query("INSERT OR IGNORE INTO ABPrintJob(id,dedup,source,name,status,created,config,total) VALUES(?,?,?,?,?,?,?,?)")
+    // An overlapping invocation of the same Profile must not create a second
+    // active job. Terminal jobs do not block a deliberate later reprint.
+    let inserted=sqlx::query("INSERT OR IGNORE INTO ABPrintJob(id,dedup,source,name,status,created,config,total) SELECT ?,?,?,?,?,?,?,? WHERE ? != 'PROFILE' OR NOT EXISTS (SELECT 1 FROM ABPrintJob WHERE source='PROFILE' AND upper(json_extract(config,'$.code'))=upper(?) AND status NOT IN ('SUBMITTED','EMPTY','CANCELLED'))")
       .bind(&id).bind(dedup).bind(source).bind(name).bind(status).bind(now()).bind(config.to_string()).bind(units.len() as i64)
+      .bind(source).bind(config["code"].as_str().unwrap_or(""))
       .execute(&mut *tx).await.map_err(|e|e.to_string())?;
     if inserted.rows_affected() == 0 {
-        return Err("รอบนี้มีอยู่ในคิวแล้ว".into());
+        return Err("งานนี้มีอยู่ในคิวแล้ว กรุณาตรวจสถานะงานเดิมก่อนเรียกซ้ำ".into());
     }
     for (n, (kind, payload)) in units.into_iter().enumerate() {
         sqlx::query("INSERT INTO ABPrintUnit(job,seq,kind,payload) VALUES(?,?,?,?)")
@@ -1120,6 +1121,34 @@ async fn scheduler_tick_at(pool: &SqlitePool, n: chrono::DateTime<Local>) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn manual_and_profile_share_fifo_transport_without_duplicate_send() {
+        use tokio::io::AsyncReadExt;
+        let p = fixture().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let receiver = tokio::spawn(async move {
+            let mut received = vec![];
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = vec![];
+                stream.read_to_end(&mut bytes).await.unwrap();
+                received.push(String::from_utf8(bytes).unwrap());
+            }
+            assert!(tokio::time::timeout(Duration::from_millis(150), listener.accept()).await.is_err());
+            received
+        });
+        let mut ids = vec![];
+        for (source, command) in [("MANUAL", "manual-test"), ("PROFILE", "profile-test")] {
+            ids.push(insert_job(&p,source,"test",Value::Null,None,"QUEUED",
+                vec![("RAW".into(),json!({"ip":"127.0.0.1","port":port,"command":command}))]).await.unwrap());
+        }
+        for _ in 0..5 { worker_tick(&p).await.unwrap(); }
+        let received = tokio::time::timeout(Duration::from_secs(5),receiver).await.unwrap().unwrap();
+        assert_eq!(received,vec!["manual-test","profile-test"]);
+        for id in ids { assert_eq!(status(&p,&id).await,"SUBMITTED"); }
+        p.close().await;
+    }
     async fn fixture() -> SqlitePool {
         let p = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
@@ -1448,13 +1477,13 @@ pub async fn run_profile_api(State(st): State<AppState>, Json(body): Json<Value>
     if key.is_empty() {
         return err("กรุณาระบุรหัส Profile ที่ต้องการสั่งพิมพ์");
     }
-    match execute_profile_cli(&st.pool, &key).await {
+    match enqueue_profile(&st.pool, &key).await {
         Ok(res) => Json(res).into_response(),
         Err(e) => err(e),
     }
 }
 
-pub async fn execute_profile_cli(pool: &SqlitePool, profile_code_or_id: &str) -> Result<Value> {
+pub async fn enqueue_profile(pool: &SqlitePool, profile_code_or_id: &str) -> Result<Value> {
     let needle = profile_code_or_id.trim();
     if needle.is_empty() {
         return Err("กรุณาระบุรหัส Profile".into());
@@ -1544,67 +1573,45 @@ pub async fn execute_profile_cli(pool: &SqlitePool, profile_code_or_id: &str) ->
         }));
     }
 
-    let mut printed_units = 0usize;
-    for (seq, (kind, payload)) in units.into_iter().enumerate() {
-        let seq_i64 = seq as i64;
-        sqlx::query("UPDATE ABPrintUnit SET status='SENDING' WHERE job=? AND seq=?")
-            .bind(&job_id)
-            .bind(seq_i64)
-            .execute(pool)
-            .await
-            .map_err(|e| e.to_string())?;
-        match send_unit(pool, &kind, payload, &job_id, seq_i64).await {
-            Ok(()) => {
-                printed_units += 1;
-                sqlx::query("UPDATE ABPrintUnit SET status='SUBMITTED' WHERE job=? AND seq=?")
-                    .bind(&job_id)
-                    .bind(seq_i64)
-                    .execute(pool)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                sqlx::query("UPDATE ABPrintJob SET completed=? WHERE id=?")
-                    .bind(printed_units as i64)
-                    .bind(&job_id)
-                    .execute(pool)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            }
-            Err(e) => {
-                sqlx::query("UPDATE ABPrintUnit SET status='UNKNOWN',error=? WHERE job=? AND seq=?")
-                    .bind(&e)
-                    .bind(&job_id)
-                    .bind(seq_i64)
-                    .execute(pool)
-                    .await
-                    .map_err(|err2| err2.to_string())?;
-                sqlx::query("UPDATE ABPrintJob SET status='NEEDS_REVIEW',error=? WHERE id=?")
-                    .bind(&e)
-                    .bind(&job_id)
-                    .execute(pool)
-                    .await
-                    .map_err(|err2| err2.to_string())?;
-                return Err(format!("ส่งพิมพ์ Profile [{}] ไม่สำเร็จ: {}", r.code, e));
-            }
-        }
-    }
-
-    sqlx::query("UPDATE ABPrintJob SET status='SUBMITTED',completed=total WHERE id=?")
-        .bind(&job_id)
-        .execute(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-
     Ok(json!({
-        "ok": true,
-        "jobId": job_id,
-        "profileCode": r.code,
-        "profileName": r.name,
-        "targetDate": target_date,
-        "status": "SUBMITTED",
-        "itemCount": total_items,
-        "totalUnits": printed_units,
-        "printedUnits": printed_units
+        "ok": true, "jobId": job_id, "profileCode": r.code, "profileName": r.name,
+        "targetDate": target_date, "status": "QUEUED", "itemCount": total_items,
+        "totalUnits": units.len(), "printedUnits": 0
     }))
+}
+
+/// CLI waits for the same persistent FIFO worker used by manual printing.
+/// Only the OS-lock owner may send; another desktop/CLI process only watches.
+pub async fn execute_profile_cli(pool: &SqlitePool, profile_code_or_id: &str) -> Result<Value> {
+    let mut result = enqueue_profile(pool, profile_code_or_id).await?;
+    if result["status"] == "EMPTY" { return Ok(result); }
+    let job = result["jobId"].as_str().ok_or("ไม่มีรหัสงานพิมพ์")?.to_string();
+    spawn(pool.clone());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3600);
+    loop {
+        let (status, completed, error): (String, i64, Option<String>) =
+            sqlx::query_as("SELECT status,completed,error FROM ABPrintJob WHERE id=?")
+                .bind(&job).fetch_one(pool).await.map_err(|e|e.to_string())?;
+        match status.as_str() {
+            "SUBMITTED" => {
+                result["status"] = json!(status);
+                result["printedUnits"] = json!(completed);
+                return Ok(result);
+            }
+            "NEEDS_REVIEW" | "BLOCKED" | "CANCELLED" =>
+                return Err(format!("งาน {job}: {status}: {}", error.unwrap_or_default())),
+            _ => {}
+        }
+        let blocker: Option<String> = sqlx::query_scalar("SELECT id FROM ABPrintJob WHERE seq < (SELECT seq FROM ABPrintJob WHERE id=?) AND status IN ('BLOCKED','NEEDS_REVIEW') ORDER BY seq LIMIT 1")
+            .bind(&job).fetch_optional(pool).await.map_err(|e|e.to_string())?;
+        if let Some(blocker) = blocker {
+            return Err(format!("งาน {job} อยู่ในคิวแล้ว แต่รอตรวจสอบงานก่อนหน้า {blocker}; อย่าเรียกซ้ำ ให้จัดการในคิวงานพิมพ์"));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!("หมดเวลารอ งาน {job} ยังอยู่ในคิว ตรวจสอบสถานะก่อนเรียกซ้ำ"));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 pub fn spawn(pool: SqlitePool) {

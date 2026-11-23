@@ -60,7 +60,7 @@ import type { PrinterBrand, PrinterConfig } from '@/types/printer';
 
 /** Toggle visibility of Auto-Print setup tab & banner while keeping read-only History tab visible. */
 export const ENABLE_AUTO_PRINT_UI = true;
-export const ENABLE_AUTO_PRINT_HISTORY_TAB = true;
+export const ENABLE_AUTO_PRINT_HISTORY_TAB = false;
 import {
   mergePaperSizeOptions,
   PAPER_SIZE_PRESETS,

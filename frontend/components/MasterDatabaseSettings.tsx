@@ -31,6 +31,7 @@ export function MasterDatabaseSettings({ onSaved }: { onSaved?: () => void }) {
   const [lastSuccess, setLastSuccess] = useState('');
   const [branches, setBranches] = useState<Array<{ code: string; name?: string }>>([]);
   const [checkedPath, setCheckedPath] = useState('');
+  const [operatorPassword, setOperatorPassword] = useState('');
   const [pin, setPin] = useState('');
   const [newPin, setNewPin] = useState('');
   const [pinConfirmation, setPinConfirmation] = useState('');
@@ -225,6 +226,7 @@ export function MasterDatabaseSettings({ onSaved }: { onSaved?: () => void }) {
         const effectiveBranch = branch.trim() || sync.branch.trim();
         const hasUrl = Boolean(sync.baseUrl.trim());
         const payload = {
+          operatorPassword: hasUrl ? '' : operatorPassword,
           mode: 'UNIFIED',
           path: dbPath.trim() || defaultPath,
           branch: effectiveBranch,
@@ -239,6 +241,7 @@ export function MasterDatabaseSettings({ onSaved }: { onSaved?: () => void }) {
           ...pinFields(),
         };
         const r = await request('/api/storage', payload);
+        setOperatorPassword('');
         if (newPin) setPinChangeRequired(false);
         setApiConfigured(hasUrl);
         setDirty(false);
@@ -565,6 +568,10 @@ export function MasterDatabaseSettings({ onSaved }: { onSaved?: () => void }) {
                 aria-describedby={authorizationError ? 'source-pin-error' : undefined}
               />
             </label>
+            {pendingAction === 'save' && !sync.baseUrl.trim() && <label className="grid gap-1 text-sm">
+              ตั้งรหัสผ่านสำหรับผู้ใช้ LOCAL (เฉพาะเครื่องใหม่ที่ไม่มี POS/API)
+              <input className="rounded border p-2" type="password" autoComplete="new-password" minLength={8} maxLength={64} value={operatorPassword} onChange={e=>setOperatorPassword(e.target.value)} placeholder="8–64 ตัวอักษร หรือเว้นว่างหากใช้บัญชีเดิม" />
+            </label>}
             {pendingAction === 'save' && (
               <details open={pinChangeRequired || undefined}>
                 <summary className="text-sm cursor-pointer">

@@ -321,7 +321,7 @@ pub async fn require_api_session(
                 let changes_settings=request.method()!=axum::http::Method::GET && (
                     path.starts_with("/api/config/") && !matches!(path, "/api/config/admin-verify" | "/api/config/admin-revoke")
                     || ["/api/paper-sizes/","/api/preprints/","/api/lan-printers/","/api/label-sizes/","/api/templates/","/api/schedules/"].iter().any(|prefix|path.starts_with(prefix))
-                    || matches!(path,"/api/seed"|"/api/printers"|"/api/agent/register"|"/api/print-center/rule"|"/api/print-center/rules"|"/api/print-center/sync"|"/api/print-center/action"));
+                    || matches!(path,"/api/seed"|"/api/printers"|"/api/label-printers"|"/api/agent/register"|"/api/print-center/rule"|"/api/print-center/rules"|"/api/print-center/profile/delete"|"/api/print-center/sync"|"/api/print-center/action"));
                 if changes_settings {
                     let granted=sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM ABAdminGrant WHERE token_hash=? AND expires>unixepoch()")
                         .bind(&session.FTSesTokenHash).fetch_one(&pool).await.unwrap_or(0)>0;

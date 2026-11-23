@@ -3675,6 +3675,9 @@ pub async fn post_import_master(
         "00001".to_string()
     };
 
+    if configured.as_ref().is_some_and(|(_, b)| !b.is_empty() && b != &branch) {
+        return err_json(StatusCode::BAD_REQUEST,"สาขาของไฟล์ต้องตรงกับสาขาที่ตั้งไว้");
+    }
     let today = Local::now().format("%Y-%m-%d").to_string();
     let now_dt = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
@@ -3723,36 +3726,50 @@ pub async fn post_import_master(
             sqlx::query("INSERT OR IGNORE INTO TCNMPdtUnit_L(FTPunCode,FNLngID,FTPunName) VALUES(?,1,?)")
                 .bind(unit_code).bind(unit_name).execute(&mut *tx).await.map_err(|e| e.to_string())?;
 
-            sqlx::query("INSERT OR REPLACE INTO TCNMPdt(FTPdtCode,FTPdtStaActive,FDCreateOn,FDLastUpdOn) VALUES(?,'1',?,?)")
-                .bind(pdt_code).bind(d_start).bind(&now_dt).execute(&mut *tx).await.map_err(|e| e.to_string())?;
-            sqlx::query("INSERT OR REPLACE INTO TCNMPdt_L(FTPdtCode,FNLngID,FTPdtName) VALUES(?,1,?)")
+            for (field, value) in [("EffectiveStart", d_start), ("EffectiveStop", d_stop), ("PromoStart", item.promo_start.trim()), ("PromoStop", item.promo_stop.trim())] {
+                if !value.is_empty() && chrono::NaiveDate::parse_from_str(value,"%Y-%m-%d").map(|d| d.to_string()!=value).unwrap_or(true) {
+                    return Err(format!("แถว {}: {field} ต้องเป็นวันที่ YYYY-MM-DD", idx+1));
+                }
+            }
+            let promo_from = if item.promo_start.trim().is_empty(){d_start}else{item.promo_start.trim()};
+            let promo_to = if item.promo_stop.trim().is_empty(){d_stop}else{item.promo_stop.trim()};
+            if (!d_stop.is_empty() && d_stop < d_start) || item.promo_price.is_some_and(|price| price < 0.0 || (!promo_to.is_empty() && promo_to < promo_from)) {
+                return Err(format!("แถว {}: ตรวจราคาและช่วงวันที่",idx+1));
+            }
+            sqlx::query("INSERT INTO TCNMPdt(FTPdtCode,FTPdtStaActive,FDCreateOn,FDLastUpdOn) VALUES(?,'1',?,?) ON CONFLICT(FTPdtCode) DO UPDATE SET FDLastUpdOn=excluded.FDLastUpdOn")
+                .bind(pdt_code).bind(&now_dt).bind(&now_dt).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+            sqlx::query("INSERT INTO TCNMPdt_L(FTPdtCode,FNLngID,FTPdtName) VALUES(?,1,?) ON CONFLICT DO UPDATE SET FTPdtName=excluded.FTPdtName")
                 .bind(pdt_code).bind(pdt_name).execute(&mut *tx).await.map_err(|e| e.to_string())?;
-            sqlx::query("INSERT OR REPLACE INTO TCNMPdtPackSize(FTPdtCode,FTPunCode,FCPdtUnitFact,FCPdtPriceRET) VALUES(?,?,1,?)")
+            sqlx::query("INSERT INTO TCNMPdtPackSize(FTPdtCode,FTPunCode,FCPdtUnitFact,FCPdtPriceRET) VALUES(?,?,1,?) ON CONFLICT DO UPDATE SET FCPdtPriceRET=excluded.FCPdtPriceRET")
                 .bind(pdt_code).bind(unit_code).bind(item.base_price).execute(&mut *tx).await.map_err(|e| e.to_string())?;
-            sqlx::query("INSERT OR REPLACE INTO TCNMPdtBar(FTPdtCode,FTBarCode,FTPunCode,FNBarRefSeq,FTBarStaUse,FDCreateOn,FDLastUpdOn) VALUES(?,?,?,1,'1',?,?)")
-                .bind(pdt_code).bind(bar_code).bind(unit_code).bind(d_start).bind(&now_dt).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+            sqlx::query("INSERT INTO TCNMPdtBar(FTPdtCode,FTBarCode,FTPunCode,FNBarRefSeq,FTBarStaUse,FDCreateOn,FDLastUpdOn) VALUES(?,?,?,1,'1',?,?) ON CONFLICT DO UPDATE SET FTPunCode=excluded.FTPunCode,FDLastUpdOn=excluded.FDLastUpdOn")
+                .bind(pdt_code).bind(bar_code).bind(unit_code).bind(&now_dt).bind(&now_dt).execute(&mut *tx).await.map_err(|e| e.to_string())?;
 
-            let price_doc = format!("IMP-{}-{}", d_start.replace('-', ""), pdt_code);
-            sqlx::query("DELETE FROM TCNTPdtPrice4PDT WHERE FTPdtCode=? AND FTPunCode=? AND FDPghDStart=?")
-                .bind(pdt_code).bind(unit_code).bind(d_start).execute(&mut *tx).await.map_err(|e| e.to_string())?;
-            sqlx::query("INSERT INTO TCNTPdtPrice4PDT(FTAgnCode,FTPdtCode,FTPunCode,FDPghDStart,FTPghTStart,FTPplCode,FDPghDStop,FTPghDocNo,FTPghDocType,FCPgdPriceRet,FDCreateOn,FDLastUpdOn) VALUES('00001',?,?,?,'00:00:00','',?,?,'1',?,?,?)")
-                .bind(pdt_code).bind(unit_code).bind(d_start).bind(d_stop).bind(&price_doc).bind(item.base_price).bind(d_start).bind(&now_dt)
+            let price_doc = format!("IMP:{}:{}", d_start, serde_json::json!([pdt_code,unit_code]));
+            sqlx::query("INSERT INTO TCNTPdtPrice4PDT(FTBchCode,FTPdtCode,FTPunCode,FNPghSrcSeq,FDPghEffectiveStart,FDPghEffectiveStop,FDPghDStart,FDPghDStop,FTPghDocNo,FTPghDocType,FCPgdPrice,FCPgdPriceRet,FDCreateOn,FDLastUpdOn) VALUES(?,?,?,1,?,?,?,?,?,'1',?,?,?,?) ON CONFLICT DO UPDATE SET FCPgdPrice=excluded.FCPgdPrice,FCPgdPriceRet=excluded.FCPgdPriceRet,FDPghEffectiveStop=excluded.FDPghEffectiveStop,FDPghDStop=excluded.FDPghDStop,FDLastUpdOn=excluded.FDLastUpdOn")
+                .bind(&branch).bind(pdt_code).bind(unit_code).bind(d_start).bind(d_stop).bind(d_start).bind(d_stop).bind(&price_doc).bind(item.base_price).bind(item.base_price).bind(&now_dt).bind(&now_dt)
                 .execute(&mut *tx).await.map_err(|e| e.to_string())?;
-
             if let Some(promo_pri) = item.promo_price.filter(|p| p.is_finite() && *p >= 0.0) {
                 let p_start = if item.promo_start.trim().is_empty() { d_start } else { item.promo_start.trim() };
                 let p_stop = if item.promo_stop.trim().is_empty() { d_stop } else { item.promo_stop.trim() };
-                let p_doc = format!("IMP-PMT-{}-{}", idx + 1, pdt_code);
+                let p_doc = format!("IMP-PMT:{}", serde_json::json!([bar_code,p_start]));
                 let p_name = if item.promo_name.trim().is_empty() { "โปรโมชันนำเข้า".to_string() } else { item.promo_name.trim().to_string() };
+                let canonical: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM TCNTPmtHD WHERE NULLIF(TRIM(FTPmhRuleJson),'') IS NOT NULL) OR EXISTS(SELECT 1 FROM pragma_table_info('TCNTPmtGrpDT') WHERE name='FTPgdRefCode')")
+                    .fetch_one(&mut *tx).await.map_err(|e|e.to_string())?;
                 sqlx::query("INSERT OR REPLACE INTO TCNTPmtHD(FTAgnCode,FTPmhDocNo,FNPmhVersion,FTPmhStaActive,FTPmhName,FTPmhStaDoc,FTPmhStaPrcDoc,FDPmhDStart,FDPmhDStop,FNPmhPriority,FDCreateOn,FDLastUpdOn) VALUES('',?,1,'1',?,'1','1',?,?,100,?,?)")
                     .bind(&p_doc).bind(&p_name).bind(p_start).bind(p_stop).bind(&now_dt).bind(&now_dt)
                     .execute(&mut *tx).await.map_err(|e| e.to_string())?;
                 sqlx::query("INSERT OR REPLACE INTO TCNTPmtHD_L(FTAgnCode,FTPmhDocNo,FNPmhVersion,FNLngID,FTPmhName) VALUES('',?,1,1,?)")
                     .bind(&p_doc).bind(&p_name).execute(&mut *tx).await.map_err(|e| e.to_string())?;
                 sqlx::query("INSERT OR REPLACE INTO TCNTPmtGrpDT(FTAgnCode,FTPmhDocNo,FTPmdGrpName,FNPmdSeqNo,FTPmdStaType,FTPmdRefType,FTPmdRefCode) VALUES('',?,'G1',1,'1','1',?)")
-                    .bind(&p_doc).bind(pdt_code).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+                    .bind(&p_doc).bind(bar_code).execute(&mut *tx).await.map_err(|e| e.to_string())?;
                 sqlx::query("INSERT OR REPLACE INTO TCNTPmtCond(FTAgnCode,FTPmhDocNo,FNPmcSeqNo,FTPmcCondType,FCPmcValue) VALUES('',?,1,'FIX_PRI',?)")
                     .bind(&p_doc).bind(promo_pri).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+                if canonical {
+                    let rule=json!({"groups":{"G1":{"include":[{"type":"BAR","code":bar_code}]}},"get":[{"type":"NP","target":"G1","value":promo_pri}]});
+                    sqlx::query("UPDATE TCNTPmtHD SET FTPmhRuleJson=? WHERE FTAgnCode='' AND FTPmhDocNo=? AND FNPmhVersion=1")
+                        .bind(rule.to_string()).bind(&p_doc).execute(&mut *tx).await.map_err(|e|e.to_string())?;
+                }
                 promo_count += 1;
             }
             imported += 1;
@@ -3762,7 +3779,7 @@ pub async fn post_import_master(
             sqlx::query("INSERT OR REPLACE INTO TSysSyncTaskDownload(FTSynTable,FDSynLastSuccess) VALUES(?,?)")
                 .bind(t).bind(&now_dt).execute(&mut *tx).await.map_err(|e| e.to_string())?;
         }
-        sqlx::query("INSERT OR REPLACE INTO ABMasterIdentity VALUES(1,'00001',?,'')")
+        sqlx::query("INSERT INTO ABMasterIdentity VALUES(1,'',?,'') ON CONFLICT(id) DO UPDATE SET branch=excluded.branch")
             .bind(&branch).execute(&mut *tx).await.map_err(|e| e.to_string())?;
         tx.commit().await.map_err(|e| e.to_string())?;
         Ok(())
@@ -3775,13 +3792,20 @@ pub async fn post_import_master(
     }
 
     let path_str = target_path.to_string_lossy().to_string();
-    let _ = sqlx::query("INSERT INTO ABStorage(id,path,branch,max_age_minutes) VALUES(1,?,?,1440) ON CONFLICT(id) DO UPDATE SET path=excluded.path,branch=excluded.branch")
-        .bind(&path_str).bind(&branch).execute(&st.pool).await;
-    let _ = sqlx::query("INSERT INTO ABSource(id,mode,config,status,last_success) VALUES(1,'STANDALONE','{}','นำเข้าไฟล์ Master สำเร็จ',datetime('now')) ON CONFLICT(id) DO UPDATE SET mode='STANDALONE',status='นำเข้าไฟล์ Master สำเร็จ',last_success=datetime('now')")
-        .execute(&st.pool).await;
-    let _ = sqlx::query("UPDATE TCNSSysOption SET FTSopValue=? WHERE FTSopCode='DefaultBranch'")
-        .bind(&branch).execute(&st.pool).await;
+    let status_write: Result<(), sqlx::Error> = async {
+        let mut tx=st.pool.begin().await?;
+        sqlx::query("INSERT INTO ABStorage(id,path,branch,max_age_minutes) VALUES(1,?,?,1440) ON CONFLICT(id) DO UPDATE SET path=excluded.path,branch=excluded.branch")
+        .bind(&path_str).bind(&branch).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO ABSource(id,mode,config,status,last_success) VALUES(1,'STANDALONE','{}','นำเข้าไฟล์ Master สำเร็จ',datetime('now')) ON CONFLICT(id) DO UPDATE SET mode='STANDALONE',status='นำเข้าไฟล์ Master สำเร็จ',last_success=datetime('now')")
+        .execute(&mut *tx).await?;
+        sqlx::query("UPDATE TCNSSysOption SET FTSopValue=? WHERE FTSopCode='DefaultBranch'")
+        .bind(&branch).execute(&mut *tx).await?;
 
+        tx.commit().await
+    }.await;
+    if let Err(error)=status_write {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR,format!("บันทึกสินค้าแล้ว แต่อัปเดตสถานะแหล่งข้อมูลไม่สำเร็จ: {error}"));
+    }
     Json(json!({
         "ok": true,
         "imported": imported,

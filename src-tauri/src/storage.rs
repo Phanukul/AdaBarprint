@@ -27,6 +27,12 @@ pub fn data_root() -> PathBuf {
         #[cfg(not(test))]
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
+                // The installed worker lives in <application>/agent, not a
+                // separate installation. Share Data, Logs and the queue lock.
+                if exe.file_stem().is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case("autoprint_agent"))
+                    && dir.file_name().is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case("agent")) {
+                    if let Some(root) = dir.parent() { return root.to_path_buf(); }
+                }
                 return dir.to_path_buf();
             }
         }
@@ -179,7 +185,7 @@ async fn refresh_attachment(c: &mut SqliteConnection) -> Result<(), sqlx::Error>
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all="camelCase")]
-pub struct Config { #[serde(default)] pub path: String, #[serde(default="unified_mode")] pub mode:String, #[serde(default)] pub sync:Option<crate::standalone::SyncConfig>, #[serde(default)] pub branch: String,
+pub struct Config { #[serde(default,skip_serializing)] pub operator_password: String, #[serde(default)] pub path: String, #[serde(default="unified_mode")] pub mode:String, #[serde(default)] pub sync:Option<crate::standalone::SyncConfig>, #[serde(default)] pub branch: String,
     #[serde(default="default_age")] pub max_age_minutes: i64, #[serde(default,skip_serializing)] pub pin: String, #[serde(default,skip_serializing)] pub new_pin: String }
 fn unified_mode()->String{"UNIFIED".into()}
 fn default_age() -> i64 { 1440 }
@@ -352,7 +358,7 @@ mod tests {
         crate::print_center::ensure_schema(&pool).await.unwrap();
         crate::auth::ensure_auth_schema(&pool).await.unwrap();
         sqlx::query("INSERT INTO TCNSSysOption(FTSopCode,FTSopApp,FTSopName,FTSopValue) VALUES('AutoPrintAdminPin','PrintBar','PIN','test-pin')").execute(&pool).await.unwrap();
-        let config=|pin:&str|Config{mode:"POS_SHARED".into(),sync:None,path:master.to_string_lossy().into_owned(),branch:"00001".into(),max_age_minutes:1440,pin:pin.into(),new_pin:String::new()};
+        let config=|pin:&str|Config{operator_password:String::new(),mode:"POS_SHARED".into(),sync:None,path:master.to_string_lossy().into_owned(),branch:"00001".into(),max_age_minutes:1440,pin:pin.into(),new_pin:String::new()};
         let state=||State(AppState{pool:pool.clone()});
         assert_eq!(save_config(state(),Json(config("wrong"))).await.status(),StatusCode::UNAUTHORIZED);
         sqlx::query("INSERT INTO ABPrintJob(id,source,name,status,created,config) VALUES('hold','MANUAL','hold','QUEUED','now','{}')").execute(&pool).await.unwrap();
@@ -384,6 +390,7 @@ mod tests {
         // 1) Unified save pointing to new local DB without API URL -> initializes local owned AdaAccD.db automatically
         let local_db = root.join("LocalData").join("AdaAccD.db");
         let res_local = save_config(state(), Json(Config {
+            operator_password:"sample-password".into(),
             mode: "UNIFIED".into(),
             sync: None,
             path: local_db.to_string_lossy().into_owned(),
@@ -394,11 +401,17 @@ mod tests {
         })).await;
         assert!(res_local.status().is_success());
         assert!(local_db.is_file());
+        let login=crate::auth::post_auth_login(state(),Json(crate::auth::LoginRequest {
+            user_id:Some("LOCAL".into()),credential_type:Some("1".into()),credential:Some("sample-password".into())
+        })).await;
+        assert!(login.status().is_success());
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNMUsrLogin WHERE FTUsrCode='LOCAL' AND FTUsrLogType='1'").fetch_one(&pool).await.unwrap(),1);
         assert_eq!(crate::standalone::mode(&pool).await, "STANDALONE");
         assert_eq!(configured_branch(&pool).await, "00002");
 
         // 2) Unified save pointing to existing StoreFront POS DB without API URL -> read-only POS attachment automatically
         let res_pos = save_config(state(), Json(Config {
+            operator_password:String::new(),
             mode: "UNIFIED".into(),
             sync: None,
             path: master.to_string_lossy().into_owned(),
@@ -415,7 +428,9 @@ mod tests {
 
     #[tokio::test]
     async fn manual_event_lookup_does_not_create_jobs_or_rules() {
-        let (_root,master,pool)=fixture().await;
+        let (root,_,pool)=fixture().await;
+        let master=root.join("event-master.db");
+        crate::standalone::create_master(&master).await.unwrap();
         crate::db::ensure_label_schema(&pool).await.unwrap();
         crate::print_center::ensure_schema(&pool).await.unwrap();
         sqlx::query("INSERT INTO ABStorage VALUES(1,?,'00001',1440)").bind(master.to_str().unwrap()).execute(&pool).await.unwrap();
@@ -682,6 +697,19 @@ pub async fn save_config(State(st):State<AppState>,Json(mut cfg):Json<Config>) -
         }
     }
     if !(1..=10080).contains(&cfg.max_age_minutes) { return error("อายุข้อมูลต้องอยู่ระหว่าง 1 ถึง 10080 นาที"); }
+    let bootstrap = !cfg.operator_password.is_empty();
+    if bootstrap && (has_api || effective_mode != "STANDALONE" || !(8..=64).contains(&cfg.operator_password.chars().count())) {
+        return error("สร้างผู้ใช้แรกได้เฉพาะฐานภายในเครื่องที่ไม่มี API และต้องตั้งรหัสผ่าน 8–64 ตัวอักษร");
+    }
+    if !has_api && effective_mode == "STANDALONE" && !bootstrap {
+        let options=SqliteConnectOptions::new().filename(cfg.path.trim()).read_only(true);
+        let mut local=match SqliteConnection::connect_with(&options).await {Ok(c)=>c,Err(e)=>return error(e)};
+        match sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNMUsrLogin").fetch_one(&mut local).await {
+            Ok(0)=>return error("ฐานภายในเครื่องยังไม่มีผู้ใช้ กรุณาตั้งรหัสผ่านสำหรับผู้ใช้ LOCAL ก่อนบันทึก"),
+            Err(e)=>return error(e),
+            _=>{}
+        }
+    }
     let canonical=match std::fs::canonicalize(cfg.path.trim()) { Ok(p)=>p.to_string_lossy().trim_start_matches("\\\\?\\").to_string(),Err(e)=>return error(e)};
     let result:Result<(),sqlx::Error>=async {
         let mut tx=st.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -739,6 +767,18 @@ pub async fn save_config(State(st):State<AppState>,Json(mut cfg):Json<Config>) -
             .await?;
         if let Some(pin)=protected_pin {
             sqlx::query("UPDATE TCNSSysOption SET FTSopValue=? WHERE FTSopCode='AutoPrintAdminPin'").bind(pin).execute(&mut *tx).await?;
+        }
+        if bootstrap {
+            let mut local = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&canonical).create_if_missing(false)).await?;
+            let mut write = local.begin_with("BEGIN IMMEDIATE").await?;
+            sqlx::query("SELECT id FROM ABMasterIdentity LIMIT 0").execute(&mut *write).await?;
+            let count:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM TCNMUsrLogin").fetch_one(&mut *write).await?;
+            if count != 0 { return Err(sqlx::Error::Protocol("ฐานนี้มีบัญชีผู้ใช้แล้ว ให้เข้าสู่ระบบด้วยบัญชีเดิม".into())); }
+            let password=crate::auth::encrypt_pos_aes_b64(&cfg.operator_password).ok_or_else(||sqlx::Error::Protocol("สร้างรหัสผ่านไม่ได้".into()))?;
+            sqlx::query("INSERT INTO TCNMUser(FTUsrCode) VALUES('LOCAL')").execute(&mut *write).await?;
+            sqlx::query("INSERT INTO TCNMUser_L(FTUsrCode,FNLngID,FTUsrName) VALUES('LOCAL',1,'ผู้ใช้งานภายในเครื่อง')").execute(&mut *write).await?;
+            sqlx::query("INSERT INTO TCNMUsrLogin(FTUsrCode,FTUsrLogType,FDUsrPwdStart,FTUsrLogin,FTUsrLoginPwd,FTUsrStaActive) VALUES('LOCAL','1',date('now','localtime'),'LOCAL',?,'1')").bind(password).execute(&mut *write).await?;
+            write.commit().await?;
         }
         tx.commit().await
     }.await;

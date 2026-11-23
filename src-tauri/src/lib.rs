@@ -391,3 +391,6 @@ mod cli_tests {
         assert_eq!(parse_cli_profile_arg(&["/profile:PROMO_A".into()]), Some("PROMO_A".into()));
     }
 }
+
+#[cfg(test)]
+mod printing_regression_tests;

@@ -38,13 +38,12 @@ function templateProblem(template:Template):string {
     return '';
   } catch {return 'ยังไม่มีแบบพร้อมใช้งาน';}
 }
-const sources:Record<string,string> = { PRICE_CHG:'สินค้าปรับราคา', PROMO_START:'สินค้าเริ่มโปรโมชั่น', PROMO_END_REVERT:'สินค้าสิ้นสุดโปรโมชั่น', NEW_PDT:'สินค้าใหม่', ALL_PRODUCTS:'สินค้าที่มีข้อมูลเปลี่ยนแปลง' };
+const sources:Record<string,string> = { PRICE_CHG:'สินค้าปรับราคา', PROMO_START:'สินค้าเริ่มโปรโมชั่น', PROMO_END_REVERT:'สินค้าสิ้นสุดโปรโมชั่น', NEW_PDT:'สินค้าใหม่' };
 const purposes:Record<string,{title:string;description:string;name:string}>={
   PRICE_CHG:{title:'ราคาสินค้าเปลี่ยน',description:'พิมพ์ป้ายราคาทดแทน เมื่อราคาขายมีการปรับเปลี่ยน',name:'ป้ายราคาที่เปลี่ยน'},
   PROMO_START:{title:'เริ่มโปรโมชั่น',description:'พิมพ์ป้ายสำหรับสินค้าที่เริ่มรายการส่งเสริมการขาย',name:'ป้ายเริ่มโปรโมชั่น'},
   PROMO_END_REVERT:{title:'สิ้นสุดโปรโมชั่น',description:'พิมพ์ป้ายราคาปกติเพื่อเปลี่ยนแทนป้ายโปรโมชั่นที่หมดอายุ',name:'ป้ายคืนราคาปกติ'},
   NEW_PDT:{title:'มีสินค้าใหม่',description:'พิมพ์ป้ายให้สินค้าที่เพิ่มเข้าระบบ',name:'ป้ายสินค้าใหม่'},
-  ALL_PRODUCTS:{title:'ข้อมูลสินค้าเปลี่ยน',description:'ตรวจสินค้าทั้งหมด แล้วเลือกพิมพ์รายการที่ข้อมูลป้ายเปลี่ยน',name:'ป้ายข้อมูลสินค้าที่เปลี่ยน'},
 };
 const states:Record<string,string> = { WAIT_DATA:'รอรับข้อมูล', PREPARING:'กำลังเตรียมงาน', QUEUED:'รอพิมพ์', SENDING:'กำลังส่งงานพิมพ์', NEEDS_REVIEW:'รอตรวจสอบ', BLOCKED:'พักงาน', SUBMITTED:'ส่งงานแล้ว', EMPTY:'ไม่มีรายการใหม่', CANCELLED:'ยกเลิก' };
 const selectClass='h-10 w-full min-w-0 max-w-full rounded-md border border-slate-300 bg-white px-2 text-sm';

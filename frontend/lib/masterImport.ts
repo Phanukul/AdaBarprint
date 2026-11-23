@@ -161,7 +161,7 @@ const TEMPLATE_HEADERS = [
 ];
 
 function sampleTemplateRows(): string[][] {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDay();
   return [
     TEMPLATE_HEADERS,
     ['PDT0001', 'กาแฟคั่วบด 250 กรัม', '8850123456789', 'PCS', 'ชิ้น', '159.00', today, '2099-12-31', '', '', '', '', '1'],
@@ -227,7 +227,7 @@ export function buildMasterXlsxTemplate(): Blob {
 }
 
 export function buildMasterJsonTemplate(): Blob {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localDay();
   const sample = [
     {
       FTPdtCode: 'PDT0001',
@@ -388,7 +388,7 @@ export async function parseXlsxRows(buffer: ArrayBuffer): Promise<string[][]> {
 }
 
 function normalizeKey(raw: string): string {
-  return raw.trim().toLowerCase().replace(/[^a-z0-9ก-๙]/g, '');
+  return raw.replace(/\s*\([^)]*\)\s*$/u, '').replace(/ฯ/g, '').trim().toLowerCase().replace(/[^a-z0-9ก-๙]/g, '');
 }
 
 function rowToMasterObject(headers: string[], cols: string[]): Record<string, unknown> {
@@ -403,7 +403,7 @@ function pickField(obj: Record<string, unknown>, candidates: string[]): string {
   const normalizedEntries = Object.entries(obj).map(([k, v]) => [normalizeKey(k), v] as const);
   for (const cand of candidates) {
     const target = normalizeKey(cand);
-    const hit = normalizedEntries.find(([k]) => k === target || k.includes(target));
+    const hit = normalizedEntries.find(([k]) => k === target);
     if (hit && hit[1] !== undefined && hit[1] !== null && String(hit[1]).trim() !== '') {
       return String(hit[1]).trim();
     }
@@ -411,8 +411,24 @@ function pickField(obj: Record<string, unknown>, candidates: string[]): string {
   return '';
 }
 
-function mapObjectsToMaster(records: Array<Record<string, unknown>>): MasterImportRow[] {
-  const today = new Date().toISOString().slice(0, 10);
+function localDay(): string {
+  const d = new Date();
+  return [d.getFullYear(), String(d.getMonth()+1).padStart(2,'0'), String(d.getDate()).padStart(2,'0')].join('-');
+}
+
+function importDate(raw: string, row: number, excel: boolean): string {
+  if (!raw) return '';
+  if (excel && /^\d{1,5}$/.test(raw) && Number(raw)>60) {
+    return new Date(Date.UTC(1899,11,30)+Number(raw)*86400000).toISOString().slice(0,10);
+  }
+  const d = new Date(raw+'T00:00:00Z');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw) || !Number.isFinite(d.valueOf()) || d.toISOString().slice(0,10)!==raw)
+    throw new Error(`แถวที่ ${row}: วันที่ ${raw} ไม่ถูกต้อง`);
+  return raw;
+}
+
+function mapObjectsToMaster(records: Array<Record<string, unknown>>, excel = false): MasterImportRow[] {
+  const today = localDay();
   const out: MasterImportRow[] = [];
   records.forEach((rec, i) => {
     const pdtCode = pickField(rec, ['ftpdtcode', 'pdtcode', 'รหัสสินค้า', 'sku', 'productcode']);
@@ -423,11 +439,12 @@ function mapObjectsToMaster(records: Array<Record<string, unknown>>): MasterImpo
     if (!barCode) {
       throw new Error(`แถวที่ ${i + 1}: ไม่พบบาร์โค้ด`);
     }
-    if (!Number.isFinite(basePrice) || basePrice < 0) {
+    if (!baseStr || !Number.isFinite(basePrice) || basePrice < 0) {
       throw new Error(`แถวที่ ${i + 1} (${barCode}): ราคาปกติไม่ถูกต้อง`);
     }
     const promoStr = pickField(rec, ['priceoff', 'promoprice', 'ราคาโปรโมชัน', 'ราคาโปร']);
     const promoParsed = promoStr ? Number(promoStr.replace(/,/g, '')) : NaN;
+    if (promoStr && (!Number.isFinite(promoParsed) || promoParsed < 0)) throw new Error(`แถวที่ ${i+1}: ราคาโปรไม่ถูกต้อง`);
     const qtyRaw = pickField(rec, ['qty', 'quantity', 'fnplbqty', 'จำนวนพิมพ์', 'จำนวน']);
     const quantity = qtyRaw ? Math.max(1, Math.min(10000, Math.trunc(Number(qtyRaw) || 1))) : 1;
 
@@ -438,12 +455,12 @@ function mapObjectsToMaster(records: Array<Record<string, unknown>>): MasterImpo
       unitCode: pickField(rec, ['ftpuncode', 'unitcode', 'รหัสหน่วย']) || 'PCS',
       unitName: pickField(rec, ['ftpunname', 'unitname', 'ชื่อหน่วย', 'หน่วย']) || 'ชิ้น',
       basePrice,
-      effectiveStart: pickField(rec, ['fdpghdstart', 'effectivestart', 'วันเริ่มมีผล']) || today,
-      effectiveStop: pickField(rec, ['fdpghdstop', 'effectivestop', 'วันสิ้นสุด']) || '2099-12-31',
+      effectiveStart: importDate(pickField(rec, ['fdpghdstart', 'effectivestart', 'วันเริ่มมีผล']), i+1, excel) || today,
+      effectiveStop: importDate(pickField(rec, ['fdpghdstop', 'effectivestop', 'วันสิ้นสุด']), i+1, excel) || '2099-12-31',
       promoPrice: Number.isFinite(promoParsed) && promoParsed >= 0 ? promoParsed : undefined,
       promoName: pickField(rec, ['promoname', 'ftpmhname', 'ชื่อโปรโมชัน']),
-      promoStart: pickField(rec, ['fdpmhdstart', 'promostart', 'วันเริ่มโปร']),
-      promoStop: pickField(rec, ['fdpmhdstop', 'promostop', 'วันหมดโปร']),
+      promoStart: importDate(pickField(rec, ['fdpmhdstart', 'promostart', 'วันเริ่มโปร']), i+1, excel),
+      promoStop: importDate(pickField(rec, ['fdpmhdstop', 'promostop', 'วันหมดโปร']), i+1, excel),
       quantity,
     });
   });
@@ -493,7 +510,7 @@ export async function parseMasterOrPrintFile(file: File): Promise<ParsedImportRe
     });
     if (hasMasterHeader && rows.length > 1) {
       const objs = rows.slice(1).map((cols) => rowToMasterObject(headers, cols));
-      const masterRows = mapObjectsToMaster(objs);
+      const masterRows = mapObjectsToMaster(objs, true);
       return { kind: 'master', masterRows, barcodeRows: masterRows.map((r) => ({ barcode: r.barCode, quantity: r.quantity })) };
     }
     const hasBarcodeHeader = headers.some((h) => ['barcode', 'ftbarcode', 'บาร์โค้ด'].includes(normalizeKey(h)));

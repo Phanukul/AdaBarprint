@@ -92,16 +92,50 @@ struct CanonicalRow {
     doc: String, name: Option<String>, note: Option<String>, start: Option<String>, stop: Option<String>, rule: Option<String>,
 }
 
+/// Expand a dated event through the same include/exclude matcher used for
+/// manual labels. Flattening include references loses exclusions on expiry.
+pub async fn canonical_event_barcodes(pool: &SqlitePool, from: &str, to: &str, by_stop: bool) -> Result<Vec<(String, String)>, sqlx::Error> {
+    let column = if by_stop { "FDPmhDStop" } else { "FDPmhDStart" };
+    let query = format!("SELECT hd.FTPmhDocNo, hd.FTPmhRuleJson FROM TCNTPmtHD hd WHERE COALESCE(hd.FTPmhStaActive,'1')='1' AND COALESCE(hd.FTPmhStaDoc,'')!='9' AND COALESCE(hd.FTPmhStaPrcDoc,'1') IN ('','1') AND hd.FNPmhVersion=(SELECT MAX(v.FNPmhVersion) FROM TCNTPmtHD v WHERE v.FTAgnCode=hd.FTAgnCode AND v.FTPmhDocNo=hd.FTPmhDocNo) AND substr(hd.{column},1,10) BETWEEN ? AND ?");
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(&query).bind(from).bind(to).fetch_all(pool).await?;
+    if rows.is_empty() { return Ok(vec![]); }
+    let bars: Vec<(String, String)> = sqlx::query_as("SELECT DISTINCT FTPdtCode,FTBarCode FROM TCNMPdtBar WHERE COALESCE(FTBarStaUse,'1')='1'")
+        .fetch_all(pool).await?;
+    let mut scopes = std::collections::HashMap::new();
+    for (product, _) in &bars {
+        if !scopes.contains_key(product) {
+            scopes.insert(product.clone(), crate::promo_rule::product_scope(pool, product).await?);
+        }
+    }
+    let mut found = std::collections::BTreeSet::new();
+    for (doc, raw) in rows {
+        let rule: serde_json::Value = serde_json::from_str(raw.as_deref().unwrap_or(""))
+            .map_err(|_| sqlx::Error::Protocol(format!("ข้อมูลโปรโมชั่น {doc} ไม่สมบูรณ์")))?;
+        let groups = rule["groups"].as_object().ok_or_else(|| sqlx::Error::Protocol(format!("โปรโมชั่น {doc} ไม่มีกลุ่มสินค้า")))?;
+        for (product, barcode) in &bars {
+            for group in groups.values() {
+                if crate::promo_rule::matches_group_with_scope(group, product, barcode, &scopes[product])
+                    .map_err(|e| sqlx::Error::Protocol(format!("{doc}: {e}")))? {
+                    found.insert((barcode.clone(), "BAR".to_string()));
+                    break;
+                }
+            }
+        }
+    }
+    Ok(found.into_iter().collect())
+}
+
 async fn resolve_canonical_promotion(pool: &SqlitePool, barcode: &str, product: &str, on_date: DateTime<Utc>) -> Result<Option<PromoResult>,sqlx::Error> {
     let rows:Vec<CanonicalRow> = sqlx::query_as("SELECT hd.FTPmhDocNo AS doc,hd.FTPmhName AS name,hd.FTPmhRmk AS note,hd.FDPmhDStart AS start,hd.FDPmhDStop AS stop,hd.FTPmhRuleJson AS rule FROM TCNTPmtHD hd WHERE COALESCE(hd.FTPmhStaActive,'1')='1' AND COALESCE(hd.FTPmhStaDoc,'')!='9' AND COALESCE(hd.FTPmhStaPrcDoc,'1') IN ('','1') AND hd.FNPmhVersion=(SELECT MAX(v.FNPmhVersion) FROM TCNTPmtHD v WHERE v.FTAgnCode=hd.FTAgnCode AND v.FTPmhDocNo=hd.FTPmhDocNo)")
         .fetch_all(pool).await?;
     let mut result=None;
+    let scope = crate::promo_rule::product_scope(pool, product).await?;
     for row in rows {
         if !date_in_range(row.start.as_deref(),row.stop.as_deref(),on_date) { continue; }
         let rule:serde_json::Value=serde_json::from_str(row.rule.as_deref().unwrap_or(""))
             .map_err(|_|sqlx::Error::Protocol(format!("ข้อมูลเงื่อนไขโปรโมชั่น {} ไม่สมบูรณ์",row.doc)))?;
         if !date_in_range(rule["when"]["dateStart"].as_str(),rule["when"]["dateStop"].as_str(),on_date) {continue;}
-        let Some(reward)=crate::promo_rule::unit_reward(&rule,product,barcode)
+        let Some(reward)=crate::promo_rule::unit_reward_with_scope(&rule,product,barcode,&scope)
             .map_err(|e|sqlx::Error::Protocol(format!("{}: {}",row.doc,e)))? else {continue;};
         if result.is_some() {return Err(sqlx::Error::Protocol("สินค้านี้มีโปรโมชั่นร่วมกันหลายรายการ ต้องตรวจการใช้สิทธิ์ร่วมก่อนกำหนดราคาป้าย".into()));}
         result=Some(PromoResult{code:row.doc,name:row.name.unwrap_or_default(),get_cond:reward.condition,get_value:reward.value,

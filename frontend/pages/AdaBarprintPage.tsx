@@ -492,7 +492,10 @@ function AdaBarprintWorkspace({
   // Left Filter Panel state (Version 5 style)
   const [sheetPriceType, setSheetPriceType] = useState<'Normal' | 'Promotion' | 'All'>('All');
   const [useEffectiveDate, setUseEffectiveDate] = useState(false);
-  const [effectiveDate, setEffectiveDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [effectiveDate, setEffectiveDate] = useState(() => {
+    const day = new Date();
+    return `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`;
+  });
   const [docDateFrom, setDocDateFrom] = useState('');
   const [docDateTo, setDocDateTo] = useState('');
   const [docNoFrom, setDocNoFrom] = useState('');
@@ -1035,15 +1038,15 @@ function AdaBarprintWorkspace({
   // MoveDataIntoTable (ปุ่ม แสดงข้อมูล จากแผงเงื่อนไขซ้าย)
   const handleMoveDataIntoTable = async () => {
     setMovingData(true);
+    setLookupFailures([]);
     try {
       if(manualSource){
         if(!selectedLabelCode)throw new Error('กรุณาเลือกแบบป้ายก่อนแสดงข้อมูล');
-        if(!selectedLabelCode)throw new Error('เลือกแบบป้ายก่อนค้นหารายการ');
         const data=await printApi('/api/print-center/manual-candidates',{source:manualSource,date:effectiveDate,size:selectedLabelCode,quantity:Math.max(1,defaultQty)});
         setMainRows(data.lines.map((line:any)=>({rowKey:nextQueueRowKey(line.pdtCode,line.barcode,line.isPromo?'2':'1'),pdtCode:line.pdtCode,pdtName:line.pdtName,barCode:line.barcode,price:line.setPrice??0,priType:line.isPromo?'2':'1',qty:Math.max(1,defaultQty),selected:true,lbsCode:selectedLabelCode,tmplCode:selectedTemplateCode||line.tmplCode,ctx:line.ctx,promoName:line.promo?.name,statusText:printPurposes[manualSource].title})));
         setMainPage(1);toast.success(`พบสินค้า ${data.lines.length} รายการ`);return;
       }
-      const params = new URLSearchParams({ limit: '100' });
+      const params = new URLSearchParams({ limit: '5000' });
       if (pdtFrom.trim()) params.set('pdtFrom', pdtFrom.trim());
       if (pdtTo.trim()) params.set('pdtTo', pdtTo.trim());
       if (pdtGrpFilter) params.set('grpFrom', pdtGrpFilter);
@@ -1063,7 +1066,7 @@ function AdaBarprintWorkspace({
       if (priceGroupCode) params.set('priceGroup', priceGroupCode);
       if (agencyCode) params.set('agency', agencyCode);
       if (useEffectiveDate && effectiveDate) params.set('effectiveDate', effectiveDate);
-      if (sheetPriceType !== 'All') params.set('priceType', sheetPriceType);
+      // Filter the resolved label price below, not legacy POS5 promotion tables.
 
       const res = await fetch(`/api/products?${params.toString()}`);
       const data = await res.json();
@@ -1071,7 +1074,7 @@ function AdaBarprintWorkspace({
       const list: ProductItem[] = data.products || [];
       const bchCode = resolveDefaultBranch();
 
-      const targets = list.slice(0, 100);
+      const targets = list;
       const qtyVal = Math.max(1, defaultQty);
       const built: PrintQueueRow[] = [];
       const failures: Array<{ barcode: string; reason: string }> = [];
@@ -1130,12 +1133,12 @@ function AdaBarprintWorkspace({
       setMainPage(1);
       (failures.length ? toast.warning : toast.success)(
         failures.length ? `พร้อม ${built.length} รายการ · ไม่พร้อม ${failures.length} รายการ ดูเหตุผลเหนือตาราง` :
-        list.length > 100
-          ? `แสดงข้อมูลสินค้า ${built.length} รายการ (จำกัดสูงสุด 100 รายการแรก)`
+        list.length >= 5000
+          ? `แสดงข้อมูลสินค้า ${built.length} รายการ (ถึงขีดจำกัด 5,000 รายการ กรุณาระบุช่วงสินค้าเพื่อค้นหาส่วนที่เหลือ)`
           : `แสดงข้อมูลสินค้า ${built.length} รายการ`
       );
-    } catch {
-      toast.error('ดึงข้อมูลสินค้าตามเงื่อนไขไม่สำเร็จ');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'ดึงข้อมูลสินค้าตามเงื่อนไขไม่สำเร็จ');
     } finally {
       setMovingData(false);
     }
@@ -2409,17 +2412,31 @@ function AdaBarprintWorkspace({
                       handleMoveDataIntoTable();
                     }}
                   >
-                  <div className="space-y-2 mb-3"><Label className="text-xs">เลือกรายการสินค้า</Label><select aria-label="วิธีเลือกรายการสินค้า" className="h-9 w-full rounded-md border px-2 text-sm" value={manualSource} onChange={e=>{setManualSource(e.target.value);if(e.target.value){setUseEffectiveDate(true);setSheetPriceType('All');}}}><option value="">เลือกสินค้าเอง</option>{['PRICE_CHG','PROMO_START','PROMO_END_REVERT','NEW_PDT'].map(code=><option key={code} value={code}>{printPurposes[code].title}</option>)}</select>{manualSource&&<p className="text-xs text-slate-500">เลือกวันที่และแบบป้าย แล้วกดแสดงข้อมูล ใช้เครื่องพิมพ์ตามแบบป้ายที่เลือก</p>}</div>
+                  <fieldset className="space-y-2 mb-3">
+                    <legend className="text-xs font-semibold">ประเภทงานพิมพ์</legend>
+                    <div className="grid grid-cols-2 gap-2" role="group" aria-label="ประเภทงานพิมพ์">
+                      {['PRICE_CHG', 'NEW_PDT', 'PROMO_START', 'PROMO_END_REVERT'].map(code => (
+                        <Button key={code} type="button" variant={manualSource === code ? 'default' : 'outline'}
+                          aria-pressed={manualSource === code} className="h-auto min-h-9 whitespace-normal text-xs"
+                          onClick={() => { setManualSource(code); setLookupFailures([]); setMainRows([]); if (code) { setUseEffectiveDate(true); setSheetPriceType('All'); } }}>
+                          {printPurposes[code].title}
+                        </Button>
+                      ))}
+                    </div>
+                    <p className="text-xs text-slate-500">งานอัตโนมัติมี 4 แบบ ใช้เงื่อนไขเดียวกับ Profile ที่เรียกผ่าน Task Scheduler</p>
+                    <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={!manualSource} onChange={e => { setManualSource(e.target.checked ? '' : 'PRICE_CHG'); setLookupFailures([]); setMainRows([]); if (!e.target.checked) { setUseEffectiveDate(true); setSheetPriceType('All'); } }} />เลือกสินค้าด้วยตนเอง โดยไม่กรองตามประเภทงาน</label>
+                    {manualSource && <p className="text-xs text-slate-600">{manualSource === 'PROMO_END_REVERT' ? 'เลือกวันที่โปรสิ้นสุด ระบบตรวจราคาวันถัดไป และข้ามสินค้าที่ยังมีโปรอื่นใช้งานอยู่' : 'เลือกวันที่มีผล แล้วกดแสดงข้อมูล'} · ใช้แบบป้ายและเครื่องพิมพ์ที่เลือกด้านขวา</p>}
+                  </fieldset>
                   {/* Row 1: Price Type + Total Print */}
                   <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-1">
-                      <Label className="text-xs font-medium">ประเภทราคา</Label>
+                      <Label className="text-xs font-medium">ราคาที่แสดงบนป้าย</Label>
                       <Select disabled={Boolean(manualSource)} value={sheetPriceType} onValueChange={(v: any) => setSheetPriceType(v)}>
                         <SelectTrigger className="w-full h-8 text-xs"><SelectValue /></SelectTrigger>
                         <SelectContent>
                           <SelectItem value="Normal">ราคาปกติ</SelectItem>
                           <SelectItem value="Promotion">ราคาโปรโมชัน</SelectItem>
-                          <SelectItem value="All">ทั้งหมด</SelectItem>
+                          <SelectItem value="All">ตรวจราคาปกติ / โปร</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>
@@ -2786,6 +2803,7 @@ function AdaBarprintWorkspace({
                   <details className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm">
                     <summary className="cursor-pointer font-medium">รายการที่ไม่เพิ่มในตารางพิมพ์ ({lookupFailures.length})</summary>
                     <p className="mt-2">รายการเหล่านี้จะไม่ถูกส่งพิมพ์ กรุณาตรวจสอบข้อมูลตามเหตุผลด้านล่าง</p>
+                    {!manualSource && sheetPriceType !== 'Normal' && <p className="mt-1">ถ้าต้องการป้ายราคาปกติ ให้เลือก “ราคาปกติ” แล้วกดแสดงข้อมูลใหม่ ระบบจะไม่ใช้ราคาโปรโมชั่นที่ตรวจสอบไม่ได้</p>}
                     <ul className="mt-2 max-h-48 overflow-auto space-y-2">
                       {lookupFailures.map((failure, index) => <li key={`${failure.barcode}-${index}`} className="break-words"><strong>{failure.barcode}</strong> — {failure.reason}</li>)}
                     </ul>
