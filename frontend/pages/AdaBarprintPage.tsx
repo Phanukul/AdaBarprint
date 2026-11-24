@@ -260,7 +260,8 @@ async function toDataUrl(src: string): Promise<string> {
 async function capturePagesToPngBase64(
   containerId: string,
   paperWidthMm = 210,
-  paperHeightMm = 297
+  paperHeightMm = 297,
+  godexRoll = false
 ): Promise<string[]> {
   const container = document.getElementById(containerId);
   if (!container) return [];
@@ -284,16 +285,19 @@ async function capturePagesToPngBase64(
         }
       })
     );
-    const scale = 2; // 192dpi crisp print
+    const outputWidth = godexRoll ? Math.round(paperWidthMm * 203 / 25.4) : wPx * 2;
+    const outputHeight = godexRoll ? Math.round(paperHeightMm * 203 / 25.4) : hPx * 2;
+    const viewportWidth = godexRoll ? paperWidthMm * 96 / 25.4 : wPx;
+    const viewportHeight = godexRoll ? paperHeightMm * 96 / 25.4 : hPx;
     const serialized = new XMLSerializer().serializeToString(clone);
-    const svgXml = `<svg xmlns="http://www.w3.org/2000/svg" width="${wPx}" height="${hPx}"><foreignObject x="0" y="0" width="100%" height="100%">${serialized}</foreignObject></svg>`;
+    const svgXml = `<svg xmlns="http://www.w3.org/2000/svg" width="${outputWidth}" height="${outputHeight}" viewBox="0 0 ${viewportWidth} ${viewportHeight}" preserveAspectRatio="none"><foreignObject x="0" y="0" width="100%" height="100%">${serialized}</foreignObject></svg>`;
     const svgUrl = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgXml);
     const pngDataUrl = await new Promise<string>((resolve, reject) => {
       const image = new Image();
       image.onload = () => {
         const canvas = document.createElement('canvas');
-        canvas.width = wPx * scale;
-        canvas.height = hPx * scale;
+        canvas.width = outputWidth;
+        canvas.height = outputHeight;
         const ctx = canvas.getContext('2d');
         if (!ctx) {
           reject(new Error('Canvas context unavailable'));
@@ -301,9 +305,18 @@ async function capturePagesToPngBase64(
         }
         ctx.fillStyle = '#FFFFFF';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.scale(scale, scale);
         try {
-          ctx.drawImage(image, 0, 0, wPx, hPx);
+          ctx.drawImage(image, 0, 0);
+          if (godexRoll) {
+            const pixels = ctx.getImageData(0, 0, outputWidth, outputHeight);
+            const data = pixels.data;
+            for (let i = 0; i < data.length; i += 4) {
+              const luminance = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+              const tone = luminance < 160 ? 0 : 255;
+              data[i] = data[i + 1] = data[i + 2] = tone;
+            }
+            ctx.putImageData(pixels, 0, 0);
+          }
           resolve(canvas.toDataURL('image/png'));
         } catch (error) { reject(error); }
       };
@@ -1534,7 +1547,8 @@ function AdaBarprintWorkspace({
           const pageImages = await capturePagesToPngBase64(
             d.containerId,
             a4Layout.paperWidthMm,
-            a4Layout.paperHeightMm
+            a4Layout.paperHeightMm,
+            a4Layout.isRoll && /\bEZ[ -]?520\b/i.test(d.printer)
           );
           queueUnits.push({ kind: 'WINDOWS', payload: {
               printerName: d.printer, trayName: d.tray, lbsCode: selectedLabelCode,
@@ -1556,7 +1570,8 @@ function AdaBarprintWorkspace({
         await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 180))));
         for (const [containerId, rows, label] of [['v5-capture-normal', normalRows, 'ราคาปกติ'], ['v5-capture-promo', promoRows, 'โปรโมชั่น']] as const) {
           if (!rows.length) continue;
-          const pageImages = await capturePagesToPngBase64(containerId, a4Layout.paperWidthMm, a4Layout.paperHeightMm);
+          const pageImages = await capturePagesToPngBase64(containerId, a4Layout.paperWidthMm, a4Layout.paperHeightMm,
+            a4Layout.isRoll && /\bEZ[ -]?520\b/i.test(name));
           queueUnits.push({kind:'WINDOWS',payload:{printerName:name, trayName:printer?.tray||'', lbsCode:selectedLabelCode,
             priTypeLabel:label,pageImages,paperSize:a4Layout.paperSize,paperWidthMm:a4Layout.paperWidthMm,paperHeightMm:a4Layout.paperHeightMm}});
         }
@@ -2072,30 +2087,11 @@ function AdaBarprintWorkspace({
     if (!ls) return;
     setSavingOffset(true);
     try {
-      const res = await fetch('/api/label-sizes/save', {
+      const res = await fetch('/api/label-sizes/offset', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           lbsCode: ls.FTLbsCode,
-          lbsName: ls.FTLbsName || ls.FTLbsCode,
-          lbsGroup: ls.FTLbsGroup === '2' ? '2' : '1',
-          widthMm: ls.FCLbsWidth,
-          heightMm: ls.FCLbsHeight,
-          cols: ls.FNLbsCol || a4Layout.cols,
-          rows: ls.FNLbsRow || a4Layout.rows,
-          magTop: ls.FCLbsMagTop ?? 3,
-          magLeft: ls.FCLbsMagLeft ?? 3,
-          magBottom: ls.FCLbsMagBottom ?? ls.FCLbsMagTop ?? 3,
-          magRight: ls.FCLbsMagRight ?? ls.FCLbsMagLeft ?? 3,
-          gapH: ls.FCLbsGapH ?? 2,
-          gapV: ls.FCLbsGapV ?? 2,
-          qtyPageNor: ls.FNLbsQtyPageNor || a4Layout.cols * a4Layout.rows,
-          qtyPagePmt: ls.FNLbsQtyPagePmt || a4Layout.cols * a4Layout.rows,
-          staUse: ls.FTLbsStaUse || '1',
-          isNew: false,
-          paperSize: a4Layout.paperSize,
-          paperWidthMm: a4Layout.paperWidthMm,
-          paperHeightMm: a4Layout.paperHeightMm,
           offsetX: printOffsetX,
           offsetY: printOffsetY,
         }),
@@ -2105,13 +2101,37 @@ function AdaBarprintWorkspace({
         toast.error(data?.error || 'บันทึกค่าชดเชยไม่สำเร็จ');
         return;
       }
-      await refreshLabelSizesAndMappings();
+      setLabelSizes(current => current.map(size => size.FTLbsCode === ls.FTLbsCode
+        ? { ...size, FCLbsOffsetX: printOffsetX, FCLbsOffsetY: printOffsetY }
+        : size));
       toast.success(`บันทึกค่าชดเชย X=${printOffsetX}mm, Y=${printOffsetY}mm เรียบร้อย`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
     } finally {
       setSavingOffset(false);
     }
+  };
+
+  const renderPrintCell = (
+    line: { barcode: string; priType: string; ctx: Record<string, any> },
+    key: string,
+    scale: number,
+    preview = false,
+  ) => {
+    const layout = resolveCustomLayout(selectedLabelCode, line.priType);
+    const label = (
+      <LabelPreview line={line} scale={scale} labelW={a4Layout.widthMm} labelH={a4Layout.heightMm}
+        lbsCode={selectedLabelCode} customLayout={layout} preprintView="ink" />
+    );
+    if (!a4Layout.isRoll) return <div key={key}>{label}</div>;
+    return (
+      <div key={key} className={preview ? 'bg-white ring-1 ring-slate-300 rounded-[2px]' : undefined}
+        style={{ width: `${a4Layout.widthMm * scale}mm`, height: `${a4Layout.heightMm * scale}mm`, overflow: 'hidden' }}>
+        <div style={{ position: 'relative', left: `${printOffsetX * scale}mm`, top: `${printOffsetY * scale}mm` }}>
+          {label}
+        </div>
+      </div>
+    );
   };
 
   const renderPreviewSheets = (
@@ -2150,32 +2170,11 @@ function AdaBarprintWorkspace({
                 display: 'grid',
                 gridTemplateColumns: `repeat(${a4Layout.cols}, ${a4Layout.widthMm * sheetFactor}mm)`,
                 columnGap: `${a4Layout.gapHMm * sheetFactor}mm`,
-                transform:
-                  printOffsetX !== 0 || printOffsetY !== 0
-                    ? `translate(${printOffsetX * sheetFactor}mm, ${printOffsetY * sheetFactor}mm)`
-                    : undefined,
               }}
             >
-              {rowItems.map((line, idx) => (
-                <div
-                  key={`${keyPrefix}-rl-${line.barcode}-${rowIdx}-${idx}`}
-                  className="bg-white ring-1 ring-slate-300 rounded-[2px] overflow-hidden"
-                  style={{
-                    width: `${a4Layout.widthMm * sheetFactor}mm`,
-                    height: `${a4Layout.heightMm * sheetFactor}mm`,
-                  }}
-                >
-                  <LabelPreview
-                    line={line}
-                    scale={sheetFactor}
-                    labelW={a4Layout.widthMm}
-                    labelH={a4Layout.heightMm}
-                    lbsCode={selectedLabelCode}
-                    customLayout={resolveCustomLayout(selectedLabelCode, line.priType)}
-                    preprintView="ink"
-                  />
-                </div>
-              ))}
+              {rowItems.map((line, idx) =>
+                renderPrintCell(line, `${keyPrefix}-rl-${line.barcode}-${rowIdx}-${idx}`, sheetFactor, true)
+              )}
             </div>
           ))}
         </div>
@@ -3547,7 +3546,7 @@ function AdaBarprintWorkspace({
 
       {/* ===== Modal: ส่งพิมพ์แยกแท็บ Preview รูปแบบกระดาษ / ม้วน (odvPRNModalSendPrint) ===== */}
       <Dialog open={sendPrintOpen} onOpenChange={open => { if (!printBusy.current && !draftBusy) setSendPrintOpen(open); }}>
-        <DialogContent className="flex h-[92dvh] w-[96vw] max-h-[92dvh] flex-col gap-0 overflow-hidden p-0 sm:max-w-6xl">
+        <DialogContent className="flex h-[96dvh] w-[98vw] max-w-none flex-col gap-0 overflow-hidden p-0 sm:max-w-none">
           <DialogHeader className="shrink-0 border-b px-5 py-4 text-left">
             <DialogTitle className="text-lg font-semibold">ตัวอย่างก่อนพิมพ์</DialogTitle>
             <DialogDescription className="text-sm">
@@ -3555,7 +3554,7 @@ function AdaBarprintWorkspace({
             </DialogDescription>
           </DialogHeader>
           <div className="flex min-h-0 flex-1 flex-col md:flex-row">
-            <aside className="flex max-h-[34vh] shrink-0 flex-col min-w-0 gap-4 overflow-x-hidden overflow-y-auto border-b bg-white p-4 md:max-h-none md:w-60 md:border-r md:border-b-0">
+            <aside className="flex max-h-[34vh] shrink-0 flex-col min-w-0 gap-4 overflow-x-hidden overflow-y-auto border-b bg-white p-4 md:max-h-none md:w-72 md:border-r md:border-b-0 xl:w-80">
               <div className="flex flex-col gap-2">
             <label htmlFor="preview-purpose" className="text-xs font-medium">แสดงตัวอย่าง</label>
             <select id="preview-purpose" className="min-h-10 w-full rounded-md border border-slate-300 bg-white px-2 text-sm" value={previewPurpose}
@@ -3602,7 +3601,7 @@ function AdaBarprintWorkspace({
                 const anyPreprint =
                   resolveCustomLayout(selectedLabelCode, '1')?.designMode === 'preprint' ||
                   resolveCustomLayout(selectedLabelCode, '2')?.designMode === 'preprint';
-                const showOffsetControls = anyPreprint || printOffsetX !== 0 || printOffsetY !== 0;
+                const showOffsetControls = a4Layout.isRoll || anyPreprint || printOffsetX !== 0 || printOffsetY !== 0;
                 return (
                   <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3 shrink-0">
                     <div className="flex flex-wrap items-center gap-2">
@@ -4300,23 +4299,12 @@ function AdaBarprintWorkspace({
                 boxSizing: 'border-box',
                 overflow: 'hidden',
                 transform:
-                  printOffsetX !== 0 || printOffsetY !== 0
+                  !a4Layout.isRoll && (printOffsetX !== 0 || printOffsetY !== 0)
                     ? `translate(${printOffsetX}mm, ${printOffsetY}mm)`
                     : undefined,
               }}
             >
-              {pageItems.map((line, idx) => (
-                <LabelPreview
-                  key={`cn-${pageIdx}-${idx}`}
-                  line={line}
-                  scale={1}
-                  labelW={a4Layout.widthMm}
-                  labelH={a4Layout.heightMm}
-                  lbsCode={selectedLabelCode}
-                  customLayout={resolveCustomLayout(selectedLabelCode, line.priType)}
-                  preprintView="ink"
-                />
-              ))}
+              {pageItems.map((line, idx) => renderPrintCell(line, `cn-${pageIdx}-${idx}`, 1))}
             </div>
           ))}
         </div>
@@ -4343,23 +4331,12 @@ function AdaBarprintWorkspace({
                 boxSizing: 'border-box',
                 overflow: 'hidden',
                 transform:
-                  printOffsetX !== 0 || printOffsetY !== 0
+                  !a4Layout.isRoll && (printOffsetX !== 0 || printOffsetY !== 0)
                     ? `translate(${printOffsetX}mm, ${printOffsetY}mm)`
                     : undefined,
               }}
             >
-              {pageItems.map((line, idx) => (
-                <LabelPreview
-                  key={`cp-${pageIdx}-${idx}`}
-                  line={line}
-                  scale={1}
-                  labelW={a4Layout.widthMm}
-                  labelH={a4Layout.heightMm}
-                  lbsCode={selectedLabelCode}
-                  customLayout={resolveCustomLayout(selectedLabelCode, line.priType)}
-                  preprintView="ink"
-                />
-              ))}
+              {pageItems.map((line, idx) => renderPrintCell(line, `cp-${pageIdx}-${idx}`, 1))}
             </div>
           ))}
         </div>
@@ -4403,24 +4380,12 @@ function AdaBarprintWorkspace({
                 boxSizing: 'border-box',
                 overflow: 'hidden',
                 transform:
-                  printOffsetX !== 0 || printOffsetY !== 0
+                  !a4Layout.isRoll && (printOffsetX !== 0 || printOffsetY !== 0)
                     ? `translate(${printOffsetX}mm, ${printOffsetY}mm)`
                     : undefined,
               }}
             >
-              {pageItems.map((line, idx) => (
-                <div key={`print-${pIdx}-${idx}`} className="break-inside-avoid">
-                  <LabelPreview
-                    line={line}
-                    scale={1}
-                    labelW={a4Layout.widthMm}
-                    labelH={a4Layout.heightMm}
-                    lbsCode={selectedLabelCode}
-                    customLayout={resolveCustomLayout(selectedLabelCode, line.priType)}
-                    preprintView="ink"
-                  />
-                </div>
-              ))}
+              {pageItems.map((line, idx) => renderPrintCell(line, `print-${pIdx}-${idx}`, 1))}
             </div>
           ))}
         </div>

@@ -33,6 +33,7 @@ aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+qrcode = { version = "0.14", default-features = false }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"

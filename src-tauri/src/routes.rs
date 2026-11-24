@@ -1312,6 +1312,7 @@ pub async fn get_windows_printers() -> Response {
     #[cfg(target_os = "windows")]
     {
         let script = r#"
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 Add-Type -AssemblyName System.Drawing
 $def = (New-Object System.Drawing.Printing.PrinterSettings).PrinterName
 $list = foreach ($name in [System.Drawing.Printing.PrinterSettings]::InstalledPrinters) {
@@ -1605,6 +1606,37 @@ pub struct SaveLabelSizeBody {
     pub paper_height_mm: Option<f64>,
     pub offset_x: Option<f64>,
     pub offset_y: Option<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelSizeOffset {
+    lbs_code: String,
+    offset_x: f64,
+    offset_y: f64,
+}
+
+pub async fn post_label_size_offset(
+    State(st): State<AppState>,
+    Json(body): Json<LabelSizeOffset>,
+) -> Response {
+    if !(-30.0..=30.0).contains(&body.offset_x) || !(-30.0..=30.0).contains(&body.offset_y) {
+        return err_json(StatusCode::BAD_REQUEST, "ค่าชดเชยต้องอยู่ระหว่าง -30 ถึง 30 มม.");
+    }
+    let result = sqlx::query(
+        "UPDATE TCNMLabelSize SET FCLbsOffsetX=?, FCLbsOffsetY=?, FDLastUpdOn=?, FTLastUpdBy='USER_CONFIG' WHERE FTLbsCode=?",
+    )
+    .bind(body.offset_x)
+    .bind(body.offset_y)
+    .bind(Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
+    .bind(body.lbs_code.trim())
+    .execute(&st.pool)
+    .await;
+    match result {
+        Ok(row) if row.rows_affected() > 0 => Json(json!({ "ok": true })).into_response(),
+        Ok(_) => err_json(StatusCode::NOT_FOUND, "ไม่พบขนาดป้าย"),
+        Err(error) => err_json(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
 }
 
 pub async fn post_save_label_size(
@@ -2062,6 +2094,10 @@ $doc.add_PrintPage({
   $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
   $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
   $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+  if ($cfg.paperCode -eq 'ROLL' -and $cfg.printerName -match '\bEZ[ -]?520\b') {
+    $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::NearestNeighbor
+    $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::Half
+  }
 
   if ($isVirtual) {
     $bounds = $e.PageBounds

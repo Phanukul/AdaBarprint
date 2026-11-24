@@ -134,6 +134,7 @@ pub fn build_router(pool: SqlitePool) -> Router {
         .route("/api/lan-printers/delete", post(post_delete_lan_printer))
         .route("/api/label-sizes", get(get_label_sizes))
         .route("/api/label-sizes/save", post(post_save_label_size))
+        .route("/api/label-sizes/offset", post(post_label_size_offset))
         .route("/api/label-sizes/toggle", post(post_toggle_label_size))
         .route("/api/label-sizes/delete", post(post_delete_custom_format))
         .route("/api/config/all", get(get_config_all))

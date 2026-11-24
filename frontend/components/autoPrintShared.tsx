@@ -26,15 +26,17 @@ export type EventProfile=Pick<Rule,'template'|'size'|'printer'|'tray'|'protocol'
 export interface Center { separateSettingsVersion?:number; master?:{connected:boolean;autoReady:boolean;branch:string;path:string;error?:string}; rules:Rule[]; jobs:Job[]; heartbeat:string; legacySchedules:number; bulkVersion?:number; bulkSettings?:unknown }
 export interface Template { FTLtmCode:string; FTLtmName:string; FTLbsCode:string; FTLtmPriType:string; FTLtmLayout?:string | null }
 export interface Candidate { barCode:string; pdtName:string; salePrice:number; qty:number; skippedDup:boolean }
-function templateProblem(template:Template):string {
+function templateProblem(template:Template, windows:boolean):string {
   try {
     const layout=JSON.parse(template.FTLtmLayout||'null');
     if(!layout||!Array.isArray(layout.elements)||!layout.elements.length)return 'ยังไม่มีแบบพร้อมใช้งาน';
-    if(layout.designMode==='preprint')return 'การพิมพ์อัตโนมัติยังไม่รองรับการชดเชยตำแหน่งบนกระดาษพิมพ์พื้นหลัง';
-    const unsupported=layout.elements.filter((el:{type?:string})=>!['text','static','price','date','barcode','rect','line'].includes(el.type||''));
+    const elements=layout.elements.filter((el:{visible?:boolean})=>el.visible!==false);
+    if(!elements.length)return 'ไม่มีองค์ประกอบที่เปิดแสดงบนป้าย';
+    if(!windows && layout.designMode==='preprint')return 'การพิมพ์อัตโนมัติยังไม่รองรับการชดเชยตำแหน่งบนกระดาษพิมพ์พื้นหลัง';
+    const unsupported=elements.filter((el:{type?:string;iconName?:string})=>!(windows && (el.type==='image'||el.type==='qrcode'||(el.type==='icon'&&el.iconName==='heart'))) && !['text','static','price','date','barcode','rect','line'].includes(el.type||''));
     if(unsupported.length){const names:Record<string,string>={qrcode:'QR Code',qr:'QR Code',image:'รูปภาพ',icon:'ไอคอน'};return 'การพิมพ์อัตโนมัติยังไม่รองรับ: '+[...new Set(unsupported.map((el:{type:string})=>names[el.type]||el.type))].join(', ');}
-    if(layout.elements.some((el:{rotation?:number})=>(el.rotation??0)!==0))return 'การพิมพ์อัตโนมัติยังไม่รองรับองค์ประกอบที่หมุน';
-    if(layout.elements.some((el:{opacity?:number})=>(el.opacity??1)!==1))return 'การพิมพ์อัตโนมัติยังไม่รองรับองค์ประกอบโปร่งใส';
+    if(elements.some((el:{rotation?:number})=>(el.rotation??0)!==0))return 'การพิมพ์อัตโนมัติยังไม่รองรับองค์ประกอบที่หมุน';
+    if(elements.some((el:{opacity?:number})=>(el.opacity??1)!==1))return 'การพิมพ์อัตโนมัติยังไม่รองรับองค์ประกอบโปร่งใส';
     return '';
   } catch {return 'ยังไม่มีแบบพร้อมใช้งาน';}
 }

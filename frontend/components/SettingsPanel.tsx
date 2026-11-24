@@ -1098,6 +1098,11 @@ export function SettingsPanel({
     </div>
   );
 
+  const jobsPanel = <AutoScheduleSettings mode="jobs" authUser={authUser} allLabelSizes={allLabelSizes} sysOptions={sysOptions} branches={branches} windowsPrinters={windowsPrinters} printers={printers} driverMappings={driverMappings} driverServerCode={driverServerCode} formatTrayLabel={formatTrayLabel} onRefreshAll={onRefreshAll}/>;
+  if (workspace === 'jobs' && !ENABLE_AUTO_PRINT_HISTORY_TAB) {
+    return <main className="max-w-[1600px] min-w-0 w-full mx-auto p-2 sm:p-4">{jobsPanel}</main>;
+  }
+
   return (
     <main className="max-w-[1600px] min-w-0 w-full mx-auto p-2 sm:p-4 space-y-4">
       <Tabs value={subTab} onValueChange={(v) => setSubTab(v as typeof subTab)} className="space-y-4">
@@ -1129,7 +1134,7 @@ export function SettingsPanel({
             <MasterDatabaseSettings onSaved={() => window.location.reload()} />
           )}
         </TabsContent>
-        <TabsContent value="jobs"><AutoScheduleSettings mode="jobs" authUser={authUser} allLabelSizes={allLabelSizes} sysOptions={sysOptions} branches={branches} windowsPrinters={windowsPrinters} printers={printers} driverMappings={driverMappings} driverServerCode={driverServerCode} formatTrayLabel={formatTrayLabel} onRefreshAll={onRefreshAll}/></TabsContent>
+        <TabsContent value="jobs">{jobsPanel}</TabsContent>
 
 
         {/* ══════════════════ TAB 1: LABEL SIZES & MARGINS ══════════════════ */}

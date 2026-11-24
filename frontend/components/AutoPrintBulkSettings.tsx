@@ -267,7 +267,7 @@ export function AutoPrintBulkSettings(
       if (!t.template) return `${prefix}กรุณาเลือกแบบป้าย`;
       const tmpl = p.templates.find((x) => x.FTLtmCode === t.template);
       if (!tmpl) return `${prefix}ไม่พบแบบป้ายที่เลือก`;
-      const prob = templateProblem(tmpl);
+      const prob = templateProblem(tmpl, !t.ip);
       if (prob) return `${prefix}${prob}`;
       if (!p.allLabelSizes.some((s) => s.FTLbsCode === t.size && s.FTLbsStaUse === '1')) {
         return `${prefix}ขนาดป้ายของแบบนี้ถูกปิดใช้งาน`;

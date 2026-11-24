@@ -139,6 +139,33 @@ async fn four_scheduler_profiles_enqueue_snapshots_without_sending() {
  }
  let states:Vec<String>=sqlx::query_scalar("SELECT status FROM ABPrintUnit").fetch_all(&pool).await.unwrap();
  assert_eq!(states,vec!["READY";4]);
+ // Acknowledge a transport unit in the isolated database, as the worker does.
+ let job:String=sqlx::query_scalar("SELECT id FROM ABPrintJob WHERE json_extract(config,'$.code')='NEW_PDT'").fetch_one(&pool).await.unwrap();
+ let raw:String=sqlx::query_scalar("SELECT payload FROM ABPrintUnit WHERE job=?").bind(&job).fetch_one(&pool).await.unwrap();
+ let payload:serde_json::Value=serde_json::from_str(&raw).unwrap();
+ let marks=payload["marks"].as_array().unwrap();
+ assert_eq!(marks.len(),1);
+ for mark in marks {
+  sqlx::query("INSERT INTO ABPrintWatermark VALUES(?,?,?)").bind(mark["rule"].as_str()).bind(mark["barcode"].as_str()).bind(mark["hash"].as_str()).execute(&pool).await.unwrap();
+ }
+ sqlx::query("UPDATE ABPrintJob SET status='SUBMITTED' WHERE id=?").bind(&job).execute(&pool).await.unwrap();
+ let repeated=print_center::enqueue_profile(&pool,"NEW_PDT").await.unwrap();
+ assert_eq!(repeated["status"],"EMPTY");
+ let explicit=print_center::run_profile_api(State(routes::AppState{pool:pool.clone()}),Json(json!({"code":"NEW_PDT"}))).await;
+ assert!(explicit.status().is_success());
+ let explicit:serde_json::Value=serde_json::from_slice(&axum::body::to_bytes(explicit.into_body(),65536).await.unwrap()).unwrap();
+ assert_eq!(explicit["status"],"QUEUED");
+ sqlx::query("UPDATE ABPrintJob SET status='CANCELLED' WHERE id=?").bind(explicit["jobId"].as_str()).execute(&pool).await.unwrap();
+ sqlx::query("UPDATE ABPrintRule SET config=json_set(config,'$.quantity',2) WHERE id='NEW_PDT'").execute(&pool).await.unwrap();
+ let changed=print_center::enqueue_profile(&pool,"NEW_PDT").await.unwrap();
+ assert_eq!(changed["totalUnits"],2);
+ // If only copy one reached the transport, rescheduling should prepare only copy two.
+ let first_page:String=sqlx::query_scalar("SELECT payload FROM ABPrintUnit WHERE job=? AND seq=0").bind(changed["jobId"].as_str()).fetch_one(&pool).await.unwrap();
+ let first_page:serde_json::Value=serde_json::from_str(&first_page).unwrap();
+ let mark=&first_page["marks"][0];
+ sqlx::query("UPDATE ABPrintWatermark SET hash=? WHERE rule=? AND barcode=?").bind(mark["hash"].as_str()).bind(mark["rule"].as_str()).bind(mark["barcode"].as_str()).execute(&pool).await.unwrap();
+ sqlx::query("UPDATE ABPrintJob SET status='CANCELLED' WHERE id=?").bind(changed["jobId"].as_str()).execute(&pool).await.unwrap();
+ assert_eq!(print_center::enqueue_profile(&pool,"NEW_PDT").await.unwrap()["totalUnits"],1);
  // A fifth event is rejected, including configurations left by older builds.
  sqlx::query("INSERT INTO ABPrintRule(id,config) SELECT 'old',json_set(config,'$.id','old','$.code','OLD','$.source','ALL_PRODUCTS') FROM ABPrintRule LIMIT 1").execute(&pool).await.unwrap();
  assert!(print_center::enqueue_profile(&pool,"OLD").await.unwrap_err().contains("ประเภทข้อมูล"));

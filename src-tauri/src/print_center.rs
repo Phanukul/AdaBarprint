@@ -175,7 +175,25 @@ pub async fn ensure_schema(pool: &SqlitePool) -> std::result::Result<(), sqlx::E
         PRIMARY KEY(rule,barcode));
       CREATE TABLE IF NOT EXISTS ABPrintAudit(id INTEGER PRIMARY KEY AUTOINCREMENT,job TEXT,action TEXT,created TEXT);")
       .execute(pool).await?;
-    Ok(())
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let rows: Vec<(String,String)> = sqlx::query_as("SELECT id,trim(coalesce(json_extract(config,'$.code'),'')) FROM ABPrintRule ORDER BY id").fetch_all(&mut *tx).await?;
+    let mut used: std::collections::HashSet<_> = rows.iter().map(|(_,code)|code.to_ascii_uppercase()).collect();
+    let mut next = 1;
+    for (id,code) in rows {
+        if !code.is_empty() { continue; }
+        loop {
+            let candidate = format!("{next:03}");
+            next += 1;
+            if used.insert(candidate.clone()) {
+                sqlx::query("UPDATE ABPrintRule SET config=json_set(config,'$.code',?) WHERE id=?")
+                    .bind(candidate).bind(id).execute(&mut *tx).await?;
+                break;
+            }
+        }
+    }
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS ABPrintRuleCode ON ABPrintRule(upper(trim(json_extract(config,'$.code')))) WHERE trim(coalesce(json_extract(config,'$.code'),''))<>''")
+        .execute(&mut *tx).await?;
+    tx.commit().await
 }
 async fn setting(pool: &SqlitePool, id: &str) -> String {
     sqlx::query_scalar("SELECT value FROM ABPrintSetting WHERE id=?")
@@ -196,31 +214,7 @@ async fn rules(pool: &SqlitePool) -> Result<Vec<PrintRule>> {
         .fetch_all(pool)
         .await
         .map_err(|e| e.to_string())?;
-    let mut result=Vec::new();
-    let mut next_seq: usize = 1;
-    let mut used_codes = std::collections::HashSet::new();
-    for raw in &rows {
-        if let Ok(r) = serde_json::from_str::<PrintRule>(raw) {
-            if !r.code.trim().is_empty() {
-                used_codes.insert(r.code.trim().to_ascii_uppercase());
-            }
-        }
-    }
-    for raw in rows {
-        let mut r: PrintRule = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-        if r.code.trim().is_empty() {
-            loop {
-                let candidate = format!("{next_seq:03}");
-                next_seq += 1;
-                if used_codes.insert(candidate.clone()) {
-                    r.code = candidate;
-                    break;
-                }
-            }
-        }
-        result.push(r);
-    }
-    Ok(result)
+    rows.into_iter().map(|raw|serde_json::from_str(&raw).map_err(|e|e.to_string())).collect()
 }
 async fn rule(pool: &SqlitePool, id: &str) -> Result<PrintRule> {
     rules(pool)
@@ -292,7 +286,7 @@ async fn validate_rule(pool: &SqlitePool, r: &PrintRule) -> Result<()> {
                 return Err(format!("{prefix}Port ไม่ถูกต้อง"));
             }
         }
-        load_layout_for(pool, &t.size, &t.template)
+        load_layout_for(pool, &t.size, &t.template, t.ip.is_empty())
             .await
             .map_err(|e| format!("{prefix}{e}"))?;
     }
@@ -302,12 +296,13 @@ async fn load_layout(
     pool: &SqlitePool,
     r: &PrintRule,
 ) -> Result<(TCNMLabelSize, Vec<crate::templates::TemplateElement>)> {
-    load_layout_for(pool, &r.size, &r.template).await
+    load_layout_for(pool, &r.size, &r.template, r.ip.is_empty()).await
 }
 async fn load_layout_for(
     pool: &SqlitePool,
     size_code: &str,
     template_code: &str,
+    windows: bool,
 ) -> Result<(TCNMLabelSize, Vec<crate::templates::TemplateElement>)> {
     let size = sqlx::query_as::<_, TCNMLabelSize>(
         "SELECT * FROM TCNMLabelSize WHERE FTLbsCode=? AND FTLbsStaUse='1'",
@@ -321,23 +316,29 @@ async fn load_layout_for(
       .bind(template_code).bind(size_code).fetch_optional(pool).await.map_err(|e|e.to_string())?.flatten();
     let raw = raw.ok_or("ไม่พบ Template ที่เลือกสำหรับขนาดนี้ กรุณาบันทึกแบบป้ายก่อน")?;
     let layout: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-    if layout["designMode"] == "preprint" {
+    if !windows && layout["designMode"] == "preprint" {
         return Err("แบบกระดาษพิมพ์พื้นหลังสำเร็จให้ใช้ Manual ก่อน Auto ยังไม่รองรับการชดเชยแบบนี้".into());
     }
-    let elements: Vec<crate::templates::TemplateElement> =
-        serde_json::from_value(layout["elements"].clone()).map_err(|e| e.to_string())?;
+    let visible: Vec<Value> = layout["elements"].as_array().ok_or("Template ไม่ถูกต้อง")?.iter()
+        .filter(|el|el["visible"].as_bool()!=Some(false)).cloned().collect();
+    let mut elements: Vec<crate::templates::TemplateElement> =
+        serde_json::from_value(json!(visible)).map_err(|e| e.to_string())?;
     if elements.is_empty() {
         return Err("Template ไม่มีองค์ประกอบ".into());
     }
     // Refuse unsupported headless elements instead of silently losing parts of a label.
-    for el in layout["elements"].as_array().ok_or("Template ไม่ถูกต้อง")? {
+    for el in &visible {
         let kind = el["type"].as_str().unwrap_or("");
-        if !["text", "static", "price", "date", "barcode", "rect", "line"].contains(&kind)
+        let rich = windows && (matches!(kind,"image"|"qrcode") || (kind=="icon" && el["iconName"]=="heart"));
+        if (!rich && !["text", "static", "price", "date", "barcode", "rect", "line"].contains(&kind))
             || el["rotation"].as_f64().unwrap_or(0.0) != 0.0
             || el["opacity"].as_f64().unwrap_or(1.0) != 1.0
         {
             return Err("แบบนี้มีองค์ประกอบที่ Auto headless ยังรองรับไม่ครบ ให้ใช้ Manual หรือเลือกแบบ text/price/barcode/rect/line ที่ไม่หมุน".into());
         }
+    }
+    if layout["designMode"] == "preprint" {
+        elements[0].preprinted_paper = Some(true);
     }
     Ok((size, elements))
 }
@@ -347,7 +348,7 @@ pub struct BulkRules {
     rules: Vec<PrintRule>,
     preferences: Value,
 }
-async fn persist_bulk(pool: &SqlitePool, body: BulkRules) -> Result<()> {
+async fn persist_bulk(pool: &SqlitePool, mut body: BulkRules) -> Result<()> {
     let branch=crate::storage::configured_branch(pool).await;
     if branch.is_empty() || body.branch!=branch || body.preferences["branch"].as_str()!=Some(branch.as_str()) {
         return Err("สาขาของการตั้งค่าต้องตรงกับแหล่งข้อมูล StoreFront".into());
@@ -355,7 +356,11 @@ async fn persist_bulk(pool: &SqlitePool, body: BulkRules) -> Result<()> {
     let old=rules(pool).await?;
     let mut ids=std::collections::HashSet::new();
     let mut codes=std::collections::HashSet::new();
-    for r in &body.rules {
+    for r in &mut body.rules {
+        if r.code.trim().is_empty() {
+            if let Some(previous) = old.iter().find(|x|x.id==r.id) { r.code.clone_from(&previous.code); }
+        }
+        r.code = r.code.trim().to_owned();
         if !ids.insert(r.id.clone()) {return Err("พบรหัสภายในซ้ำในชุดบันทึก".into());}
         if !r.code.trim().is_empty() && !codes.insert(r.code.trim().to_ascii_uppercase()) {
             return Err(format!("พบรหัส Profile \"{}\" ซ้ำกัน", r.code.trim()));
@@ -365,8 +370,7 @@ async fn persist_bulk(pool: &SqlitePool, body: BulkRules) -> Result<()> {
             if previous.branch!=branch {return Err("ไม่สามารถแก้ไข Profile ของสาขาอื่น".into());}
             // Allow stopping an existing rule even if its template/printer was removed or legacy code was empty.
             let mut stopped=previous.clone();stopped.enabled=false;
-            if r.code.trim().is_empty() { stopped.code = String::new(); }
-            if !r.enabled && serde_json::to_value(&stopped).unwrap()==serde_json::to_value(r).unwrap() {continue;}
+            if !r.enabled && serde_json::to_value(&stopped).unwrap()==serde_json::to_value(&*r).unwrap() {continue;}
         }
         validate_rule(pool,r).await.map_err(|e|format!("{}: {}",r.name,e))?;
     }
@@ -486,7 +490,7 @@ async fn candidates_for_target(
             .await
             .map_err(|e| e.to_string())?
             .items;
-    let (_, els) = load_layout_for(pool, &target.size, &target.template).await?;
+    let (_, els) = load_layout_for(pool, &target.size, &target.template, target.ip.is_empty()).await?;
     let (price_date, verify_promo) = match r.source.as_str() {
         "PRICE_CHG" => (target_date.clone(), false),
         "PROMO_END_REVERT" => (crate::delta_engine::next_day(&target_date), true),
@@ -635,14 +639,20 @@ async fn insert_job(
     status: &str,
     units: Vec<(String, Value)>,
 ) -> Result<String> {
+    let mut tx = pool.begin().await.map_err(|e|e.to_string())?;
+    let id = insert_job_rows(&mut tx,source,name,config,dedup,status,units).await?;
+    tx.commit().await.map_err(|e|e.to_string())?;
+    Ok(id)
+}
+async fn insert_job_rows(conn: &mut sqlx::SqliteConnection, source: &str, name: &str,
+    config: Value, dedup: Option<&str>, status: &str, units: Vec<(String,Value)>) -> Result<String> {
     let id = uid();
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     // An overlapping invocation of the same Profile must not create a second
     // active job. Terminal jobs do not block a deliberate later reprint.
     let inserted=sqlx::query("INSERT OR IGNORE INTO ABPrintJob(id,dedup,source,name,status,created,config,total) SELECT ?,?,?,?,?,?,?,? WHERE ? != 'PROFILE' OR NOT EXISTS (SELECT 1 FROM ABPrintJob WHERE source='PROFILE' AND upper(json_extract(config,'$.code'))=upper(?) AND status NOT IN ('SUBMITTED','EMPTY','CANCELLED'))")
       .bind(&id).bind(dedup).bind(source).bind(name).bind(status).bind(now()).bind(config.to_string()).bind(units.len() as i64)
       .bind(source).bind(config["code"].as_str().unwrap_or(""))
-      .execute(&mut *tx).await.map_err(|e|e.to_string())?;
+      .execute(&mut *conn).await.map_err(|e|e.to_string())?;
     if inserted.rows_affected() == 0 {
         return Err("งานนี้มีอยู่ในคิวแล้ว กรุณาตรวจสถานะงานเดิมก่อนเรียกซ้ำ".into());
     }
@@ -652,11 +662,10 @@ async fn insert_job(
             .bind(n as i64)
             .bind(kind)
             .bind(payload.to_string())
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await
             .map_err(|e| e.to_string())?;
     }
-    tx.commit().await.map_err(|e| e.to_string())?;
     Ok(id)
 }
 pub async fn enqueue_rule(State(st): State<AppState>, Json(body): Json<Value>) -> Response {
@@ -1169,8 +1178,22 @@ mod tests {
             put(&p,&format!("ruleSince:{}",id),"2020-01-01").await.unwrap();
             let mut stopped=r;stopped.enabled=false;rs.push(stopped);
         }
+        ensure_schema(&p).await.unwrap();
         (p,rs)
     }
+    #[tokio::test]
+    async fn legacy_profile_codes_survive_insertion_deletion_and_restart() {
+        let (pool,_) = bulk_fixture().await;
+        let codes = || sqlx::query_as::<_,(String,String)>("SELECT id,json_extract(config,'$.code') FROM ABPrintRule ORDER BY id");
+        assert_eq!(codes().fetch_all(&pool).await.unwrap(),[("a".into(),"001".into()),("b".into(),"002".into())]);
+        sqlx::query("DELETE FROM ABPrintRule WHERE id='a'").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO ABPrintRule SELECT '0',json_remove(json_set(config,'$.id','0'),'$.code') FROM ABPrintRule WHERE id='b'")
+            .execute(&pool).await.unwrap();
+        ensure_schema(&pool).await.unwrap();
+        ensure_schema(&pool).await.unwrap();
+        assert_eq!(codes().fetch_all(&pool).await.unwrap(),[("0".into(),"001".into()),("b".into(),"002".into())]);
+    }
+
     #[tokio::test]
     async fn auto_rules_ignore_manual_and_retired_shared_settings() {
         let (p, _) = bulk_fixture().await;
@@ -1477,13 +1500,16 @@ pub async fn run_profile_api(State(st): State<AppState>, Json(body): Json<Value>
     if key.is_empty() {
         return err("กรุณาระบุรหัส Profile ที่ต้องการสั่งพิมพ์");
     }
-    match enqueue_profile(&st.pool, &key).await {
+    match prepare_profile_job(&st.pool, &key, true).await {
         Ok(res) => Json(res).into_response(),
         Err(e) => err(e),
     }
 }
 
 pub async fn enqueue_profile(pool: &SqlitePool, profile_code_or_id: &str) -> Result<Value> {
+    prepare_profile_job(pool, profile_code_or_id, false).await
+}
+async fn prepare_profile_job(pool: &SqlitePool, profile_code_or_id: &str, reprint: bool) -> Result<Value> {
     let needle = profile_code_or_id.trim();
     if needle.is_empty() {
         return Err("กรุณาระบุรหัส Profile".into());
@@ -1501,16 +1527,20 @@ pub async fn enqueue_profile(pool: &SqlitePool, profile_code_or_id: &str) -> Res
     );
     let today = Local::now().format("%Y-%m-%d").to_string();
     let targets = effective_targets(&r);
-    let mut total_items = 0usize;
-    let mut units: Vec<(String, Value)> = Vec::new();
-
+    let mut prepared = Vec::new();
     for target in &targets {
-        let (lbs, elements) = load_layout_for(pool, &target.size, &target.template).await?;
-        let items = candidates_for_target(pool, &r, target).await?;
-        total_items += items.len();
-        if items.is_empty() {
-            continue;
-        }
+        let layout = load_layout_for(pool, &target.size, &target.template, target.ip.is_empty()).await?;
+        prepared.push((layout, candidates_for_target(pool, &r, target).await?));
+    }
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.map_err(|e|e.to_string())?;
+    let mut total_items = 0;
+    let mut skipped_items = 0;
+    let mut units = Vec::new();
+    for (idx,(target,((lbs,elements),items))) in targets.iter().zip(prepared).enumerate() {
+        let scope = json!(["profile",r.id,idx]).to_string();
+        let previous: std::collections::HashMap<String,String> = sqlx::query_as::<_,(String,String)>(
+            "SELECT barcode,hash FROM ABPrintWatermark WHERE rule=?").bind(&scope)
+            .fetch_all(&mut *tx).await.map_err(|e|e.to_string())?.into_iter().collect();
         let route = ResolvedPrinterRoute {
             lbs_code: target.size.clone(),
             pri_type: "1".into(),
@@ -1521,11 +1551,24 @@ pub async fn enqueue_profile(pool: &SqlitePool, profile_code_or_id: &str) -> Res
             lan_port: target.port,
             dpi: target.dpi,
         };
-        let mut pages: Vec<Value> = vec![];
-        for it in &items {
-            let ctx = it.context.clone().ok_or("ไม่มี snapshot ข้อมูลป้าย")?;
-            for _ in 0..target.quantity {
-                pages.push(ctx.clone());
+        let mut pages = Vec::new();
+        for it in items {
+            let key = json!([it.pdt_code,it.bar_code]).to_string();
+            use sha2::{Digest,Sha256};
+            let hash = format!("{:x}",Sha256::digest(json!([target_date,r.source,target,lbs,it.price_hash]).to_string()));
+            // Each transport acknowledgement records the last copy accepted for this label.
+            // A cancelled, partially submitted run can resume without repeating its first copies.
+            let sent_copies = if reprint { 0 } else {
+                previous.get(&key).and_then(|value|value.rsplit_once(':'))
+                    .filter(|(saved,_)|*saved == hash)
+                    .and_then(|(_,copies)|copies.parse::<i64>().ok()).unwrap_or(0)
+            };
+            if sent_copies >= target.quantity { skipped_items += 1; continue; }
+            total_items += 1;
+            let ctx = it.context.ok_or("ไม่มี snapshot ข้อมูลป้าย")?;
+            for copy in sent_copies + 1..=target.quantity {
+                let mark = json!({"rule":scope,"barcode":key,"hash":format!("{hash}:{copy}")});
+                pages.push((ctx.clone(),mark));
             }
         }
         let page_size = if target.ip.is_empty() {
@@ -1538,8 +1581,8 @@ pub async fn enqueue_profile(pool: &SqlitePool, profile_code_or_id: &str) -> Res
                 "route": route,
                 "size": lbs,
                 "elements": elements,
-                "contexts": chunk,
-                "marks": [],
+                "contexts": chunk.iter().map(|(ctx,_)|ctx).collect::<Vec<_>>(),
+                "marks": chunk.iter().map(|(_,mark)|mark).collect::<Vec<_>>(),
                 "date": today
             });
             units.push(("AUTO".into(), payload));
@@ -1548,18 +1591,10 @@ pub async fn enqueue_profile(pool: &SqlitePool, profile_code_or_id: &str) -> Res
 
     let job_name = format!("[{}] {}", r.code, r.name);
     let initial_status = if units.is_empty() { "EMPTY" } else { "QUEUED" };
-    let job_id = insert_job(
-        pool,
-        "PROFILE",
-        &job_name,
-        serde_json::to_value(&r).unwrap_or(Value::Null),
-        None,
-        initial_status,
-        units.clone(),
-    )
-    .await?;
-
-    if units.is_empty() {
+    let total_units=units.len();
+    let job_id=insert_job_rows(&mut tx,"PROFILE",&job_name,serde_json::to_value(&r).map_err(|e|e.to_string())?,None,initial_status,units).await?;
+    tx.commit().await.map_err(|e|e.to_string())?;
+    if total_units==0 {
         return Ok(json!({
             "ok": true,
             "jobId": job_id,
@@ -1568,6 +1603,7 @@ pub async fn enqueue_profile(pool: &SqlitePool, profile_code_or_id: &str) -> Res
             "targetDate": target_date,
             "status": "EMPTY",
             "itemCount": 0,
+            "alreadySubmittedItems": skipped_items,
             "totalUnits": 0,
             "printedUnits": 0
         }));
@@ -1575,8 +1611,8 @@ pub async fn enqueue_profile(pool: &SqlitePool, profile_code_or_id: &str) -> Res
 
     Ok(json!({
         "ok": true, "jobId": job_id, "profileCode": r.code, "profileName": r.name,
-        "targetDate": target_date, "status": "QUEUED", "itemCount": total_items,
-        "totalUnits": units.len(), "printedUnits": 0
+        "targetDate": target_date, "status": "QUEUED", "itemCount": total_items, "alreadySubmittedItems": skipped_items,
+        "totalUnits": total_units, "printedUnits": 0
     }))
 }
 

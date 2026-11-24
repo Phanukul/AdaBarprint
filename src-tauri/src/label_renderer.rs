@@ -316,6 +316,47 @@ pub async fn cancel_stale_spooler_jobs(printer_name: &str) {
     }
 }
 
+/// Prepare QR matrices and image bytes before opening the Windows print document.
+#[cfg(target_os = "windows")]
+async fn windows_artwork(elements: &[TemplateElement], items: &[Value]) -> Result<Vec<Value>, String> {
+    use base64::Engine;
+    let mut cache = std::collections::HashMap::<(String,String),Value>::new();
+    let mut output = Vec::new();
+    for item in items {
+        let mut art = serde_json::Map::new();
+        for (index, el) in elements.iter().enumerate() {
+            if !matches!(el.el_type.as_str(),"image"|"qrcode") { continue; }
+            let value = el.src.as_deref().or_else(||el.field.as_deref()
+                .and_then(|path|path.split('.').try_fold(item,|parent,key|parent.get(key)))
+                .and_then(Value::as_str)).or(el.text.as_deref()).unwrap_or("").trim();
+            if value.is_empty() { continue; }
+            let key = (el.el_type.clone(),value.to_owned());
+            if !cache.contains_key(&key) {
+                let data = if el.el_type=="qrcode" {
+                    let qr = qrcode::QrCode::new(value.as_bytes()).map_err(|e|e.to_string())?;
+                    let width = qr.width();
+                    let rows:Vec<String> = qr.to_colors().chunks(width).map(|row|row.iter().map(|c|
+                        if *c==qrcode::Color::Dark {'1'} else {'0'}).collect()).collect();
+                    json!(rows)
+                } else if value.starts_with("data:image/") {
+                    let (meta,bytes)=value.split_once(',').ok_or("ข้อมูลรูปภาพไม่ครบ")?;
+                    if !meta.ends_with(";base64") {return Err("รูปภาพต้องใช้ base64".into());}
+                    json!(bytes)
+                } else {
+                    let response=crate::routes::get_image_proxy(axum::extract::Query(crate::routes::ImageProxyQuery{url:value.to_owned()})).await;
+                    if !response.status().is_success(){return Err("อ่านรูปสินค้าสำหรับงานพิมพ์ไม่ได้".into());}
+                    let bytes=axum::body::to_bytes(response.into_body(),16*1024*1024).await.map_err(|e|e.to_string())?;
+                    json!(base64::engine::general_purpose::STANDARD.encode(bytes))
+                };
+                cache.insert(key.clone(),data);
+            }
+            art.insert(index.to_string(),cache[&key].clone());
+        }
+        output.push(Value::Object(art));
+    }
+    Ok(output)
+}
+
 /// Headless Windows GDI page chunk print directly from `TemplateElement` + product `ctx` (no React UI / browser needed!).
 #[cfg(target_os = "windows")]
 pub(crate) async fn send_windows_headless_page(
@@ -325,6 +366,7 @@ pub(crate) async fn send_windows_headless_page(
     page_items: &[Value],
     doc_name: &str,
 ) -> Result<(), String> {
+    let artwork = windows_artwork(elements,page_items).await?;
     let job_uid = Uuid::new_v4().to_string();
     let tmp_dir = std::env::temp_dir().join(format!("ada_auto_prt_{}", job_uid));
     let _ = std::fs::create_dir_all(&tmp_dir);
@@ -360,6 +402,8 @@ pub(crate) async fn send_windows_headless_page(
         "offsetX": lbs.and_then(|s| s.FCLbsOffsetX).unwrap_or(0.0),
         "offsetY": lbs.and_then(|s| s.FCLbsOffsetY).unwrap_or(0.0),
         "elements": elements,
+        "artwork": artwork,
+        "preprinted": elements.iter().any(|el|el.preprinted_paper==Some(true)),
         "items": page_items
     });
     let payload_path = tmp_dir.join("page.json");
@@ -486,7 +530,8 @@ $doc.add_PrintPage({
     $cellHpx = [float]([double]$cfg.cellH * $mmToDisplay)
 
     if ($els.Count -gt 0) {
-      foreach ($el in $els) {
+      for ($ei=0; $ei -lt $els.Count; $ei++) {
+        $el=$els[$ei]
         if (-not (Test-When $it $el.when)) { continue }
         $ex = [double]($(if ($null -ne $el.x) { $el.x } else { 0 })) * $mmToDisplay + $cellX
         $ey = [double]($(if ($null -ne $el.y) { $el.y } else { 0 })) * $mmToDisplay + $cellY
@@ -494,7 +539,47 @@ $doc.add_PrintPage({
         $eh = [double]($(if ($null -ne $el.height) { $el.height } else { 6 })) * $mmToDisplay
         $tp = [string]$el.type
 
-        if ($tp -eq 'rect') {
+        if ($tp -eq 'qrcode') {
+          $entry=$cfg.artwork[$idx].PSObject.Properties[[string]$ei]
+          if (!$entry) { continue }
+          $matrix=@($entry.Value)
+          $side=[Math]::Min($ew,$eh)
+          $step=$side/($matrix.Count+8)
+          $left=$ex+($ew-$side)/2
+          $top=$ey+($eh-$side)/2
+          $g.FillRectangle([Drawing.Brushes]::White,[single]$left,[single]$top,[single]$side,[single]$side)
+          for ($y=0;$y -lt $matrix.Count;$y++) {
+            for ($x=0;$x -lt $matrix.Count;$x++) {
+              if ($matrix[$y][$x] -eq '1') {
+                $g.FillRectangle([Drawing.Brushes]::Black,[single]($left+($x+4)*$step),[single]($top+($y+4)*$step),[single]$step,[single]$step)
+              }
+            }
+          }
+        } elseif ($tp -eq 'image') {
+          $entry=$cfg.artwork[$idx].PSObject.Properties[[string]$ei]
+          if (!$entry) { continue }
+          $stream=[IO.MemoryStream]::new([Convert]::FromBase64String($entry.Value))
+          try {
+            $img=[Drawing.Image]::FromStream($stream)
+            try {
+              $ratio=[Math]::Min($ew/$img.Width,$eh/$img.Height)
+              $w=$ratio*$img.Width
+              $h=$ratio*$img.Height
+              $g.DrawImage($img,[single]($ex+($ew-$w)/2),[single]($ey+($eh-$h)/2),[single]$w,[single]$h)
+            } finally {$img.Dispose()}
+          } finally {$stream.Dispose()}
+        } elseif ($tp -eq 'icon' -and $el.iconName -eq 'heart') {
+          $path=[Drawing.Drawing2D.GraphicsPath]::new()
+          $path.AddBezier(12,21,10,19,2,13,2,8)
+          $path.AddBezier(2,8,2,2,8,1,12,5)
+          $path.AddBezier(12,5,16,1,22,2,22,8)
+          $path.AddBezier(22,8,22,13,14,19,12,21)
+          $side=[Math]::Min($ew,$eh)
+          $matrix=[Drawing.Drawing2D.Matrix]::new([single]($side/24),0,0,[single]($side/24),[single]($ex+($ew-$side)/2),[single]($ey+($eh-$side)/2))
+          $path.Transform($matrix)
+          $pen=[Drawing.Pen]::new([Drawing.ColorTranslator]::FromHtml($el.color),[single]($side/12))
+          try {$g.DrawPath($pen,$path)} finally {$pen.Dispose();$matrix.Dispose();$path.Dispose()}
+        } elseif ($tp -eq 'rect') {
           if ($el.fill -and $el.fill -ne '#FFFFFF') {
             $br = Resolve-Brush $el.fill ([System.Drawing.Brushes]::LightYellow)
             $g.FillRectangle($br, [float]$ex, [float]$ey, [float]$ew, [float]$eh)
@@ -561,7 +646,7 @@ $doc.add_PrintPage({
         }
       }
     }
-    $g.DrawRectangle([System.Drawing.Pens]::Gainsboro, [float]$cellX, [float]$cellY, $cellWpx, $cellHpx)
+    if (!$cfg.preprinted) { $g.DrawRectangle([System.Drawing.Pens]::Gainsboro, [float]$cellX, [float]$cellY, $cellWpx, $cellHpx) }
   }
   $script:itemOffset = $endIdx
   $e.HasMorePages = ($script:itemOffset -lt $allItems.Count)
@@ -1091,6 +1176,21 @@ pub async fn cleanup_old_autoprint_data(pool: &SqlitePool, retention_days: i64) 
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os="windows")]
+    #[tokio::test]
+    async fn windows_qr_uses_each_products_field_and_a_full_module_matrix() {
+        let elements = serde_json::from_value::<Vec<super::TemplateElement>>(
+            serde_json::json!([{"type":"qrcode","field":"product.url"}])).unwrap();
+        let input = [serde_json::json!({"product":{"url":"https://example.test/P01"}}),
+                     serde_json::json!({"product":{"url":"https://example.test/P02"}})];
+        let artwork = super::windows_artwork(&elements,&input).await.unwrap();
+        assert_ne!(artwork[0],artwork[1]);
+        let rows = artwork[0]["0"].as_array().unwrap();
+        assert!(rows.len()>=21);
+        assert!(rows.iter().all(|r|r.as_str().unwrap().len()==rows.len()));
+        assert!(rows[0].as_str().unwrap().starts_with("1111111"));
+    }
+
     use super::*;
     use crate::db::ensure_label_schema;
     use sqlx::sqlite::SqlitePoolOptions;

@@ -14,6 +14,11 @@ pub struct TemplateElement {
     pub y: Option<f64>,
     pub width: Option<f64>,
     pub height: Option<f64>,
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    pub preprinted_paper: Option<bool>,
+    pub src: Option<String>,
+    #[serde(rename="iconName")]
+    pub icon_name: Option<String>,
     pub field: Option<String>,
     pub text: Option<String>,
     #[serde(rename = "fontSize")]
