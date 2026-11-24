@@ -513,6 +513,7 @@ function AdaBarprintWorkspace({
 
   const selectedTemplate=labelSizes.flatMap(size=>(size.templates||[]).map(t=>({...t,FTLbsCode:size.FTLbsCode}))).find(t=>t.FTLtmCode===selectedTemplateCode&&t.FTLbsCode===selectedLabelCode);
 
+  const [initialDesignTemplate, setInitialDesignTemplate] = useState('');
   const [designLabelCode, setDesignLabelCode] = useState('');
   const [selectedPrinterId, setSelectedPrinterId] = useState('');
 
@@ -1390,7 +1391,10 @@ function AdaBarprintWorkspace({
           row.price !== set.lines[i].price || row.priType !== set.lines[i].priType ||
           row.pdtName !== set.lines[i].pdtName || row.promoName !== set.lines[i].promoName ||
           JSON.stringify(row.ctx) !== JSON.stringify(set.lines[i].ctx));
-        checked.push({...set, review: changed ? 'ข้อมูลสินค้าเปลี่ยน กรุณาตรวจและอัปเดตชุด' : undefined});
+        const oldSheet = set.media.mode !== 'SINGLE' && set.units.some(unit => unit.kind === 'WINDOWS' &&
+          unit.payload.paperSize !== 'ROLL' && !unit.payload.sheetCheck);
+        checked.push({...set, review: changed ? 'ข้อมูลสินค้าเปลี่ยน กรุณาตรวจและอัปเดตชุด' :
+          oldSheet ? 'กรุณาเปิดแก้ไขชุดเดิมเพื่อยืนยันระยะขอบกระดาษ' : undefined});
       }
       setPrintSets(checked);
       setEditingSet('');
@@ -1478,6 +1482,8 @@ function AdaBarprintWorkspace({
               options:{dpi:lan.dpi,speed:lan.speed,darkness:lan.darkness}}});
             continue;
           }
+          const sheetCheck = manualSheetCheck(d.containerId === 'v5-capture-normal' ? a4Layout.normalLabelsCount : a4Layout.promoLabelsCount);
+          await verifyManualSheet(d.printer, d.tray, sheetCheck);
           const pageImages = await capturePagesToPngBase64(
             d.containerId,
             a4Layout.paperWidthMm,
@@ -1487,7 +1493,7 @@ function AdaBarprintWorkspace({
           queueUnits.push({ kind: 'WINDOWS', roll: rollGrid(d.containerId === 'v5-capture-normal' ? a4Layout.normalLabelsCount : a4Layout.promoLabelsCount), payload: {
               printerName: d.printer, trayName: d.tray, lbsCode: selectedLabelCode,
               lbsName: activeDriverMapping.lbsName, priTypeLabel: d.label, testMode: false,
-              pageImages, paperSize: a4Layout.paperSize,
+              pageImages, sheetCheck, paperSize: a4Layout.paperSize,
               paperWidthMm: a4Layout.paperWidthMm, paperHeightMm: a4Layout.paperHeightMm,
           }});
         }
@@ -1504,10 +1510,12 @@ function AdaBarprintWorkspace({
         await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 180))));
         for (const [containerId, rows, label] of [['v5-capture-normal', normalRows, 'ราคาปกติ'], ['v5-capture-promo', promoRows, 'โปรโมชั่น']] as const) {
           if (!rows.length) continue;
+          const sheetCheck = manualSheetCheck(containerId === 'v5-capture-normal' ? a4Layout.normalLabelsCount : a4Layout.promoLabelsCount);
+          await verifyManualSheet(name, printer?.tray || '', sheetCheck);
           const pageImages = await capturePagesToPngBase64(containerId, a4Layout.paperWidthMm, a4Layout.paperHeightMm,
             a4Layout.isRoll && /\bEZ[ -]?520\b/i.test(name));
           queueUnits.push({kind:'WINDOWS',roll:rollGrid(containerId === 'v5-capture-normal' ? a4Layout.normalLabelsCount : a4Layout.promoLabelsCount),payload:{printerName:name, trayName:printer?.tray||'', lbsCode:selectedLabelCode,
-            priTypeLabel:label,pageImages,paperSize:a4Layout.paperSize,paperWidthMm:a4Layout.paperWidthMm,paperHeightMm:a4Layout.paperHeightMm}});
+            priTypeLabel:label,pageImages,sheetCheck,paperSize:a4Layout.paperSize,paperWidthMm:a4Layout.paperWidthMm,paperHeightMm:a4Layout.paperHeightMm}});
         }
       }
       for (const unit of queueUnits) {
@@ -1701,6 +1709,7 @@ function AdaBarprintWorkspace({
         savedPaperWidthMm: savedW,
         savedPaperHeightMm: savedH,
         lbsGroup: ls?.FTLbsGroup,
+        savedCols: ls?.FNLbsCol, cellWidthMm: ls?.FCLbsWidth, gapHMm: ls?.FCLbsGapH,
         gapVMm: ls?.FCLbsGapV ?? 2,
       })
     );
@@ -1710,7 +1719,7 @@ function AdaBarprintWorkspace({
     selectedLabelSizeObj?.FCLbsPaperWidth,
     selectedLabelSizeObj?.FCLbsPaperHeight,
     selectedLabelSizeObj?.FTLbsGroup,
-    selectedLabelSizeObj?.FCLbsGapV,
+    selectedLabelSizeObj?.FCLbsGapV, selectedLabelSizeObj?.FNLbsCol, selectedLabelSizeObj?.FCLbsWidth, selectedLabelSizeObj?.FCLbsGapH,
     paperSizes,
   ]);
 
@@ -1833,6 +1842,55 @@ function AdaBarprintWorkspace({
   const fallbackPrinter = printers.find(p => p.id === selectedPrinterId)?.name || windowsPrinters[0]?.name;
   const normalTarget = activeDriverMapping?.normalPrinter || fallbackPrinter;
   const promoTarget = activeDriverMapping?.promoPrinter || fallbackPrinter;
+  const manualSheetCheck = (count: number) => a4Layout.isRoll || a4Layout.isSingle ? undefined : ({
+    count,
+    size: {
+      FTLbsCode: selectedLabelCode || '', FTLbsGroup: a4Layout.lbsGroup || '', FTLbsStaUse: '1',
+      FTLbsName: selectedLabelSizeObj?.FTLbsName || selectedLabelCode || 'ป้าย',
+      FCLbsWidth: a4Layout.widthMm, FCLbsHeight: a4Layout.heightMm,
+      FNLbsCol: a4Layout.cols, FNLbsRow: a4Layout.rows,
+      FCLbsMagLeft: a4Layout.magLeftMm, FCLbsMagTop: a4Layout.magTopMm,
+      FCLbsGapH: a4Layout.gapHMm, FCLbsGapV: a4Layout.gapVMm,
+      FCLbsOffsetX: printOffsetX, FCLbsOffsetY: printOffsetY,
+      FTLbsPaperSize: a4Layout.paperSize, FCLbsPaperWidth: a4Layout.paperWidthMm,
+      FCLbsPaperHeight: a4Layout.paperHeightMm,
+    },
+  });
+  async function verifyManualSheet(printerName: string, trayName: string, sheetCheck: ReturnType<typeof manualSheetCheck>) {
+    if (!sheetCheck) return;
+    const result = await printApi('/api/print/sheet-preview', {printerName, trayName, sheetCheck});
+    if (result.warning) throw new Error(printerName + ' · ' + result.warning);
+  }
+  const selectedPrinter = printers.find(p => p.id === selectedPrinterId);
+  const sheetRequests = (['nor','pmt'] as const).flatMap(key => {
+    const count = key === 'nor' ? a4Layout.normalLabelsCount : a4Layout.promoLabelsCount;
+    const printerName = key === 'nor' ? normalTarget : promoTarget;
+    const trayName = hasSplitPreview ? (key === 'nor' ? activeDriverMapping?.normalTray : activeDriverMapping?.promoTray) : selectedPrinter?.tray;
+    const sheetCheck = manualSheetCheck(count);
+    const lan = printers.some(p => p.name === printerName && p.enabled && p.ip !== 'Windows' && p.brand !== 'WINDOWS' && p.brand !== 'SAMSUNG');
+    return sendPrintOpen && count && sheetCheck && printerName && !lan ? [{ key, printerName, trayName: trayName || '', sheetCheck }] : [];
+  });
+  const sheetRequestKey = JSON.stringify(sheetRequests);
+  type AreaResult = { area?: {left:number; top:number; right:number; bottom:number}; warning?:string };
+  const [sheetChecks, setSheetChecks] = useState<Record<string, AreaResult>>({});
+  useEffect(() => {
+    const controller = new AbortController();
+    setSheetChecks({});
+    const requests = JSON.parse(sheetRequestKey) as typeof sheetRequests;
+    const timer = setTimeout(() => {
+      for (const request of requests) {
+        fetch('/api/print/sheet-preview', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(request), signal:controller.signal })
+          .then(async res => {
+            const result = await res.json();
+            if (!res.ok) throw new Error(result.error || 'ตรวจพื้นที่พิมพ์ไม่ได้');
+            return result as AreaResult;
+          })
+          .catch(e => ({ warning: String(e instanceof Error ? e.message : e) }))
+          .then(result => { if (!controller.signal.aborted) setSheetChecks(prev => ({...prev, [request.key]:result})); });
+      }
+    }, 250);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [sheetRequestKey]);
   const sharedRoll = a4Layout.isRoll && normalRows.length > 0 && promoRows.length > 0 &&
     normalTarget === promoTarget && windowsPrinters.some(p => p.name === normalTarget) &&
     (activeDriverMapping?.normalTray || '') === (activeDriverMapping?.promoTray || '');
@@ -1842,7 +1900,8 @@ function AdaBarprintWorkspace({
     return Array.from({ length: Math.ceil(labels.length / a4Layout.cols) }, (_, i) =>
       labels.slice(i * a4Layout.cols, (i + 1) * a4Layout.cols));
   }, [sharedRoll, a4Layout]);
-  const previewSheetCount = hasSplitPreview && !sharedRoll
+  const separatePreview = !sharedRoll && (hasSplitPreview || (normalRows.length > 0 && promoRows.length > 0 && selectedPrinter && ['WINDOWS','SAMSUNG'].includes(selectedPrinter.brand)));
+  const previewSheetCount = separatePreview
     ? a4Layout.normalPages.length + a4Layout.promoPages.length
     : a4Layout.pages.length;
 
@@ -2083,6 +2142,8 @@ function AdaBarprintWorkspace({
     keyPrefix: string, start: number, end: number
   ) => {
     const sheetFactor = sheetPreviewScale;
+    const paperCheck = sheetChecks[keyPrefix === 'all' ? (normalRows.length ? 'nor' : 'pmt') : keyPrefix];
+    const area = paperCheck?.area;
     if (a4Layout.isRoll) {
       const totalLabelsInRoll = sheetPages.reduce((acc, p) => acc + p.length, 0);
       const totalRollLenMm = Number(
@@ -2163,6 +2224,10 @@ function AdaBarprintWorkspace({
             boxSizing: 'border-box',
           }}
         >
+          {area && <div aria-hidden="true" className="absolute z-10 pointer-events-none border border-dashed border-amber-700" style={{
+            left: `${area.left * sheetFactor}mm`, top: `${area.top * sheetFactor}mm`, width: `${(area.right-area.left)*sheetFactor}mm`, height: `${(area.bottom-area.top)*sheetFactor}mm`,
+            boxShadow: '0 0 0 100vmax rgba(190,55,35,0.16)',
+          }} />}
           {showSheetGuide && sheetBgUrl && (
             <img
               src={sheetBgUrl}
@@ -2239,6 +2304,7 @@ function AdaBarprintWorkspace({
 
       return (
         <div key={`${keyPrefix}-${pageIdx}`} className="space-y-1.5">
+          {pageIdx === 0 && paperCheck?.warning && <p role="alert" className="rounded bg-amber-50 p-2 text-sm text-amber-900">{paperCheck.warning}</p>}
           <div className="text-xs font-medium text-muted-foreground flex flex-wrap items-center justify-between gap-2">
             <span>
               {a4Layout.isSingle ? 'ดวงที่' : 'แผ่นที่'} {pageIdx + 1} / {sheetPages.length} ({pageItems.length} ดวง · ขนาดจริง {a4Layout.widthMm}×{a4Layout.heightMm} mm · {a4Layout.isSingle ? 'เดี่ยว 1:1' : `กระดาษ ${a4Layout.paperWidthMm}×${a4Layout.paperHeightMm} mm`})
@@ -2339,7 +2405,7 @@ function AdaBarprintWorkspace({
             {sidebarOpen && <span className="truncate">พิมพ์ป้าย</span>}
           </button>
 
-          <button type="button" onClick={()=>{setDesignLabelCode('');setActiveMenu('design');}} title="Design (ออกแบบป้าย)" className={`w-full flex items-center gap-2.5 px-2.5 py-2.5 rounded-md text-sm font-medium ${activeMenu==='design'?'bg-[#007a87] text-white':'text-slate-300 hover:bg-slate-700/50'}`}><Palette className="h-4 w-4 shrink-0"/>{sidebarOpen&&<span>Design (ออกแบบป้าย)</span>}</button>
+          <button type="button" onClick={()=>{setInitialDesignTemplate('');setDesignLabelCode('');setActiveMenu('design');}} title="Design (ออกแบบป้าย)" className={`w-full flex items-center gap-2.5 px-2.5 py-2.5 rounded-md text-sm font-medium ${activeMenu==='design'?'bg-[#007a87] text-white':'text-slate-300 hover:bg-slate-700/50'}`}><Palette className="h-4 w-4 shrink-0"/>{sidebarOpen&&<span>Design (ออกแบบป้าย)</span>}</button>
 
           <button type="button" onClick={()=>{setSettingsSubTab('jobs');setActiveMenu('jobs');}} title="ประวัติการพิมพ์" className={`w-full flex items-center gap-2.5 px-2.5 py-2.5 rounded-md text-sm font-medium ${activeMenu==='jobs'?'bg-[#007a87] text-white':'text-slate-300 hover:bg-slate-700/50'}`}><Calendar className="h-4 w-4 shrink-0"/>{sidebarOpen&&<span>ประวัติการพิมพ์</span>}</button>
 
@@ -2547,6 +2613,7 @@ function AdaBarprintWorkspace({
           preprints={preprints}
           labelFields={labelFields}
           companyInfo={companyInfo}
+          initialTemplateCode={initialDesignTemplate}
           selectedLabelCode={designLabelCode}
           onChangeLabelCode={setDesignLabelCode}
           customLayouts={customLayouts}
@@ -2883,11 +2950,12 @@ function AdaBarprintWorkspace({
                       <Button
                         type="submit"
                         size="sm"
-                        className="h-8 text-xs bg-[#007a87] hover:bg-[#00606b] text-white"
+                        className="relative h-8 text-xs bg-[#007a87] hover:bg-[#00606b] text-white"
                         disabled={movingData}
+                        aria-busy={movingData}
                       >
-                        {movingData && <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />}
-                        แสดงข้อมูล
+                        <span className={movingData ? 'opacity-0' : undefined}>แสดงข้อมูล</span>
+                        {movingData && <span aria-hidden="true" className="absolute"><Loader2 className="size-3.5 animate-spin" /></span>}
                       </Button>
                     </div>
                   </div>
@@ -2914,6 +2982,7 @@ function AdaBarprintWorkspace({
                         <button
                           type="button"
                           onClick={() => {
+                            setInitialDesignTemplate(selectedTemplateCode);
                             setDesignLabelCode(selectedLabelCode);
                             setActiveMenu('design');
                           }}
@@ -3652,7 +3721,7 @@ function AdaBarprintWorkspace({
                       </details>}
                     </div>
                   </div>
-                ) : hasSplitPreview && !sharedRoll ? (
+                ) : separatePreview ? (
                   <div className="space-y-6 py-2 px-1">
                     {a4Layout.normalPages.length > 0 && (
                       <div className="space-y-3">

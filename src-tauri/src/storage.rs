@@ -744,7 +744,7 @@ pub async fn save_config(State(st):State<AppState>,Json(mut cfg):Json<Config>) -
     let canonical=match std::fs::canonicalize(cfg.path.trim()) { Ok(p)=>p.to_string_lossy().trim_start_matches("\\\\?\\").to_string(),Err(e)=>return error(e)};
     let result:Result<(),sqlx::Error>=async {
         let mut tx=st.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let pending:i64=sqlx::query_scalar("SELECT COUNT(*) FROM ABPrintJob WHERE status NOT IN ('SUBMITTED','EMPTY','CANCELLED')").fetch_one(&mut *tx).await?;
+        let pending:i64=sqlx::query_scalar("SELECT COUNT(*) FROM ABPrintJob WHERE status NOT IN ('SUBMITTED','EMPTY','NO_MATCH','ALREADY_SUBMITTED','FAILED','CANCELLED')").fetch_one(&mut *tx).await?;
         if pending>0 { return Err(sqlx::Error::Protocol("ยังมีงานค้าง กรุณาจัดการคิวก่อนเปลี่ยนแหล่งข้อมูล".into())); }
         let source:Option<(String,String,i64)>=sqlx::query_as("SELECT mode,config,lease_until FROM ABSource WHERE id=1").fetch_optional(&mut *tx).await?;
         if source.as_ref().map(|v|v.2>chrono::Utc::now().timestamp()).unwrap_or(false){return Err(sqlx::Error::Protocol("รอการดาวน์โหลดที่กำลังทำงานให้เสร็จก่อนเปลี่ยนแหล่งข้อมูล".into()));}

@@ -51,6 +51,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { labelFormatOptions } from '@/lib/labelFormatOptions';
+import { previewLayout } from '@/lib/previewLayout';
 import { SearchableSelect } from '@/components/ui/searchable-select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
@@ -122,6 +124,7 @@ export interface SheetConfigMeta {
 }
 
 export interface DesignerLabelSizeItem {
+  templates?: Array<{ FTLtmCode: string; FTLtmName: string; FTLtmPriType: string; FTLtmLayout?: string | null }>;
   FTLbsCode: string;
   FTLbsGroup?: string;
   FTLbsName: string | null;
@@ -185,6 +188,7 @@ interface LabelDesignerProps {
   preprints?: PreprintRecord[];
   labelFields?: LabelFieldRecord[];
   companyInfo?: CompanyInfoRecord;
+  initialTemplateCode?: string;
   selectedLabelCode: string;
   onChangeLabelCode: (code: string) => void;
   customLayouts: Record<string, LabelDesignLayout>;
@@ -309,6 +313,7 @@ export function LabelDesigner({
   preprints = [],
   labelFields = [],
   companyInfo,
+  initialTemplateCode,
   selectedLabelCode,
   onChangeLabelCode,
   customLayouts,
@@ -365,7 +370,31 @@ export function LabelDesigner({
     []
   );
 
-  const [priType, setPriType] = useState<'1' | '2'>('1');
+  const [priType, setPriType] = useState<'1' | '2'>(() => labelSizes.find(s => s.FTLbsCode === selectedLabelCode)?.templates?.find(t => t.FTLtmCode === initialTemplateCode)?.FTLtmPriType === '2' ? '2' : '1');
+  const formatOptions = useMemo(() => labelFormatOptions(activeSizes, true), [activeSizes]);
+  const [requestedTemplate, setRequestedTemplate] = useState(initialTemplateCode || '');
+  const sizeTemplates = activeSizes.find(size => size.FTLbsCode === effectiveLbsCode)?.templates;
+  const modeTemplates = sizeTemplates?.filter(t => (t.FTLtmPriType === '2' ? '2' : '1') === priType &&
+    formatOptions.some(option => option.value === t.FTLtmCode));
+  const designCode = `${effectiveLbsCode}-DESIGN-${priType === '2' ? 'PMT' : 'NOR'}`;
+  const selectedTemplate = modeTemplates?.find(t => t.FTLtmCode === requestedTemplate)
+    || modeTemplates?.find(t => t.FTLtmCode === designCode) || modeTemplates?.[0];
+  function selectFormat(value: string) {
+    if (value.startsWith('legacy:')) {
+      setRequestedTemplate('');
+      onChangeLabelCode(value.slice(7));
+      return;
+    }
+    for (const size of activeSizes) {
+      const template = size.templates?.find(t => t.FTLtmCode === value);
+      if (template) {
+        setRequestedTemplate(value);
+        setPriType(template.FTLtmPriType === '2' ? '2' : '1');
+        onChangeLabelCode(size.FTLbsCode);
+        return;
+      }
+    }
+  }
   const [doc, setDoc] = useState<LabelDesignLayout>(() =>
     effectiveLbsCode
       ? buildStarterLayout(
@@ -398,6 +427,7 @@ export function LabelDesigner({
       savedPaperWidthMm: currentSize.FCLbsPaperWidth ?? undefined,
       savedPaperHeightMm: currentSize.FCLbsPaperHeight ?? undefined,
       lbsGroup: currentSize.FTLbsGroup,
+      savedCols: currentSize.FNLbsCol, cellWidthMm: currentSize.FCLbsWidth, gapHMm: currentSize.FCLbsGapH,
       gapVMm: currentSize.FCLbsGapV ?? 2,
     })
   );
@@ -462,10 +492,22 @@ export function LabelDesigner({
   const layoutKey = effectiveLbsCode ? `${effectiveLbsCode}:${priType}` : '';
   const savedLayoutForKey = layoutKey ? customLayouts[layoutKey] : undefined;
 
+  const templateDoc = useMemo(() => {
+    const layout = previewLayout(selectedTemplate?.FTLtmLayout, currentSize);
+    return layout && selectedTemplate ? {
+      ...layout, lbsCode: effectiveLbsCode, priType, designMode: layout.designMode || 'full',
+      name: selectedTemplate.FTLtmName,
+      backgroundColor: layout.backgroundColor ?? '#FFFFFF',
+      borderColor: layout.borderColor ?? '#CBD5E1',
+      borderWidth: layout.borderWidth ?? 0,
+      borderRadius: layout.borderRadius ?? 0,
+    } : null;
+  }, [selectedTemplate, currentSize, effectiveLbsCode, priType]);
+
   useEffect(() => {
     const nextDoc: LabelDesignLayout = !effectiveLbsCode
       ? buildEmptyBlankDoc(priType)
-      : savedLayoutForKey
+      : templateDoc ? structuredClone(templateDoc) : savedLayoutForKey
         ? JSON.parse(JSON.stringify(savedLayoutForKey))
         : buildStarterLayout(
             effectiveLbsCode,
@@ -484,6 +526,7 @@ export function LabelDesigner({
   }, [
     layoutKey,
     savedLayoutForKey,
+    templateDoc,
     effectiveLbsCode,
     priType,
     currentSize.FCLbsWidth,
@@ -1058,6 +1101,7 @@ export function LabelDesigner({
     try {
       const ok = await onSaveLayout({ ...doc, customDesign: true }, resolvePaperMeta());
       if (ok) {
+        setRequestedTemplate(designCode);
         setDirty(false);
       }
       return ok;
@@ -1517,7 +1561,8 @@ export function LabelDesigner({
       } else {
         toast.info('ยกเลิกการแก้ไขที่ยังไม่บันทึกแล้ว');
       }
-      const fresh = isBlankWorkspace
+      if (callServer) setRequestedTemplate('');
+      const fresh = !callServer && templateDoc ? structuredClone(templateDoc) : isBlankWorkspace
         ? buildEmptyBlankDoc(priType)
         : buildStarterLayout(
             effectiveLbsCode,
@@ -1538,7 +1583,7 @@ export function LabelDesigner({
   };
 
   const handleReset = () => {
-    if (customLayouts[layoutKey]) {
+    if (customLayouts[layoutKey] && (!selectedTemplate || selectedTemplate.FTLtmCode === designCode)) {
       setResetConfirmOpen(true);
       return;
     }
@@ -1567,6 +1612,7 @@ export function LabelDesigner({
         savedPaperWidthMm: sheetConfigDraft?.paperWidthMm || doc.preprint?.paperWidthMm || currentSize.FCLbsPaperWidth || undefined,
         savedPaperHeightMm: sheetConfigDraft?.paperHeightMm || doc.preprint?.paperHeightMm || currentSize.FCLbsPaperHeight || undefined,
         lbsGroup: currentSize.FTLbsGroup,
+        savedCols: sheetConfigDraft?.cols ?? currentSize.FNLbsCol, cellWidthMm: doc.width, gapHMm: sheetConfigDraft?.gapH ?? currentSize.FCLbsGapH,
         gapVMm: sheetConfigDraft?.gapV ?? currentSize.FCLbsGapV ?? 2,
       })
     );
@@ -1576,7 +1622,8 @@ export function LabelDesigner({
     currentSize.FTLbsGroup,
     currentSize.FCLbsPaperWidth,
     currentSize.FCLbsPaperHeight,
-    currentSize.FCLbsGapV,
+    currentSize.FCLbsGapV, currentSize.FCLbsGapH, currentSize.FNLbsCol, doc.width,
+    sheetConfigDraft?.cols, sheetConfigDraft?.gapH, sheetConfigDraft?.gapV,
     sheetConfigDraft?.paperWidthMm,
     sheetConfigDraft?.paperHeightMm,
     doc.preprint?.paperWidthMm,
@@ -1729,7 +1776,7 @@ export function LabelDesigner({
     toast.success(`จัดกึ่งกลางแผ่นแล้ว (ขอบซ้าย/ขวา ${ml} mm · ขอบบน/ล่าง ${mt} mm)`);
   };
 
-  const hasSavedCustom = Boolean(customLayouts[layoutKey]);
+  const hasSavedCustom = Boolean(customLayouts[layoutKey]) && (!selectedTemplate || selectedTemplate.FTLtmCode === designCode);
 
   return (
     <div className="flex flex-col h-[calc(100vh-58px)] min-h-[640px] bg-slate-100 select-none">
@@ -1762,43 +1809,13 @@ export function LabelDesigner({
             <div className="flex items-center gap-2">
               <Label className="text-xs font-semibold text-slate-600 whitespace-nowrap">รูปแบบป้าย:</Label>
               <SearchableSelect
-                value={effectiveLbsCode || '__BLANK__'}
-                onValueChange={(v) => onChangeLabelCode(v === '__BLANK__' ? '' : v)}
-                placeholder="เลือกรูปแบบป้าย..."
-                searchPlaceholder="ค้นหารหัสหรือชื่อรูปแบบป้าย..."
+                value={selectedTemplate?.FTLtmCode || (effectiveLbsCode ? `legacy:${effectiveLbsCode}` : '')}
+                onValueChange={selectFormat}
+                placeholder={effectiveLbsCode ? currentSize.FTLbsName || effectiveLbsCode : 'เลือกรูปแบบป้าย...'}
+                searchPlaceholder="ค้นหารหัสหรือชื่อแบบป้าย..."
                 className="h-8 w-[340px] max-w-[42vw] text-xs"
                 dropdownMinWidth={380}
-                options={[
-                  {
-                    value: '__BLANK__',
-                    label: 'หน้ากระดาษเปล่า (เริ่มออกแบบใหม่)',
-                    keywords: 'หน้าว่าง เปล่า new blank',
-                    badge: 'หน้าว่าง',
-                    badgeClassName: 'bg-emerald-100 text-emerald-800',
-                  },
-                  ...activeSizes.map((l) => {
-                    const saved = customLayouts[`${l.FTLbsCode}:1`] || customLayouts[`${l.FTLbsCode}:2`];
-                    const badge =
-                      saved?.designMode === 'preprint'
-                        ? 'Pre-Print'
-                        : saved || l.FTLbsGroup === '2'
-                          ? 'ออกแบบเอง'
-                          : 'STD';
-                    const badgeClassName =
-                      badge === 'Pre-Print'
-                        ? 'bg-amber-100 text-amber-800'
-                        : badge === 'ออกแบบเอง'
-                          ? 'bg-sky-100 text-sky-800'
-                          : 'bg-slate-100 text-slate-600';
-                    return {
-                      value: l.FTLbsCode,
-                      label: `${l.FTLbsCode} — ${l.FTLbsName}`,
-                      keywords: `${l.FTLbsCode} ${l.FTLbsName || ''} ${l.FCLbsWidth}x${l.FCLbsHeight}`,
-                      badge,
-                      badgeClassName,
-                    };
-                  }),
-                ]}
+                options={formatOptions}
               />
               <Button
                 type="button"

@@ -1930,8 +1930,9 @@ pub async fn post_windows_direct_print(
         let pri_type_label = body.pri_type_label.unwrap_or_else(|| "ปกติ".to_string());
         let test_mode = body.test_mode.unwrap_or(false);
         let page_images = body.page_images.unwrap_or_default();
-        let (paper_size, def_pw, def_ph, paper_win_kind) =
+        let (configured_code, def_pw, def_ph, _) =
             lookup_paper_size(&st.pool, body.paper_size.as_deref()).await;
+        let paper_size = body.paper_size.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or(&configured_code);
         let paper_width_mm = body.paper_width_mm.filter(|v| *v >= 10.0).unwrap_or(def_pw);
         let paper_height_mm = body.paper_height_mm.filter(|v| *v >= 10.0).unwrap_or(def_ph);
 
@@ -1947,7 +1948,7 @@ pub async fn post_windows_direct_print(
             "priTypeLabel": pri_type_label,
             "testMode": test_mode,
             "pageImages": page_images,
-            "paperSize": paper_win_kind,
+            "paperSize": paper_size,
             "paperCode": paper_size,
             "paperWidthMm": paper_width_mm,
             "paperHeightMm": paper_height_mm,
@@ -1989,54 +1990,11 @@ $doc.PrintController = New-Object System.Drawing.Printing.StandardPrintControlle
 $doc.OriginAtMargins = $false
 
 # ตั้งค่าขนาดกระดาษต่อ Job (A4 / B5 JIS / B5 ISO / Letter / Custom / Roll)
-$targetPaper = $null
-$wantPaper = $(if ($cfg.paperSize) { [string]$cfg.paperSize } else { 'A4' })
-$pwMm = $(if ($cfg.paperWidthMm) { [double]$cfg.paperWidthMm } else { 210.0 })
-$phMm = $(if ($cfg.paperHeightMm) { [double]$cfg.paperHeightMm } else { 297.0 })
-if ($wantPaper -eq 'B5_JIS' -or $wantPaper -eq 'B5') {
-  $targetPaper = $doc.PrinterSettings.PaperSizes | Where-Object { $_.PaperName -match '\bB5\b' -and $_.PaperName -match 'JIS' } | Select-Object -First 1
-  if (-not $targetPaper) {
-    $targetPaper = $doc.PrinterSettings.PaperSizes | Where-Object { $_.Kind -eq [System.Drawing.Printing.PaperKind]::B5 -or $_.PaperName -match '\bB5\b' } | Select-Object -First 1
-  }
-} elseif ($wantPaper -eq 'B5_ISO') {
-  $targetPaper = $doc.PrinterSettings.PaperSizes | Where-Object { $_.PaperName -match 'ISO.*B5|B5.*ISO' } | Select-Object -First 1
-  if (-not $targetPaper) {
-    $targetPaper = $doc.PrinterSettings.PaperSizes | Where-Object { $_.Kind -eq [System.Drawing.Printing.PaperKind]::B5 -or $_.PaperName -match '\bB5\b' } | Select-Object -First 1
-  }
-} elseif ($wantPaper -eq 'LETTER') {
-  $targetPaper = $doc.PrinterSettings.PaperSizes | Where-Object { $_.Kind -eq [System.Drawing.Printing.PaperKind]::Letter -or $_.PaperName -match '^\s*Letter\b' } | Select-Object -First 1
-} elseif ($wantPaper -eq 'CUSTOM') {
-  $targetPaper = New-Object System.Drawing.Printing.PaperSize('AdaCustom', [int][Math]::Round($pwMm / 0.254), [int][Math]::Round($phMm / 0.254))
-}
-if (-not $targetPaper -and $wantPaper -eq 'A4') {
-  $targetPaper = $doc.PrinterSettings.PaperSizes | Where-Object { $_.Kind -eq [System.Drawing.Printing.PaperKind]::A4 } | Select-Object -First 1
-  if (-not $targetPaper) {
-    $targetPaper = $doc.PrinterSettings.PaperSizes | Where-Object { $_.PaperName -match '^\s*A4\b' } | Select-Object -First 1
-  }
-}
-if (-not $targetPaper) {
-  $targetPaper = New-Object System.Drawing.Printing.PaperSize($wantPaper, [int][Math]::Round($pwMm / 0.254), [int][Math]::Round($phMm / 0.254))
-}
-if ($targetPaper) {
-  $doc.PrinterSettings.DefaultPageSettings.PaperSize = $targetPaper
-  $doc.DefaultPageSettings.PaperSize = $targetPaper
-}
-
-# เลือกถาดกระดาษลง DEVMODE ของ Job นี้โดยตรง (ไม่ยุ่ง PrintConfiguration ส่วนกลาง -> ไม่มี race condition)
-$matchedTray = $null
+# APPLY_PAGE_SETTINGS
 $ticketBin = ''
-if ($cfg.trayName -and $cfg.trayName.Trim() -ne '') {
-  $wantTray = $cfg.trayName.Trim()
-  $matchedTray = $doc.PrinterSettings.PaperSources | Where-Object { $_.SourceName.Trim() -ieq $wantTray } | Select-Object -First 1
-  if (-not $matchedTray) {
-    $matchedTray = $doc.PrinterSettings.PaperSources | Where-Object { $_.SourceName.Trim() -like ($wantTray + '*') } | Select-Object -First 1
-  }
-  if ($matchedTray) {
-    $doc.PrinterSettings.DefaultPageSettings.PaperSource = $matchedTray
-    $doc.DefaultPageSettings.PaperSource = $matchedTray
-    $resolvedTray = $matchedTray.SourceName
-    $ticketBin = "DEVMODE:RawKind=" + $matchedTray.RawKind
-  }
+if ($matchedTray) {
+  $resolvedTray = $matchedTray.SourceName
+  $ticketBin = "DEVMODE:RawKind=" + $matchedTray.RawKind
 }
 
 $outFile = ''
@@ -2124,7 +2082,7 @@ $doc.Print()
 
         let script_path = tmp_dir.join("print.ps1");
         let mut ps_bytes = vec![0xEFu8, 0xBB, 0xBF];
-        ps_bytes.extend_from_slice(ps_script.as_bytes());
+        ps_bytes.extend_from_slice(ps_script.replace("# APPLY_PAGE_SETTINGS", include_str!("windows_page_settings.ps1")).as_bytes());
         if let Err(e) = std::fs::write(&script_path, &ps_bytes) {
             return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
         }

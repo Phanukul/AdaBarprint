@@ -52,7 +52,11 @@ const OFFSET_CHOICES = [
   { value: -1, label: 'เมื่อวาน (-1)' },
 ] as const;
 
-function ProfileLabelSheets({ items, layout, size, single }: {
+type PrintableArea = { left: number; top: number; right: number; bottom: number };
+
+function ProfileLabelSheets({ items, layout, size, single, area, legacy }: {
+  area?: PrintableArea;
+  legacy: boolean;
   items: Candidate[];
   layout: LabelDesignLayout | null;
   size?: Props['allLabelSizes'][number];
@@ -68,8 +72,14 @@ function ProfileLabelSheets({ items, layout, size, single }: {
   const mm = (n: number) => `${n * scale}mm`;
   const width = size.FCLbsWidth;
   const height = size.FCLbsHeight;
+  const offsetX = size.FCLbsOffsetX ?? 0;
+  const offsetY = size.FCLbsOffsetY ?? 0;
+  const marginLeft = (size.FCLbsMagLeft ?? (legacy ? 0 : 3)) + (legacy ? 0 : offsetX);
+  const marginTop = (size.FCLbsMagTop ?? (legacy ? 0 : 3)) + (legacy ? 0 : offsetY);
+  const gapH = size.FCLbsGapH ?? (legacy ? 0 : 2);
+  const gapV = size.FCLbsGapV ?? (legacy ? 0 : 2);
   return <div className="overflow-x-auto border-t bg-slate-100 p-3">
-    <p className="mb-3 text-sm">{labels.length} ดวง · {count} {single ? 'ป้ายเดี่ยว' : 'หน้า'}</p>
+    <p className="mb-3 text-sm">{labels.length} ดวง · {count} {single ? 'ป้ายเดี่ยว' : 'หน้า'}{area && ' · เส้นประคือขอบพื้นที่พิมพ์'}</p>
     {Array.from({ length: count }, (_, page) => (
       <figure key={page} className="mx-auto mb-4 w-fit" style={{ contentVisibility: 'auto' }}>
         <figcaption className="mb-1 text-xs text-slate-600">หน้า {page + 1} / {count}</figcaption>
@@ -80,16 +90,20 @@ function ProfileLabelSheets({ items, layout, size, single }: {
           {labels.slice(page * capacity, (page + 1) * capacity).map((item, slot) => (
             <div key={slot} className="absolute overflow-hidden" style={{
               width: mm(width), height: mm(height),
-              left: mm(single ? 0 : (size.FCLbsMagLeft || 0) + (slot % cols) * (width + (size.FCLbsGapH || 0))),
-              top: mm(single ? 0 : (size.FCLbsMagTop || 0) + Math.floor(slot / cols) * (height + (size.FCLbsGapV || 0))),
+              left: mm(single ? 0 : marginLeft + (slot % cols) * (width + gapH)),
+              top: mm(single ? 0 : marginTop + Math.floor(slot / cols) * (height + gapV)),
             }}>
               {item.context
-                ? <div style={{ transform: `translate(${mm(size.FCLbsOffsetX || 0)}, ${mm(size.FCLbsOffsetY || 0)})` }}>
+                ? <div style={{ transform: `translate(${mm(legacy || single ? offsetX : 0)}, ${mm(legacy || single ? offsetY : 0)})` }}>
                     <LabelPreview lbsCode={size.FTLbsCode} labelW={width} labelH={height} customLayout={layout} scale={scale} line={{ barcode: item.barCode, priType: item.priType, ctx: item.context }} />
                   </div>
                 : <span>ไม่มีข้อมูลป้าย {item.barCode}</span>}
             </div>
           ))}
+          {area && <div aria-hidden="true" className="pointer-events-none absolute border border-dashed border-amber-700" style={{
+            left: mm(area.left), top: mm(area.top), width: mm(area.right - area.left), height: mm(area.bottom - area.top),
+            boxShadow: '0 0 0 100vmax rgba(190, 55, 35, 0.16)',
+          }} />}
         </div>
       </figure>
     ))}
@@ -168,7 +182,7 @@ export function AutoPrintBulkSettings(
     targetDate: string;
     loading: boolean;
     error?: string;
-    groups: Array<{ template: string; size: string; printer: string; items: Candidate[]; single?: boolean }>;
+    groups: Array<{ template: string; size: string; printer: string; items: Candidate[]; printableArea?: PrintableArea; paperWarning?: string; single?: boolean }>;
   } | null>(null);
 
   const printerOptions = useMemo(
@@ -386,7 +400,7 @@ export function AutoPrintBulkSettings(
     const pending = {
       view,
       title: `[${rule.code}] ${rule.name}`,
-      targetDate: targetDatePreview(rule.offsetDays),
+      targetDate: '',
       groups: [],
       loading: !msg,
       error: msg,
@@ -400,7 +414,7 @@ export function AutoPrintBulkSettings(
       const groups = Array.isArray(res.groups)
         ? res.groups
         : [{ template: payload.template, size: payload.size, printer: payload.printer, items: Array.isArray(res.items) ? res.items : [] }];
-      setPreview(current => current === pending ? { ...pending, groups: groups.map((group: NonNullable<typeof preview>['groups'][number], index: number) => ({ ...group, single: Boolean(payload.targets?.[index]?.ip ?? payload.ip) })), loading: false } : current);
+      setPreview(current => current === pending ? { ...pending, targetDate: res.targetDate, groups: groups.map((group: NonNullable<typeof preview>['groups'][number], index: number) => ({ ...group, single: Boolean(payload.targets?.[index]?.ip ?? payload.ip) })), loading: false } : current);
     } catch (e) {
       setPreview(current => current === pending ? { ...pending, error: String(e instanceof Error ? e.message : e), loading: false } : current);
     }
@@ -411,7 +425,9 @@ export function AutoPrintBulkSettings(
     setError('');
     try {
       const res = await api('/api/print-center/run-profile', { code: rule.code, id: rule.id });
-      if (res.status === 'EMPTY') {
+      if (res.status === 'ALREADY_SUBMITTED') {
+        toast.info(`ส่งครบแล้วสำหรับวันที่ ${res.targetDate}`);
+      } else if (res.status === 'NO_MATCH' || res.status === 'EMPTY') {
         toast.info(`Profile [${rule.code}]: ไม่พบรายการสินค้าที่เข้าเงื่อนไข ณ วันที่ ${res.targetDate}`);
       } else {
         toast.success(`เพิ่ม Profile [${rule.code}] เข้าคิวแล้ว (${res.itemCount} รายการ / ${res.totalUnits} ชุด) ตรวจสถานะการส่งได้ในคิวงานพิมพ์`);
@@ -768,7 +784,7 @@ export function AutoPrintBulkSettings(
         <DialogContent className="max-h-[85dvh] grid-rows-[auto_minmax(0,1fr)] sm:max-w-5xl">
           <DialogHeader className="pr-6">
             <DialogTitle>{preview.view === 'labels' ? 'ตัวอย่างป้าย' : 'ผลตรวจรายการสินค้า'} {preview.title}</DialogTitle>
-            <DialogDescription>วันเป้าหมาย {preview.targetDate}</DialogDescription>
+            <DialogDescription>{preview.targetDate && `วันเป้าหมาย ${preview.targetDate}`}</DialogDescription>
           </DialogHeader>
           <div className="min-w-0 space-y-3 overflow-auto">
             {preview.loading && <p role="status">กำลังตรวจสินค้า…</p>}
@@ -785,12 +801,13 @@ export function AutoPrintBulkSettings(
                     </dl>
                     <span className="font-semibold">เข้าเงื่อนไข {grp.items.length} รายการ</span>
                   </div>
+                  {grp.paperWarning && <p role="alert" className="border-t border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">{grp.paperWarning}</p>}
                   {grp.items.length === 0 ? (
                     <p className="text-xs text-slate-500 p-4 text-center">
-                      ไม่พบรายการสินค้าที่เข้าเงื่อนไขในวันเป้าหมาย {preview.targetDate}
+                      ไม่พบรายการสินค้าที่เข้าเงื่อนไขใน{preview.targetDate && `วันเป้าหมาย ${preview.targetDate}`}
                     </p>
                   ) : preview.view === 'labels' ? (
-                    <ProfileLabelSheets items={grp.items} size={size} single={Boolean(grp.single)} layout={previewLayout(tmpl?.FTLtmLayout, size)} />
+                    <ProfileLabelSheets area={grp.printableArea} legacy={grp.template.startsWith('legacy:')} items={grp.items} size={size} single={Boolean(grp.single)} layout={previewLayout(tmpl?.FTLtmLayout, size)} />
                   ) : (
                     <div className="max-h-[52dvh] overflow-auto">
                       <table className="w-full min-w-[40rem] border-separate border-spacing-0 text-left text-sm">

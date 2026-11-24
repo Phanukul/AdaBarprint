@@ -131,7 +131,7 @@ async fn four_scheduler_profiles_enqueue_snapshots_without_sending() {
  sqlx::query("INSERT OR REPLACE INTO TCNMLabelTmpl(FTLtmCode,FTLbsCode,FTLtmName,FTLtmPriType,FTLtmStaUse,FTLtmLayout) VALUES('REGRESSION','SH-100x38','Regression','1','1',?)")
   .bind(layout.to_string()).execute(&pool).await.unwrap();
  for event in ["PRICE_CHG","NEW_PDT","PROMO_START","PROMO_END_REVERT"] {
-  let rule=json!({"id":event,"code":event,"name":event,"enabled":true,"branch":"B1","source":event,"time":"","days":"","size":"SH-100x38","template":"REGRESSION","printer":"SIMULATION ONLY","tray":"","protocol":"ZPL","ip":"127.0.0.1","port":1,"dpi":203,"quantity":1,"catchUp":false,"offsetDays":0});
+  let rule=json!({"id":event,"code":event,"name":event,"enabled":true,"branch":"B1","source":event,"time":"","days":"","size":"SH-100x38","template":"REGRESSION","printer":"SIMULATION ONLY","tray":"","protocol":"ZEBRA","ip":"127.0.0.1","port":1,"dpi":203,"quantity":1,"catchUp":false,"offsetDays":0});
   sqlx::query("INSERT INTO ABPrintRule(id,config) VALUES(?,?)").bind(event).bind(rule.to_string()).execute(&pool).await.unwrap();
   let result=print_center::enqueue_profile(&pool,event).await.unwrap();
   assert_eq!(result["status"],"QUEUED","{event}: {result}");
@@ -151,8 +151,8 @@ async fn four_scheduler_profiles_enqueue_snapshots_without_sending() {
   sqlx::query("INSERT INTO ABPrintWatermark VALUES(?,?,?)").bind(mark["rule"].as_str()).bind(mark["barcode"].as_str()).bind(mark["hash"].as_str()).execute(&pool).await.unwrap();
  }
  sqlx::query("UPDATE ABPrintJob SET status='SUBMITTED' WHERE id=?").bind(&job).execute(&pool).await.unwrap();
- let repeated=print_center::enqueue_profile(&pool,"NEW_PDT").await.unwrap();
- assert_eq!(repeated["status"],"EMPTY");
+ let repeated=print_center::execute_profile_cli(&pool,"NEW_PDT").await.unwrap();
+ assert_eq!(repeated["status"],"ALREADY_SUBMITTED");
  let explicit=print_center::run_profile_api(State(routes::AppState{pool:pool.clone()}),Json(json!({"code":"NEW_PDT"}))).await;
  assert!(explicit.status().is_success());
  let explicit:serde_json::Value=serde_json::from_slice(&axum::body::to_bytes(explicit.into_body(),65536).await.unwrap()).unwrap();
@@ -171,6 +171,32 @@ async fn four_scheduler_profiles_enqueue_snapshots_without_sending() {
  // A fifth event is rejected, including configurations left by older builds.
  sqlx::query("INSERT INTO ABPrintRule(id,config) SELECT 'old',json_set(config,'$.id','old','$.code','OLD','$.source','ALL_PRODUCTS') FROM ABPrintRule LIMIT 1").execute(&pool).await.unwrap();
  assert!(print_center::enqueue_profile(&pool,"OLD").await.unwrap_err().contains("ประเภทข้อมูล"));
+ // The same target date drives preview, every paper group, and the CLI result.
+ let mut rule: serde_json::Value = serde_json::from_str(&sqlx::query_scalar::<_,String>(
+     "SELECT config FROM ABPrintRule WHERE id='NEW_PDT'").fetch_one(&pool).await.unwrap()).unwrap();
+ rule["id"]=json!("dated"); rule["code"]=json!("DATED");
+ let target=json!({"size":"SH-100x38","template":"REGRESSION","printer":"SIMULATION ONLY","ip":"127.0.0.1","port":1});
+ rule["targets"]=json!([target,target]);
+ for offset in [-1,0,1] {
+     rule["offsetDays"]=json!(offset);
+     let expected=delta_engine::target_date_with_offset(chrono::NaiveDate::parse_from_str(&today,"%Y-%m-%d").unwrap(),offset);
+     let response=print_center::preview_rule(State(routes::AppState{pool:pool.clone()}),Json(serde_json::from_value(rule.clone()).unwrap())).await;
+     let preview:serde_json::Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),65536).await.unwrap()).unwrap();
+     assert_eq!(preview["targetDate"],expected,"{preview}");
+     let groups=preview["groups"].as_array().unwrap();
+     assert_eq!(groups.len(),2);
+     for group in groups { assert_eq!(group["items"].as_array().unwrap().len(),usize::from(offset==0)); }
+ }
+ sqlx::query("INSERT INTO ABPrintRule(id,config) VALUES('dated',?)").bind(rule.to_string()).execute(&pool).await.unwrap();
+ let empty=print_center::execute_profile_cli(&pool,"DATED").await.unwrap();
+ assert_eq!(empty["status"],"NO_MATCH");
+ // Break only the fixture's product-date column and verify that retry is possible after repair.
+ sqlx::query("ALTER TABLE TCNMPdt RENAME COLUMN FDCreateOn TO broken_created").execute(&mut c).await.unwrap();
+ let error=print_center::execute_profile_cli(&pool,"DATED").await.unwrap_err();
+ let history:(String,String)=sqlx::query_as("SELECT status,error FROM ABPrintJob WHERE json_extract(config,'$.code')='DATED' ORDER BY seq DESC LIMIT 1").fetch_one(&pool).await.unwrap();
+ assert_eq!(history,("FAILED".into(),error));
+ sqlx::query("ALTER TABLE TCNMPdt RENAME COLUMN broken_created TO FDCreateOn").execute(&mut c).await.unwrap();
+ assert_eq!(print_center::execute_profile_cli(&pool,"DATED").await.unwrap()["status"],"NO_MATCH");
  c.close().await.unwrap(); pool.close().await;
 }
 
@@ -221,4 +247,71 @@ async fn branch_only_sync_accepts_one_agency_and_rejects_mixed_prices(){
  }
  assert!(standalone::apply_snapshots(std::path::Path::new(&path),&cfg,&bundles).await.unwrap_err().contains("Agency"));
  c.close().await.unwrap();pool.close().await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "requires the Samsung driver; uses an isolated print queue"]
+async fn samsung_preview_and_queue_agree_for_both_a4_layouts() {
+    let (pool, mut master) = fixture().await;
+    seed_product(&mut master).await;
+    let today = chrono::Local::now().date_naive().to_string();
+    price(&mut master, 1, &today, "PCS", "", 110.0).await;
+    for (code, width, cols, left, top, copies) in [("006",100,2,8,8,5),("001",50,4,3,3,16)] {
+        sqlx::query("UPDATE TCNMLabelSize SET FCLbsWidth=?, FNLbsCol=?, FCLbsMagLeft=?, FCLbsMagTop=?, FCLbsGapH=2 WHERE FTLbsCode='SH-100x38'")
+            .bind(width).bind(cols).bind(left).bind(top).execute(&pool).await.unwrap();
+        let rule=json!({"id":code,"code":code,"name":"Samsung A4 test","branch":"B1","source":"PRICE_CHG","size":"SH-100x38","template":"legacy:SH-100x38","printer":"Samsung M262x 282x Series Class Driver","quantity":copies,"tray":"Automatically Select","protocol":"WINDOWS","ip":"","time":"","days":"","dpi":600,"port":9100,"enabled":true,"catchUp":false});
+        sqlx::query("INSERT INTO ABPrintRule(id,config) VALUES(?,?)").bind(code).bind(rule.to_string()).execute(&pool).await.unwrap();
+        let response=print_center::preview_rule(State(routes::AppState{pool:pool.clone()}),Json(serde_json::from_value(rule).unwrap())).await;
+        let preview:serde_json::Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),65536).await.unwrap()).unwrap();
+        let group=&preview["groups"][0];
+        assert!(group["printableArea"]["right"].as_f64().unwrap() < 210.0);
+        let warning=group["paperWarning"].as_str().unwrap();
+        assert!(warning.contains(&format!("ขวา คอลัมน์ {cols}")));
+        if code == "001" { assert!(warning.contains("บน แถว 1")); }
+        let error=print_center::enqueue_profile(&pool,code).await.unwrap_err();
+        assert!(error.contains(warning));
+        let failed:(String,i64)=sqlx::query_as("SELECT status,total FROM ABPrintJob WHERE json_extract(config,'$.code')=? ORDER BY seq DESC LIMIT 1").bind(code).fetch_one(&pool).await.unwrap();
+        assert_eq!(failed,("FAILED".into(),0));
+        sqlx::query("UPDATE TCNMLabelSize SET FCLbsMagLeft=5,FCLbsMagTop=5,FCLbsGapH=0 WHERE FTLbsCode='SH-100x38'").execute(&pool).await.unwrap();
+        let fixed=print_center::enqueue_profile(&pool,code).await.unwrap();
+        assert_eq!(fixed["status"],"QUEUED");
+        assert_eq!(fixed["printedUnits"],0);
+    }
+    master.close().await.unwrap(); pool.close().await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "reads Samsung page settings without starting a print worker"]
+async fn manual_sheet_checks_match_preview_and_reject_mixed_jobs_atomically() {
+    let (pool, master) = fixture().await;
+    let printer = "Samsung M262x 282x Series Class Driver";
+    let mut size=json!({"FTLbsCode":"QA","FTLbsGroup":"","FTLbsName":"QA","FTLbsStaUse":"1",
+        "FCLbsWidth":100,"FCLbsHeight":38,"FNLbsCol":2,"FNLbsRow":7,"FCLbsMagLeft":5,"FCLbsMagTop":5,
+        "FCLbsGapH":0,"FCLbsGapV":2,"FTLbsPaperSize":"A4","FCLbsPaperWidth":210,"FCLbsPaperHeight":297});
+    let unit=|s:&serde_json::Value| json!({"kind":"WINDOWS","payload":{"printerName":printer,"trayName":"","paperSize":s["FTLbsPaperSize"],
+        "sheetCheck":{"size":s,"count":2},"pageImages":["isolated-test-page"]}});
+    let fits=unit(&size);
+    size["FCLbsOffsetX"]=json!(3);
+    let clipped=unit(&size);
+    let response=print_center::preview_manual_sheet(Json(serde_json::from_value(clipped["payload"].clone()).unwrap())).await;
+    let result:serde_json::Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),16384).await.unwrap()).unwrap();
+    assert!(result["warning"].as_str().unwrap().contains("ขวา คอลัมน์ 2"));
+    let state=routes::AppState{pool:pool.clone()};
+    let rejected=print_center::enqueue_manual(State(state.clone()),Json(json!({"units":[fits,clipped]}))).await;
+    assert!(!rejected.status().is_success());
+    let jobs:i64=sqlx::query_scalar("SELECT COUNT(*) FROM ABPrintJob").fetch_one(&pool).await.unwrap();
+    assert_eq!(jobs,0);
+    size["FTLbsPaperSize"]=json!("A4_L");
+    size["FCLbsPaperWidth"]=json!(297);
+    size["FCLbsPaperHeight"]=json!(210);
+    size["FCLbsWidth"]=json!(135);
+    let wide=unit(&size);
+    let preview=print_center::preview_manual_sheet(Json(serde_json::from_value(wide["payload"].clone()).unwrap())).await;
+    let landscape:serde_json::Value=serde_json::from_slice(&axum::body::to_bytes(preview.into_body(),16384).await.unwrap()).unwrap();
+    assert!(landscape["area"]["right"].as_f64().unwrap()>285.0,"{landscape}");
+    assert!(landscape["warning"].is_null(),"{landscape}");
+    assert!(print_center::enqueue_manual(State(state),Json(json!({"units":[fits,wide]}))).await.status().is_success());
+    master.close().await.unwrap(); pool.close().await;
 }

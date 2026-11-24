@@ -447,39 +447,7 @@ if ($isVirtual -and $cfg.pdfTarget) {
   $doc.PrinterSettings.PrintFileName = [string]$cfg.pdfTarget
 }
 
-$targetPaper = $null
-$wantPaper = $(if ($cfg.paperSize) { [string]$cfg.paperSize } else { 'A4' })
-$pwMm = $(if ($cfg.paperWidthMm) { [double]$cfg.paperWidthMm } else { 210.0 })
-$phMm = $(if ($cfg.paperHeightMm) { [double]$cfg.paperHeightMm } else { 297.0 })
-if ($wantPaper -eq 'B5_JIS' -or $wantPaper -eq 'B5') {
-  $targetPaper = $doc.PrinterSettings.PaperSizes | Where-Object { $_.PaperName -match '\bB5\b' -and $_.PaperName -match 'JIS' } | Select-Object -First 1
-} elseif ($wantPaper -eq 'B5_ISO') {
-  $targetPaper = $doc.PrinterSettings.PaperSizes | Where-Object { $_.PaperName -match 'ISO.*B5|B5.*ISO' } | Select-Object -First 1
-} elseif ($wantPaper -eq 'LETTER') {
-  $targetPaper = $doc.PrinterSettings.PaperSizes | Where-Object { $_.Kind -eq [System.Drawing.Printing.PaperKind]::Letter } | Select-Object -First 1
-} elseif ($wantPaper -eq 'A4') {
-  $targetPaper = $doc.PrinterSettings.PaperSizes | Where-Object { $_.Kind -eq [System.Drawing.Printing.PaperKind]::A4 -or $_.PaperName -match '^\s*A4\b' } | Select-Object -First 1
-}
-if (-not $targetPaper) {
-  $targetPaper = New-Object System.Drawing.Printing.PaperSize($wantPaper, [int][Math]::Round($pwMm / 0.254), [int][Math]::Round($phMm / 0.254))
-}
-if ($targetPaper) {
-  $doc.PrinterSettings.DefaultPageSettings.PaperSize = $targetPaper
-  $doc.DefaultPageSettings.PaperSize = $targetPaper
-}
-
-$matchedTray = $null
-if ($cfg.trayName -and $cfg.trayName.Trim() -ne '') {
-  $wantTray = $cfg.trayName.Trim()
-  $matchedTray = $doc.PrinterSettings.PaperSources | Where-Object { $_.SourceName.Trim() -ieq $wantTray } | Select-Object -First 1
-  if (-not $matchedTray) {
-    $matchedTray = $doc.PrinterSettings.PaperSources | Where-Object { $_.SourceName.Trim() -like ($wantTray + '*') } | Select-Object -First 1
-  }
-  if ($matchedTray) {
-    $doc.PrinterSettings.DefaultPageSettings.PaperSource = $matchedTray
-    $doc.DefaultPageSettings.PaperSource = $matchedTray
-  }
-}
+# APPLY_PAGE_SETTINGS
 
 $doc.add_QueryPageSettings({
   param($sender, $e)
@@ -678,7 +646,7 @@ $doc.Print()
 "#;
     let ps_path = tmp_dir.join("print_page.ps1");
     let mut ps_bytes = vec![0xEFu8, 0xBB, 0xBF];
-    ps_bytes.extend_from_slice(ps_script.as_bytes());
+    ps_bytes.extend_from_slice(ps_script.replace("# APPLY_PAGE_SETTINGS", include_str!("windows_page_settings.ps1")).as_bytes());
     std::fs::write(&ps_path, &ps_bytes).map_err(|e| e.to_string())?;
 
     let mut cmd = tokio::process::Command::new("powershell");

@@ -110,17 +110,23 @@ export function getDefaultPreviewMediaConfig(params: {
   savedPaperHeightMm?: number;
   lbsGroup?: string;
   gapVMm?: number;
+  savedCols?: number | null;
+  cellWidthMm?: number;
+  gapHMm?: number | null;
 }): PreviewMediaConfig {
   const saved = params.savedPaperSize || 'A4';
   const refFrame: PreviewRefFrame =
     saved === 'B5_JIS' || saved === 'B5_ISO' || saved === 'A5' || saved === 'A5_L' || saved === 'A6'
       ? 'A4'
       : 'NONE';
+  const gap = Math.max(0, params.gapHMm ?? 2);
+  const fitCols = params.savedPaperWidthMm && params.cellWidthMm
+    ? Math.max(1, Math.floor((params.savedPaperWidthMm - 4 + gap + 0.01) / (params.cellWidthMm + gap))) : 1;
   return {
     mode: params.lbsGroup === '2' && saved === 'ROLL' ? 'ROLL' : 'AUTO',
     customWidthMm: params.savedPaperWidthMm || 210,
     customHeightMm: params.savedPaperHeightMm || 297,
-    rollCols: 1,
+    rollCols: saved === 'ROLL' ? Math.max(1, Math.min(8, fitCols, params.savedCols || fitCols)) : 1,
     rollGapV: Math.max(0, params.gapVMm ?? 2),
     refFrame,
   };
@@ -181,7 +187,7 @@ export function computeEffectivePreviewLayout(
   if (effectiveMode === 'ROLL') {
     const cols = Math.max(1, Math.min(8, Math.round(cfg.rollCols || 1)));
     const linerPad = 2;
-    const gapH = cols > 1 ? Math.max(1, base.gapHMm || 2) : 0;
+    const gapH = cols > 1 ? Math.max(0, base.gapHMm ?? 2) : 0;
     const gapV = Math.max(0, cfg.rollGapV ?? 2);
     const rollW = Number((linerPad * 2 + cols * w + (cols - 1) * gapH).toFixed(1));
     const singleRowPrintH = Number((h + gapV).toFixed(1));

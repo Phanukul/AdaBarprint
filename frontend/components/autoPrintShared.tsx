@@ -21,7 +21,7 @@ export interface Rule {
   size:string; template:string; printer:string; tray:string; protocol:string; ip:string; port:number; dpi:number;
   quantity:number; catchUp:boolean; offsetDays:number; targets?:ProfileTarget[];
 }
-interface Job { id:string; seq:number; source:string; name:string; status:string; created:string; error?:string; completed:number; total:number }
+interface Job { id:string; seq:number; source:string; name:string; status:string; created:string; targetDate?:string; error?:string; completed:number; total:number }
 export type EventProfile=Pick<Rule,'template'|'size'|'printer'|'tray'|'protocol'|'ip'|'port'|'dpi'>;
 export interface Center { separateSettingsVersion?:number; master?:{connected:boolean;autoReady:boolean;branch:string;path:string;error?:string}; rules:Rule[]; jobs:Job[]; heartbeat:string; legacySchedules:number; bulkVersion?:number; bulkSettings?:unknown }
 export interface Template { FTLtmCode:string; FTLtmName:string; FTLbsCode:string; FTLtmPriType:string; FTLtmLayout?:string | null }
@@ -47,7 +47,7 @@ const purposes:Record<string,{title:string;description:string;name:string}>={
   PROMO_END_REVERT:{title:'สิ้นสุดโปรโมชั่น',description:'พิมพ์ป้ายราคาปกติเพื่อเปลี่ยนแทนป้ายโปรโมชั่นที่หมดอายุ',name:'ป้ายคืนราคาปกติ'},
   NEW_PDT:{title:'มีสินค้าใหม่',description:'พิมพ์ป้ายให้สินค้าที่เพิ่มเข้าระบบ',name:'ป้ายสินค้าใหม่'},
 };
-const states:Record<string,string> = { WAIT_DATA:'รอรับข้อมูล', PREPARING:'กำลังเตรียมงาน', QUEUED:'รอพิมพ์', SENDING:'กำลังส่งงานพิมพ์', NEEDS_REVIEW:'รอตรวจสอบ', BLOCKED:'พักงาน', SUBMITTED:'ส่งงานแล้ว', EMPTY:'ไม่มีรายการใหม่', CANCELLED:'ยกเลิก' };
+const states:Record<string,string> = { WAIT_DATA:'รอรับข้อมูล', PREPARING:'กำลังเตรียมงาน', QUEUED:'รอพิมพ์', SENDING:'กำลังส่งงานพิมพ์', NEEDS_REVIEW:'รอตรวจสอบ', BLOCKED:'พักงาน', SUBMITTED:'ส่งงานแล้ว', EMPTY:'ไม่มีรายการใหม่', NO_MATCH:'ไม่มีสินค้าที่เข้าเงื่อนไข', ALREADY_SUBMITTED:'ส่งครบแล้ว ข้ามการพิมพ์ซ้ำ', FAILED:'เตรียมงานไม่สำเร็จ', CANCELLED:'ยกเลิก' };
 const selectClass='h-10 w-full min-w-0 max-w-full rounded-md border border-slate-300 bg-white px-2 text-sm';
 const section='rounded-xl border border-slate-200 bg-white p-3 sm:p-5 min-w-0 space-y-4 shadow-sm';
 async function api(path:string, body?:unknown) {

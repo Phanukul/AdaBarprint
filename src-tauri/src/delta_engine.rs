@@ -315,20 +315,26 @@ async fn compute_delta_candidates_impl(
             col_v5
         );
 
+        let (has_v6, has_v5): (bool, bool) = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('TCNTPmtHD')), EXISTS(SELECT 1 FROM pragma_table_info('TCNTPdtPmtHD'))"
+        ).fetch_one(pool).await?;
+        if !has_v6 && !has_v5 {
+            return Err(sqlx::Error::Protocol("ไม่พบตารางโปรโมชั่นในฐานข้อมูลสินค้า".into()));
+        }
         let mut refs = if canonical {
             crate::promo_v6::canonical_event_barcodes(pool, since_date, target_date, by_stop).await?
-        } else { sqlx::query_as::<_,(String,String)>(&q_v6)
-            .bind(since_date).bind(target_date)
-            .fetch_all(pool)
-            .await.unwrap_or_default() };
-        let v5_refs: Vec<(String, String)> = sqlx::query_as(&q_v5)
-            .bind(bch_code)
-            .bind(bch_code)
-            .bind(since_date).bind(target_date)
-            .fetch_all(pool)
-            .await
-            .unwrap_or_default();
-        refs.extend(v5_refs);
+        } else if has_v6 {
+            sqlx::query_as::<_, (String, String)>(&q_v6)
+                .bind(since_date).bind(target_date).fetch_all(pool).await?
+        } else {
+            Vec::new()
+        };
+        if has_v5 {
+            let v5_refs: Vec<(String, String)> = sqlx::query_as(&q_v5)
+                .bind(bch_code).bind(bch_code).bind(since_date).bind(target_date)
+                .fetch_all(pool).await?;
+            refs.extend(v5_refs);
+        }
         Ok(refs)
     }
 
@@ -415,8 +421,7 @@ async fn compute_delta_candidates_impl(
         .bind(since).bind(biz_date)
         .bind(since).bind(biz_date)
         .fetch_all(pool)
-        .await
-        .unwrap_or_default();
+        .await?;
 
         for b in new_bars {
             cand_map

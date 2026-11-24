@@ -16,6 +16,7 @@ pub mod scheduler_worker;
 pub mod storage;
 pub mod templates;
 pub mod print_center;
+mod printable_area;
 
 /// Enables Auto-Print routes and the embedded scheduler for testing.
 /// Use AUTOPRINT_DISABLE_EMBEDDED_SCHEDULER=1 when running the standalone agent.
@@ -101,6 +102,7 @@ pub fn build_router(pool: SqlitePool) -> Router {
         .route("/api/storage/check", post(storage::check_config))
         .route("/api/agent/register", post(agent_setup::register))
         .route("/api/print-center", get(print_center::get_center))
+        .route("/api/print-center/jobs/:id/details", get(print_center::job_details))
         .route("/api/print-center/rule", post(print_center::save_rule))
         .route("/api/print-center/rules", post(print_center::save_rules))
         .route("/api/print-center/profile/delete", post(print_center::delete_rule))
@@ -162,6 +164,7 @@ pub fn build_router(pool: SqlitePool) -> Router {
         .route("/api/print/build-line", post(post_build_line))
         .route("/api/print/create-job", post(post_create_job))
         .route("/api/print/send", post(print_center::enqueue_lan))
+        .route("/api/print/sheet-preview", post(print_center::preview_manual_sheet))
         .route("/api/print/windows-direct", post(print_center::enqueue_windows))
         .route("/api/print/check", post(post_print_check))
         .route("/api/print/ezpl", get(get_print_ezpl).post(post_print_ezpl))
