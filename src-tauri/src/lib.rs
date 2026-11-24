@@ -5,6 +5,8 @@ pub mod barcode;
 pub mod db;
 pub mod delta_engine;
 pub mod label_renderer;
+#[cfg(target_os = "windows")]
+mod legacy_page;
 pub mod models;
 pub mod print_drivers;
 pub mod promo_v6;
@@ -187,17 +189,14 @@ pub fn build_router(pool: SqlitePool) -> Router {
         .with_state(state)
 }
 
-/// Extract a Profile Code passed via Windows Task Scheduler / CLI (e.g., `AdaBarprint.exe 001` or `--profile 001`).
+/// Extract a profile code passed via Windows Task Scheduler / CLI (e.g. `/profile/001`).
 pub fn parse_cli_profile_arg(args: &[String]) -> Option<String> {
     let mut i = 0;
     while i < args.len() {
         let arg = args[i].trim();
-        if let Some(val) = arg.strip_prefix("--profile=") {
-            let clean = val.trim();
-            if !clean.is_empty() {
-                return Some(clean.to_string());
-            }
-        } else if let Some(val) = arg.strip_prefix("/profile:") {
+        if let Some(val) = arg.strip_prefix("/profile/")
+            .or_else(|| arg.strip_prefix("--profile="))
+            .or_else(|| arg.strip_prefix("/profile:")) {
             let clean = val.trim();
             if !clean.is_empty() {
                 return Some(clean.to_string());
@@ -386,6 +385,8 @@ mod cli_tests {
     #[test]
     fn parses_profile_code_from_positional_and_flag_args() {
         assert_eq!(parse_cli_profile_arg(&[]), None);
+        assert_eq!(parse_cli_profile_arg(&["/profile/003".into()]), Some("003".into()));
+        assert_eq!(parse_cli_profile_arg(&["/profile/".into()]), None);
         assert_eq!(parse_cli_profile_arg(&["001".into()]), Some("001".into()));
         assert_eq!(parse_cli_profile_arg(&["--profile".into(), "002".into()]), Some("002".into()));
         assert_eq!(parse_cli_profile_arg(&["--profile=003".into()]), Some("003".into()));

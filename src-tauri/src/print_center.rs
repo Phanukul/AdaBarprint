@@ -312,6 +312,9 @@ async fn load_layout_for(
     .await
     .map_err(|e| e.to_string())?
     .ok_or("ขนาดป้ายไม่พบหรือปิดใช้งาน")?;
+    if template_code.strip_prefix("legacy:") == Some(size_code) {
+        return Ok((size, Vec::new()));
+    }
     let raw:Option<String>=sqlx::query_scalar("SELECT FTLtmLayout FROM TCNMLabelTmpl WHERE FTLtmCode=? AND FTLbsCode=? AND FTLtmStaUse='1'")
       .bind(template_code).bind(size_code).fetch_optional(pool).await.map_err(|e|e.to_string())?.flatten();
     let raw = raw.ok_or("ไม่พบ Template ที่เลือกสำหรับขนาดนี้ กรุณาบันทึกแบบป้ายก่อน")?;
@@ -554,6 +557,7 @@ async fn candidates_for_target(
                 .as_bytes()
             )
         );
+        if target.template.starts_with("legacy:") { ctx["legacyPriType"] = json!(it.pri_type); }
         it.context = Some(ctx);
         it.skipped_dup = false;
     }
@@ -838,7 +842,7 @@ async fn prepare_auto(pool: &SqlitePool, id: &str, config: &str) -> Result<()> {
     };
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     for (n, chunk) in pages.chunks(page_size).enumerate() {
-        let payload = json!({"route":route,"size":lbs,"elements":elements,"contexts":chunk.iter().map(|(c,_)|c).collect::<Vec<_>>(),
+        let payload = json!({"route":route,"size":lbs,"elements":elements,"legacy":r.template.starts_with("legacy:"),"contexts":chunk.iter().map(|(c,_)|c).collect::<Vec<_>>(),
         "marks":chunk.iter().map(|(_,m)|m).filter(|m|!m.is_null()).collect::<Vec<_>>(),"date":date});
         sqlx::query("INSERT INTO ABPrintUnit(job,seq,kind,payload) VALUES(?,?,'AUTO',?)")
             .bind(id)
@@ -899,6 +903,25 @@ async fn send_unit(pool: &SqlitePool, kind: &str, p: Value, id: &str, seq: i64) 
             )
             .map_err(|e| e.to_string())?;
             let contexts = p["contexts"].as_array().ok_or("ไม่มีข้อมูลป้าย")?;
+            if p["legacy"] == true && route.lan_ip.is_none() {
+                #[cfg(target_os = "windows")]
+                {
+                    let image = crate::legacy_page::render(&size, contexts, &route.printer_name).await?;
+                    let request = crate::routes::WindowsDirectPrintBody {
+                        printer_name: route.printer_name, tray_name: Some(route.tray_name),
+                        lbs_code: Some(size.FTLbsCode), lbs_name: Some(size.FTLbsName),
+                        pri_type_label: None, test_mode: Some(false), page_images: Some(vec![image]),
+                        paper_size: size.FTLbsPaperSize, paper_width_mm: size.FCLbsPaperWidth,
+                        paper_height_mm: size.FCLbsPaperHeight,
+                    };
+                    let res = crate::routes::post_windows_direct_print(State(AppState { pool: pool.clone() }), Json(request)).await;
+                    if !res.status().is_success() {
+                        let bytes=axum::body::to_bytes(res.into_body(),65536).await.map_err(|e|e.to_string())?;
+                        return Err(String::from_utf8_lossy(&bytes).into_owned());
+                    }
+                    return Ok(());
+                }
+            }
             if let Some(ip) = route.lan_ip {
                 let brand = crate::print_drivers::PrinterBrand::from_str(&route.protocol)
                     .ok_or("ไม่รองรับภาษาเครื่องพิมพ์")?;
@@ -909,6 +932,13 @@ async fn send_unit(pool: &SqlitePool, kind: &str, p: Value, id: &str, seq: i64) 
                     gap_mm: size.FCLbsGapV.unwrap_or(2.0),
                     ..Default::default()
                 };
+                let elements = if p["legacy"] == true {
+                    let promo = contexts.first().and_then(|c| c["legacyPriType"].as_str()) == Some("2");
+                    let code = if promo {size.FTLbsTmplPmt.as_deref().unwrap_or("SH-100x38-PMT")}
+                               else {size.FTLbsTmplNor.as_deref().unwrap_or("SH-100x38-NOR")};
+                    crate::templates::get_templates().into_iter().find(|t|t.code == code)
+                        .ok_or_else(||format!("ไม่พบแบบพิมพ์ LAN {code}"))?.elements
+                } else {elements};
                 let labels = contexts.iter().map(|c| (c.clone(), 1)).collect::<Vec<_>>();
                 let cmd = crate::print_drivers::generate_commands(brand, &labels, &elements, &opts)?;
                 let (ok, msg, _) = crate::print_drivers::tcp_send(&ip, route.lan_port, &cmd).await;
@@ -1488,6 +1518,13 @@ mod tests {
         assert_eq!(saved[0].size, "S1");
         assert_eq!(effective_targets(&saved[0])[1].printer, "Printer-B");
         assert_eq!(effective_targets(&saved[0])[1].quantity, 2);
+        let mut legacy = saved[0].clone();
+        legacy.targets[1].template = "legacy:S1".into();
+        assert!(validate_rule(&p, &legacy).await.is_err());
+        legacy.targets[1].template = "legacy:S2".into();
+        let res = save_rule(State(AppState { pool: p.clone() }), Json(legacy)).await;
+        assert!(res.status().is_success());
+        assert_eq!(effective_targets(&rules(&p).await.unwrap()[0])[1].template, "legacy:S2");
     }
 }
 pub async fn run_profile_api(State(st): State<AppState>, Json(body): Json<Value>) -> Response {
@@ -1581,6 +1618,7 @@ async fn prepare_profile_job(pool: &SqlitePool, profile_code_or_id: &str, reprin
                 "route": route,
                 "size": lbs,
                 "elements": elements,
+                "legacy": target.template.starts_with("legacy:"),
                 "contexts": chunk.iter().map(|(ctx,_)|ctx).collect::<Vec<_>>(),
                 "marks": chunk.iter().map(|(_,mark)|mark).collect::<Vec<_>>(),
                 "date": today

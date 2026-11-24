@@ -25,7 +25,7 @@ interface Job { id:string; seq:number; source:string; name:string; status:string
 export type EventProfile=Pick<Rule,'template'|'size'|'printer'|'tray'|'protocol'|'ip'|'port'|'dpi'>;
 export interface Center { separateSettingsVersion?:number; master?:{connected:boolean;autoReady:boolean;branch:string;path:string;error?:string}; rules:Rule[]; jobs:Job[]; heartbeat:string; legacySchedules:number; bulkVersion?:number; bulkSettings?:unknown }
 export interface Template { FTLtmCode:string; FTLtmName:string; FTLbsCode:string; FTLtmPriType:string; FTLtmLayout?:string | null }
-export interface Candidate { barCode:string; pdtName:string; salePrice:number; qty:number; skippedDup:boolean }
+export interface Candidate { pdtCode:string; barCode:string; pdtName:string; salePrice:number; qty:number; skippedDup:boolean; priType:string; context?:Record<string, unknown> }
 function templateProblem(template:Template, windows:boolean):string {
   try {
     const layout=JSON.parse(template.FTLtmLayout||'null');

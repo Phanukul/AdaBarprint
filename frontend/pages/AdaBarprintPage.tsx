@@ -1,4 +1,6 @@
-import { prepareThermalBarcodes } from '@/lib/thermalBarcode';
+import { labelFormatOptions } from '@/lib/labelFormatOptions';
+import { previewLayout } from '@/lib/previewLayout';
+import { capturePagesToPngBase64 } from '@/lib/captureLabelPages';
 import { packRollUnits, type PrintUnit } from '@/lib/packRollUnits';
 import {
   buildMasterJsonTemplate,
@@ -233,105 +235,6 @@ interface LabelPrinterMapping {
   promoPrinter: string;
   promoTray: string;
   promoProtocol: string;
-}
-
-async function toDataUrl(src: string): Promise<string> {
-  if (!src || src.startsWith('data:')) return src;
-  let res: Response;
-  try {
-    res = await fetch(src);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  } catch {
-    // External URLs (e.g. AdaFileServer) may block CORS in browser fetch; fall back to local backend proxy.
-    if (/^https?:\/\//i.test(src)) {
-      res = await fetch(`/api/image-proxy?url=${encodeURIComponent(src)}`);
-      if (!res.ok) throw new Error(`Proxy HTTP ${res.status}`);
-    } else {
-      throw new Error(`Failed to load ${src}`);
-    }
-  }
-  const blob = await res.blob();
-  return await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => resolve(String(reader.result || ''));
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
-  });
-}
-
-async function capturePagesToPngBase64(
-  containerId: string,
-  paperWidthMm = 210,
-  paperHeightMm = 297,
-  godexRoll = false
-): Promise<string[]> {
-  const container = document.getElementById(containerId);
-  if (!container) return [];
-  const sheetEls = Array.from(container.querySelectorAll<HTMLElement>('[data-capture-sheet="1"]'));
-  const wPx = Math.max(40, Math.round((paperWidthMm / 25.4) * 96));
-  const hPx = Math.max(40, Math.round((paperHeightMm / 25.4) * 96));
-  const results: string[] = [];
-  for (const el of sheetEls) {
-    const invalidCode = el.querySelector<HTMLElement>('[data-print-code-error]');
-    if (invalidCode) throw new Error(invalidCode.dataset.printCodeError);
-    const clone = el.cloneNode(true) as HTMLElement;
-    clone.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
-    const imgs = Array.from(clone.querySelectorAll('img'));
-    await Promise.all(
-      imgs.map(async (img) => {
-        const rawSrc = img.getAttribute('src') || '';
-        if (rawSrc && !rawSrc.startsWith('data:')) {
-          try {
-            img.setAttribute('src', await toDataUrl(rawSrc));
-          } catch {
-            // ignore broken img
-          }
-        }
-      })
-    );
-    const outputWidth = godexRoll ? Math.round(paperWidthMm * 203 / 25.4) : wPx * 2;
-    const outputHeight = godexRoll ? Math.round(paperHeightMm * 203 / 25.4) : hPx * 2;
-    const viewportWidth = godexRoll ? paperWidthMm * 96 / 25.4 : wPx;
-    const viewportHeight = godexRoll ? paperHeightMm * 96 / 25.4 : hPx;
-    const paintBarcodes = prepareThermalBarcodes(el, clone, godexRoll ? 203 : 192);
-    const serialized = new XMLSerializer().serializeToString(clone);
-    const svgXml = `<svg xmlns="http://www.w3.org/2000/svg" width="${outputWidth}" height="${outputHeight}" viewBox="0 0 ${viewportWidth} ${viewportHeight}" preserveAspectRatio="none"><foreignObject x="0" y="0" width="100%" height="100%">${serialized}</foreignObject></svg>`;
-    const svgUrl = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgXml);
-    const pngDataUrl = await new Promise<string>((resolve, reject) => {
-      const image = new Image();
-      image.onload = () => {
-        const canvas = document.createElement('canvas');
-        canvas.width = outputWidth;
-        canvas.height = outputHeight;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          reject(new Error('Canvas context unavailable'));
-          return;
-        }
-        ctx.fillStyle = '#FFFFFF';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        try {
-          ctx.drawImage(image, 0, 0);
-          if (godexRoll) {
-            const pixels = ctx.getImageData(0, 0, outputWidth, outputHeight);
-            const data = pixels.data;
-            for (let i = 0; i < data.length; i += 4) {
-              const luminance = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-              const tone = luminance < 160 ? 0 : 255;
-              data[i] = data[i + 1] = data[i + 2] = tone;
-            }
-            ctx.putImageData(pixels, 0, 0);
-          }
-          paintBarcodes(ctx);
-          resolve(canvas.toDataURL('image/png'));
-        } catch (error) { reject(error); }
-      };
-      image.onerror = reject;
-      image.src = svgUrl;
-    });
-    results.push(pngDataUrl);
-  }
-  return results;
 }
 
 function formatTrayLabel(tray: string): string {
@@ -1645,6 +1548,7 @@ function AdaBarprintWorkspace({
                       ]}
                     />);
 
+  const manualFormatOptions = labelFormatOptions(labelSizes, true);
   const formatPicker = (
 <SearchableSelect
                       value={selectedTemplateCode|| (selectedLabelCode?`legacy:${selectedLabelCode}`:'')}
@@ -1652,10 +1556,7 @@ function AdaBarprintWorkspace({
                       placeholder="เลือกแบบป้ายที่จะพิมพ์..."
                       searchPlaceholder="ค้นหาชื่อแบบป้ายหรือขนาด..."
                       className="h-9 text-xs"
-                      options={labelSizes.filter(l=>l.FTLbsStaUse==='1').flatMap(l=>{
-                        const templates=(l.templates||[]).filter(t=>{try{return JSON.parse(t.FTLtmLayout||'null')?.elements?.length>0;}catch{return false;}});
-                        return templates.length?templates.map(t=>({value:t.FTLtmCode,label:t.FTLtmName,keywords:`${t.FTLtmCode} ${l.FTLbsName}`,badge:`${l.FCLbsWidth}×${l.FCLbsHeight} มม.`})):[{value:`legacy:${l.FTLbsCode}`,label:l.FTLbsName||l.FTLbsCode,keywords:l.FTLbsCode,badge:'แบบเดิม'}];
-                      })}
+                      options={manualFormatOptions}
                     />
   );
 
@@ -2114,8 +2015,7 @@ function AdaBarprintWorkspace({
 
   const resolveCustomLayout = (lbsCode: string, priType: string) => {
     if(selectedTemplate && selectedTemplate.FTLbsCode===lbsCode){
-      try {const layout=JSON.parse(selectedTemplate.FTLtmLayout||'null');if(layout?.elements?.length)return {...layout,customDesign:true,width:layout.width||selectedLabelSizeObj?.FCLbsWidth,height:layout.height||selectedLabelSizeObj?.FCLbsHeight,elements:layout.elements.map((el:any,i:number)=>({...el,id:el.id||`element-${i}`,x:el.x??0,y:el.y??0,width:el.width??1,height:el.height??1}))} as LabelDesignLayout;}catch { /* validated before selection */ }
-      return null;
+      return previewLayout(selectedTemplate.FTLtmLayout, selectedLabelSizeObj ?? undefined);
     }
 
     const t = priType === '2' ? '2' : '1';

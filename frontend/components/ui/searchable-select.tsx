@@ -273,7 +273,7 @@ export function SearchableSelect({
                             {opt.badge}
                           </span>
                         )}
-                        <span className="truncate">{opt.label}</span>
+                        <span className="min-w-0 whitespace-normal break-words">{opt.label}</span>
                       </span>
                       {isSelected && <Check className="h-3.5 w-3.5 shrink-0 text-[#007a87]" />}
                     </button>
