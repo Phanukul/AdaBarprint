@@ -158,8 +158,9 @@ fn hydrate_tmpl_layout(tmpl: &TCNMLabelTmpl, preprint_map: &HashMap<String, TCNM
     serde_json::to_string(&val).ok().or_else(|| Some(raw.clone()))
 }
 
-async fn upsert_preprint_from_layout(
-    pool: &SqlitePool,
+async fn upsert_preprint_from_layout<'a>(
+    executor: impl sqlx::Executor<'a, Database = sqlx::Sqlite>,
+    template_code: Option<&str>,
     lbs_code: &str,
     lbs_name: &str,
     cols: i64,
@@ -173,7 +174,7 @@ async fn upsert_preprint_from_layout(
     gap_h: f64,
     gap_v: f64,
     layout_val: &mut Value,
-) -> (String, Option<String>) {
+) -> Result<(String, Option<String>), sqlx::Error> {
     let mode = layout_val
         .get("designMode")
         .and_then(|v| v.as_str())
@@ -182,7 +183,7 @@ async fn upsert_preprint_from_layout(
         .to_string();
 
     let Some(pp_obj) = layout_val.get("preprint").and_then(|v| v.as_object()).cloned() else {
-        return (mode, None);
+        return Ok((mode, None));
     };
 
     let existing_code = pp_obj
@@ -207,10 +208,11 @@ async fn upsert_preprint_from_layout(
         .map(String::from);
 
     if sheet_img.is_none() && cell_img.is_none() {
-        return (mode, existing_code);
+        return Ok((mode, existing_code));
     }
 
-    let ppr_code = existing_code.unwrap_or_else(|| format!("PPR-{}", lbs_code));
+    let ppr_code = template_code.map(|code| format!("PPR-DESIGN-{}", code))
+        .or(existing_code).unwrap_or_else(|| format!("PPR-{}", lbs_code));
     let src_name = pp_obj
         .get("sourceName")
         .and_then(|v| v.as_str())
@@ -239,7 +241,7 @@ async fn upsert_preprint_from_layout(
         .and_then(|v| serde_json::to_string(v).ok());
     let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-    let _ = sqlx::query(
+    sqlx::query(
         r#"
         INSERT INTO TCNMPreprint
             (FTPprCode, FTPprName, FTPprFileName, FTPpsCode, FCPprWidth, FCPprHeight, FNPprCol, FNPprRow, FCPprLabelW, FCPprLabelH, FCPprMagTop, FCPprMagLeft, FCPprMagBottom, FCPprMagRight, FCPprGapH, FCPprGapV, FNPprPageNo, FTPprScope, FCPprOpacity, FTPprSheetImg, FTPprCellImg, FTPprCropJson, FTPprStaUse, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy)
@@ -294,8 +296,8 @@ async fn upsert_preprint_from_layout(
     .bind(&crop_json)
     .bind(&now)
     .bind(&now)
-    .execute(pool)
-    .await;
+    .execute(executor)
+    .await?;
 
     // Reference FTPprCode from layout metadata instead of duplicating large Base64 blobs in TCNMLabelTmpl
     if let Some(obj) = layout_val.as_object_mut() {
@@ -306,7 +308,7 @@ async fn upsert_preprint_from_layout(
         }
     }
 
-    (mode, Some(ppr_code))
+    Ok((mode, Some(ppr_code)))
 }
 
 pub(crate) async fn fetch_lan_printers(pool: &SqlitePool) -> Vec<Value> {
@@ -537,7 +539,7 @@ pub async fn get_label_sizes(State(st): State<AppState>) -> Response {
     };
 
     let tmpls = sqlx::query_as::<_, TCNMLabelTmpl>(
-        "SELECT FTLtmCode, FTLbsCode, FTLtmPriType, FTLtmName, FTLtmLayout, FTLtmStaUse, FTLtmMode, FTPprCode FROM TCNMLabelTmpl WHERE FTLtmStaUse = '1'",
+        "SELECT FTLtmCode, FTLbsCode, FTLtmPriType, FTLtmName, FTLtmLayout, FTLtmStaUse, FTLtmMode, FTPprCode, FTLtmOriginal IS NOT NULL AS hasOriginal FROM TCNMLabelTmpl WHERE FTLtmStaUse = '1'",
     )
     .fetch_all(&st.pool)
     .await
@@ -565,6 +567,7 @@ pub async fn get_label_sizes(State(st): State<AppState>) -> Response {
                         "FTLtmName": t.FTLtmName,
                         "FTLtmPriType": t.FTLtmPriType,
                         "FTLtmLayout": hydrated_layout,
+                        "hasOriginal": t.hasOriginal,
                         "FTLtmMode": t.FTLtmMode,
                         "FTPprCode": t.FTPprCode
                     })
@@ -613,6 +616,7 @@ pub async fn get_templates_route(State(st): State<AppState>) -> Response {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveTemplateReq {
+    pub template_code: Option<String>,
     pub lbs_code: String,
     pub pri_type: String,
     pub name: Option<String>,
@@ -641,11 +645,21 @@ pub async fn post_save_template(
         return err_json(StatusCode::BAD_REQUEST, "lbsCode is required");
     }
     let pri_type = if body.pri_type.trim() == "2" { "2" } else { "1" };
-    let tmpl_code = format!(
+    let design_code = format!(
         "{}-DESIGN-{}",
         lbs_code,
         if pri_type == "2" { "PMT" } else { "NOR" }
     );
+    let target = body.template_code.as_deref();
+    let tmpl_code = target.unwrap_or(&design_code);
+    if let Some(code) = target {
+        match sqlx::query_scalar::<_, i64>("SELECT 1 FROM TCNMLabelTmpl WHERE FTLtmCode=? AND FTLbsCode=? AND FTLtmPriType=? AND FTLtmStaUse='1'")
+            .bind(code).bind(lbs_code).bind(pri_type).fetch_optional(&st.pool).await {
+            Ok(Some(_)) => {},
+            Ok(None) => return err_json(StatusCode::NOT_FOUND, "ไม่พบแบบป้ายที่เลือก"),
+            Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        }
+    }
     let tmpl_name = body
         .name
         .as_deref()
@@ -667,9 +681,18 @@ pub async fn post_save_template(
     let eff_bottom = body.mag_bottom.or_else(|| cur_size.as_ref().and_then(|r| r.6)).unwrap_or(eff_top);
     let eff_right = body.mag_right.or_else(|| cur_size.as_ref().and_then(|r| r.7)).unwrap_or(eff_left);
 
+    let paper_size_opt = match body.paper_size.as_deref() {
+        Some(raw) => Some(lookup_paper_size(&st.pool, Some(raw)).await.0),
+        None => None,
+    };
+    let mut tx = match st.pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
     let mut layout_val = body.layout.clone();
-    let (ltm_mode, ppr_code_opt) = upsert_preprint_from_layout(
-        &st.pool,
+    let (ltm_mode, ppr_code_opt) = match upsert_preprint_from_layout(
+        &mut *tx,
+        target,
         lbs_code,
         &tmpl_name,
         body.cols.or_else(|| cur_size.as_ref().map(|r| r.0)).unwrap_or(1),
@@ -684,52 +707,62 @@ pub async fn post_save_template(
         body.gap_v.or_else(|| cur_size.as_ref().map(|r| r.9)).unwrap_or(2.0),
         &mut layout_val,
     )
-    .await;
+    .await {
+        Ok(result) => result,
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
 
     let layout_str = serde_json::to_string(&layout_val).unwrap_or_else(|_| "{}".to_string());
     let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-    let res = sqlx::query(
-        r#"
-        INSERT INTO TCNMLabelTmpl
-            (FTLtmCode, FTLbsCode, FTLtmPriType, FTLtmName, FTLtmLayout, FTLtmStaUse, FTLtmMode, FTPprCode, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy)
-        VALUES (?, ?, ?, ?, ?, '1', ?, ?, ?, 'DESIGNER', ?, 'DESIGNER')
-        ON CONFLICT(FTLtmCode) DO UPDATE SET
-            FTLbsCode = excluded.FTLbsCode,
-            FTLtmPriType = excluded.FTLtmPriType,
-            FTLtmName = excluded.FTLtmName,
-            FTLtmLayout = excluded.FTLtmLayout,
-            FTLtmStaUse = '1',
-            FTLtmMode = excluded.FTLtmMode,
-            FTPprCode = excluded.FTPprCode,
-            FDLastUpdOn = excluded.FDLastUpdOn,
-            FTLastUpdBy = 'DESIGNER'
-        "#,
-    )
-    .bind(&tmpl_code)
-    .bind(lbs_code)
-    .bind(pri_type)
-    .bind(&tmpl_name)
-    .bind(&layout_str)
-    .bind(&ltm_mode)
-    .bind(&ppr_code_opt)
-    .bind(&now)
-    .bind(&now)
-    .execute(&st.pool)
-    .await;
-
-    if let Err(e) = res {
-        return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    let res = if target.is_some() {
+        sqlx::query("UPDATE TCNMLabelTmpl SET
+            FTLtmOriginal = CASE WHEN FTLtmCode = ? THEN FTLtmOriginal ELSE COALESCE(FTLtmOriginal,
+                json_object('layout', FTLtmLayout, 'mode', FTLtmMode, 'paper', FTPprCode)) END,
+            FTLtmLayout=?, FTLtmMode=?, FTPprCode=?, FDLastUpdOn=?, FTLastUpdBy='DESIGNER'
+            WHERE FTLtmCode=? AND FTLbsCode=? AND FTLtmPriType=? AND FTLtmStaUse='1'")
+            .bind(&design_code).bind(&layout_str).bind(&ltm_mode).bind(&ppr_code_opt)
+            .bind(&now).bind(tmpl_code).bind(lbs_code).bind(pri_type).execute(&mut *tx).await
+    } else {
+        sqlx::query(
+            r#"
+            INSERT INTO TCNMLabelTmpl
+                (FTLtmCode, FTLbsCode, FTLtmPriType, FTLtmName, FTLtmLayout, FTLtmStaUse, FTLtmMode, FTPprCode, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy)
+            VALUES (?, ?, ?, ?, ?, '1', ?, ?, ?, 'DESIGNER', ?, 'DESIGNER')
+            ON CONFLICT(FTLtmCode) DO UPDATE SET
+                FTLbsCode = excluded.FTLbsCode,
+                FTLtmPriType = excluded.FTLtmPriType,
+                FTLtmName = excluded.FTLtmName,
+                FTLtmLayout = excluded.FTLtmLayout,
+                FTLtmStaUse = '1',
+                FTLtmMode = excluded.FTLtmMode,
+                FTPprCode = excluded.FTPprCode,
+                FDLastUpdOn = excluded.FDLastUpdOn,
+                FTLastUpdBy = 'DESIGNER'
+            "#,
+        )
+        .bind(&tmpl_code)
+        .bind(lbs_code)
+        .bind(pri_type)
+        .bind(&tmpl_name)
+        .bind(&layout_str)
+        .bind(&ltm_mode)
+        .bind(&ppr_code_opt)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+    };
+    match res {
+        Ok(result) if result.rows_affected() == 0 => return err_json(StatusCode::NOT_FOUND, "ไม่พบแบบป้ายที่เลือก"),
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        _ => {}
     }
 
-    let paper_size_opt = match body.paper_size.as_deref() {
-        Some(raw) => Some(lookup_paper_size(&st.pool, Some(raw)).await.0),
-        None => None,
-    };
     let col_sql = if pri_type == "2" {
         r#"
         UPDATE TCNMLabelSize SET
-            FTLbsTmplPmt = ?,
+            FTLbsTmplPmt = COALESCE(?, FTLbsTmplPmt),
             FTPprCode = COALESCE(?, FTPprCode),
             FTLbsPaperSize = COALESCE(?, FTLbsPaperSize),
             FCLbsPaperWidth = COALESCE(?, FCLbsPaperWidth),
@@ -751,7 +784,7 @@ pub async fn post_save_template(
     } else {
         r#"
         UPDATE TCNMLabelSize SET
-            FTLbsTmplNor = ?,
+            FTLbsTmplNor = COALESCE(?, FTLbsTmplNor),
             FTPprCode = COALESCE(?, FTPprCode),
             FTLbsPaperSize = COALESCE(?, FTLbsPaperSize),
             FCLbsPaperWidth = COALESCE(?, FCLbsPaperWidth),
@@ -771,8 +804,8 @@ pub async fn post_save_template(
         WHERE FTLbsCode = ?
         "#
     };
-    let _ = sqlx::query(col_sql)
-        .bind(&tmpl_code)
+    let size_result = sqlx::query(col_sql)
+        .bind(if target.is_none() { Some(tmpl_code) } else { None })
         .bind(&ppr_code_opt)
         .bind(paper_size_opt)
         .bind(body.paper_width_mm.filter(|v| *v >= 30.0))
@@ -789,8 +822,14 @@ pub async fn post_save_template(
         .bind(body.height_mm.filter(|v| *v >= 5.0))
         .bind(&now)
         .bind(lbs_code)
-        .execute(&st.pool)
+        .execute(&mut *tx)
         .await;
+    if let Err(e) = size_result {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
+    if let Err(e) = tx.commit().await {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
 
     Json(json!({
         "ok": true,
@@ -935,8 +974,9 @@ pub async fn post_save_as_template(
         obj.insert("height".to_string(), json!(height_mm));
         obj.insert("customDesign".to_string(), json!(true));
     }
-    let (ltm_mode, ppr_code_opt) = upsert_preprint_from_layout(
+    let (ltm_mode, ppr_code_opt) = match upsert_preprint_from_layout(
         &st.pool,
+        None,
         &new_lbs_code,
         new_name,
         cols,
@@ -951,7 +991,10 @@ pub async fn post_save_as_template(
         gap_v,
         &mut layout_val,
     )
-    .await;
+    .await {
+        Ok(result) => result,
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
 
     let layout_str = serde_json::to_string(&layout_val).unwrap_or_else(|_| "{}".to_string());
     let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -1175,6 +1218,7 @@ pub async fn post_delete_custom_format(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResetTemplateReq {
+    pub template_code: Option<String>,
     pub lbs_code: String,
     pub pri_type: String,
 }
@@ -1194,6 +1238,20 @@ pub async fn post_reset_template(
         if pri_type == "2" { "PMT" } else { "NOR" }
     );
     let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+    if let Some(code) = body.template_code.as_deref().filter(|code| *code != tmpl_code) {
+        return match sqlx::query("UPDATE TCNMLabelTmpl SET
+            FTLtmLayout=json_extract(FTLtmOriginal, '$.layout'),
+            FTLtmMode=json_extract(FTLtmOriginal, '$.mode'),
+            FTPprCode=json_extract(FTLtmOriginal, '$.paper'),
+            FTLtmOriginal=NULL, FDLastUpdOn=?, FTLastUpdBy='DESIGNER'
+            WHERE FTLtmCode=? AND FTLbsCode=? AND FTLtmPriType=? AND FTLtmOriginal IS NOT NULL")
+            .bind(&now).bind(code).bind(lbs_code).bind(pri_type).execute(&st.pool).await {
+            Ok(result) if result.rows_affected() == 1 => Json(json!({"ok": true, "tmplCode": code})).into_response(),
+            Ok(_) => err_json(StatusCode::NOT_FOUND, "ไม่พบต้นฉบับสำหรับแบบป้ายที่เลือก"),
+            Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        };
+    }
 
     if let Err(e) = sqlx::query("DELETE FROM TCNMLabelTmpl WHERE FTLtmCode = ?")
         .bind(&tmpl_code)

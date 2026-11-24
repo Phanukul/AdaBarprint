@@ -148,6 +148,8 @@ pub fn build_router(pool: SqlitePool) -> Router {
             get(get_label_printers).post(post_label_printers),
         )
         .route("/api/templates", get(get_templates_route))
+        .route("/api/templates/overwrite", post(post_save_template))
+        .route("/api/templates/restore", post(post_reset_template))
         .route("/api/templates/save", post(post_save_template))
         .route("/api/templates/save-as", post(post_save_as_template))
         .route("/api/templates/delete-custom", post(post_delete_custom_format))

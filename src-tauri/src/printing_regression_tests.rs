@@ -315,3 +315,37 @@ async fn manual_sheet_checks_match_preview_and_reject_mixed_jobs_atomically() {
     assert!(print_center::enqueue_manual(State(state),Json(json!({"units":[fits,wide]}))).await.status().is_success());
     master.close().await.unwrap(); pool.close().await;
 }
+
+#[tokio::test]
+async fn design_overwrite_reopens_selected_template_and_restores_original() {
+    let (pool, _master) = fixture().await;
+    let state = routes::AppState { pool: pool.clone() };
+    let code = "BC-25x32-NOR";
+    let sibling = "BC-25x32-DESIGN-NOR";
+    let read = |target: &'static str| {
+        sqlx::query_scalar::<_, Option<String>>("SELECT FTLtmLayout FROM TCNMLabelTmpl WHERE FTLtmCode=?")
+            .bind(target).fetch_one(&pool)
+    };
+    let original = read(code).await.unwrap();
+    let mut request = json!({"lbsCode":"BC-25x32","priType":"1","layout":{"customDesign":true,"elements":[{"x":1}]}});
+    let save = |value| routes::post_save_template(State(state.clone()), Json(serde_json::from_value(value).unwrap()));
+    assert!(save(request.clone()).await.status().is_success());
+    let saved_sibling = read(sibling).await.unwrap();
+    request["templateCode"] = json!(code);
+    for x in [3, 8] {
+        request["layout"]["elements"][0]["x"] = json!(x);
+        assert!(save(request.clone()).await.status().is_success());
+        let layout: serde_json::Value = serde_json::from_str(&read(code).await.unwrap().unwrap()).unwrap();
+        assert_eq!(layout["elements"][0]["x"], x);
+    }
+    request["priType"] = json!("2");
+    assert_eq!(save(request.clone()).await.status(), axum::http::StatusCode::NOT_FOUND);
+    request["priType"] = json!("1");
+    let reset = routes::post_reset_template(State(state), Json(serde_json::from_value(request).unwrap())).await;
+    assert!(reset.status().is_success());
+    assert_eq!(read(code).await.unwrap(), original);
+    assert_eq!(read(sibling).await.unwrap(), saved_sibling);
+    let default: String = sqlx::query_scalar("SELECT FTLbsTmplNor FROM TCNMLabelSize WHERE FTLbsCode='BC-25x32'")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(default, sibling);
+}

@@ -139,6 +139,9 @@ pub struct TCNMLabelTmpl {
     pub FTLtmPriType: String,
     pub FTLtmName: String,
     pub FTLtmLayout: Option<String>,
+    #[sqlx(default)]
+    #[serde(default)]
+    pub hasOriginal: bool,
     pub FTLtmStaUse: String,
     pub FTLtmMode: Option<String>,
     pub FTPprCode: Option<String>,

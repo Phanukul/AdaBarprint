@@ -274,6 +274,7 @@ pub async fn ensure_label_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         "ALTER TABLE TCNMPreprint ADD COLUMN FCPprMagRight REAL",
         "ALTER TABLE TCNMLabelTmpl ADD COLUMN FTLtmMode TEXT NOT NULL DEFAULT 'full'",
         "ALTER TABLE TCNMLabelTmpl ADD COLUMN FTPprCode TEXT",
+        "ALTER TABLE TCNMLabelTmpl ADD COLUMN FTLtmOriginal TEXT",
     ];
     for alter_sql in extra_size_cols {
         let _ = sqlx::query(alter_sql).execute(pool).await;

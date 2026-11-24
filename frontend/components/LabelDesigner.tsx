@@ -124,7 +124,7 @@ export interface SheetConfigMeta {
 }
 
 export interface DesignerLabelSizeItem {
-  templates?: Array<{ FTLtmCode: string; FTLtmName: string; FTLtmPriType: string; FTLtmLayout?: string | null }>;
+  templates?: Array<{ FTLtmCode: string; FTLtmName: string; FTLtmPriType: string; FTLtmLayout?: string | null; hasOriginal?: boolean }>;
   FTLbsCode: string;
   FTLbsGroup?: string;
   FTLbsName: string | null;
@@ -192,10 +192,10 @@ interface LabelDesignerProps {
   selectedLabelCode: string;
   onChangeLabelCode: (code: string) => void;
   customLayouts: Record<string, LabelDesignLayout>;
-  onSaveLayout: (layout: LabelDesignLayout, meta?: SheetConfigMeta) => Promise<boolean>;
+  onSaveLayout: (layout: LabelDesignLayout, meta?: SheetConfigMeta, templateCode?: string) => Promise<boolean>;
   onSaveAsLayout: (payload: SaveAsPayload) => Promise<boolean>;
   onDeleteCustomFormat?: (lbsCode: string) => Promise<boolean>;
-  onResetLayout: (lbsCode: string, priType: '1' | '2') => Promise<boolean>;
+  onResetLayout: (lbsCode: string, priType: '1' | '2', templateCode?: string) => Promise<boolean>;
 }
 
 async function compressImageFileToDataUrl(file: File, maxDim = 600): Promise<string> {
@@ -1099,9 +1099,9 @@ export function LabelDesigner({
   const handleSave = async (): Promise<boolean> => {
     setSaving(true);
     try {
-      const ok = await onSaveLayout({ ...doc, customDesign: true }, resolvePaperMeta());
+      const ok = await onSaveLayout({ ...doc, customDesign: true }, resolvePaperMeta(), selectedTemplate?.FTLtmCode);
       if (ok) {
-        setRequestedTemplate(designCode);
+        setRequestedTemplate(selectedTemplate?.FTLtmCode || designCode);
         setDirty(false);
       }
       return ok;
@@ -1556,13 +1556,14 @@ export function LabelDesigner({
     setSaving(true);
     try {
       if (callServer) {
-        const ok = await onResetLayout(effectiveLbsCode, priType);
+        const ok = await onResetLayout(effectiveLbsCode, priType, selectedTemplate?.FTLtmCode);
         if (!ok) return;
-      } else {
-        toast.info('ยกเลิกการแก้ไขที่ยังไม่บันทึกแล้ว');
+        if (!selectedTemplate?.hasOriginal) setRequestedTemplate('');
+        setResetConfirmOpen(false);
+        return;
       }
-      if (callServer) setRequestedTemplate('');
-      const fresh = !callServer && templateDoc ? structuredClone(templateDoc) : isBlankWorkspace
+      toast.info('ยกเลิกการแก้ไขที่ยังไม่บันทึกแล้ว');
+      const fresh = templateDoc ? structuredClone(templateDoc) : isBlankWorkspace
         ? buildEmptyBlankDoc(priType)
         : buildStarterLayout(
             effectiveLbsCode,
@@ -1583,7 +1584,7 @@ export function LabelDesigner({
   };
 
   const handleReset = () => {
-    if (customLayouts[layoutKey] && (!selectedTemplate || selectedTemplate.FTLtmCode === designCode)) {
+    if (hasSavedCustom) {
       setResetConfirmOpen(true);
       return;
     }
@@ -1776,7 +1777,7 @@ export function LabelDesigner({
     toast.success(`จัดกึ่งกลางแผ่นแล้ว (ขอบซ้าย/ขวา ${ml} mm · ขอบบน/ล่าง ${mt} mm)`);
   };
 
-  const hasSavedCustom = Boolean(customLayouts[layoutKey]) && (!selectedTemplate || selectedTemplate.FTLtmCode === designCode);
+  const hasSavedCustom = selectedTemplate ? Boolean(selectedTemplate.hasOriginal || selectedTemplate.FTLtmCode === designCode) : Boolean(customLayouts[layoutKey]);
 
   return (
     <div className="flex flex-col h-[calc(100vh-58px)] min-h-[640px] bg-slate-100 select-none">
@@ -3929,17 +3930,17 @@ export function LabelDesigner({
           <DialogHeader>
             <DialogTitle className="text-base flex items-center gap-2">
               <AlertTriangle className="h-4 w-4 text-amber-600" />
-              ยืนยันการบันทึกทับแบบเดิม ({effectiveLbsCode})
+              ยืนยันการบันทึกทับแบบเดิม ({selectedTemplate?.FTLtmCode || designCode})
             </DialogTitle>
             <DialogDescription className="text-xs">
-              ระบบจะบันทึก Layout ที่ออกแบบนี้ทับการแสดงผลของรูปแบบ <strong>{effectiveLbsCode}</strong> ในโหมด{' '}
+              ระบบจะบันทึก Layout ที่ออกแบบนี้ทับการแสดงผลของรูปแบบ <strong>{selectedTemplate?.FTLtmCode || designCode}</strong> ในโหมด{' '}
               <strong>{priType === '2' ? 'ราคาโปรโมชัน' : 'ราคาปกติ'}</strong>
             </DialogDescription>
           </DialogHeader>
 
           <div className="rounded-md bg-amber-50 border border-amber-200 p-3 text-xs text-amber-900 space-y-1.5">
             <div>
-              • เมื่อพิมพ์ป้ายด้วยรหัส <strong>{effectiveLbsCode}</strong> จะแสดงผลตามแบบที่ออกแบบไว้นี้แทนแบบ STD
+              • เมื่อพิมพ์ป้ายด้วยรหัส <strong>{selectedTemplate?.FTLtmCode || designCode}</strong> จะแสดงผลตามแบบที่ออกแบบไว้นี้แทนแบบ STD
             </div>
             <div>
               • สามารถกดปุ่ม <strong>คืนค่า STD เดิม</strong> ในหน้า Design ได้ทุกเมื่อเพื่อย้อนกลับเป็นแบบมาตรฐานเดิม (หรือเลือก{' '}
@@ -3976,13 +3977,13 @@ export function LabelDesigner({
             <DialogTitle className="text-base flex items-center gap-2">
               <RotateCcw className="h-4 w-4 text-[#007a87]" />
               {!isCustomCreatedFormat
-                ? `คืนค่าแบบมาตรฐาน (STD) เดิม — ${effectiveLbsCode}`
-                : `รีเซ็ตแบบป้ายเป็นค่าเริ่มต้น — ${effectiveLbsCode}`}
+                ? `คืนค่าแบบมาตรฐาน (STD) เดิม — ${selectedTemplate?.FTLtmCode || designCode}`
+                : `รีเซ็ตแบบป้ายเป็นค่าเริ่มต้น — ${selectedTemplate?.FTLtmCode || designCode}`}
             </DialogTitle>
             <DialogDescription className="text-xs">
               {!isCustomCreatedFormat
-                ? `ลบ Layout ที่บันทึกทับไว้สำหรับ ${effectiveLbsCode} (${priType === '2' ? 'ราคาโปรโมชัน' : 'ราคาปกติ'}) เพื่อกลับไปใช้แบบมาตรฐาน (STD) เดิมของระบบ`
-                : `ล้าง Layout ที่บันทึกไว้สำหรับ ${effectiveLbsCode} (${priType === '2' ? 'ราคาโปรโมชัน' : 'ราคาปกติ'}) และสร้างโครงตั้งต้นใหม่`}
+                ? `ลบ Layout ที่บันทึกทับไว้สำหรับ ${selectedTemplate?.FTLtmCode || designCode} (${priType === '2' ? 'ราคาโปรโมชัน' : 'ราคาปกติ'}) เพื่อกลับไปใช้แบบมาตรฐาน (STD) เดิมของระบบ`
+                : `ล้าง Layout ที่บันทึกไว้สำหรับ ${selectedTemplate?.FTLtmCode || designCode} (${priType === '2' ? 'ราคาโปรโมชัน' : 'ราคาปกติ'}) และสร้างโครงตั้งต้นใหม่`}
             </DialogDescription>
           </DialogHeader>
 

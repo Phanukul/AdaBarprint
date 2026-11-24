@@ -100,6 +100,8 @@ interface BranchItem {
 }
 
 interface LabelSizeItem {
+  FTLbsTmplNor?: string | null;
+  FTLbsTmplPmt?: string | null;
   FTLbsCode: string;
   FTLbsGroup?: string;
   FTLbsName: string | null;
@@ -624,7 +626,8 @@ function AdaBarprintWorkspace({
           for (const sz of lData as LabelSizeItem[]) {
             if (!Array.isArray(sz.templates)) continue;
             for (const tmpl of sz.templates) {
-              if (!tmpl.FTLtmLayout) continue;
+              const defaultCode = tmpl.FTLtmPriType === '2' ? sz.FTLbsTmplPmt : sz.FTLbsTmplNor;
+              if (!tmpl.FTLtmLayout || (defaultCode && tmpl.FTLtmCode !== defaultCode)) continue;
               try {
                 const obj = JSON.parse(tmpl.FTLtmLayout);
                 if (obj && obj.customDesign && Array.isArray(obj.elements)) {
@@ -1932,7 +1935,8 @@ function AdaBarprintWorkspace({
       for (const sz of lData as LabelSizeItem[]) {
         if (!Array.isArray(sz.templates)) continue;
         for (const tmpl of sz.templates) {
-          if (!tmpl.FTLtmLayout) continue;
+          const defaultCode = tmpl.FTLtmPriType === '2' ? sz.FTLbsTmplPmt : sz.FTLbsTmplNor;
+          if (!tmpl.FTLtmLayout || (defaultCode && tmpl.FTLtmCode !== defaultCode)) continue;
           try {
             const obj = JSON.parse(tmpl.FTLtmLayout);
             if (obj && obj.customDesign && Array.isArray(obj.elements)) {
@@ -2016,14 +2020,16 @@ function AdaBarprintWorkspace({
 
   const handleSaveCustomLayout = async (
     layout: LabelDesignLayout,
-    meta?: SheetConfigMeta
+    meta?: SheetConfigMeta,
+    templateCode?: string
   ): Promise<boolean> => {
     try {
-      const res = await fetch('/api/templates/save', {
+      const res = await fetch(templateCode ? '/api/templates/overwrite' : '/api/templates/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           lbsCode: layout.lbsCode,
+          templateCode,
           priType: layout.priType,
           name: layout.name,
           layout,
@@ -2035,8 +2041,6 @@ function AdaBarprintWorkspace({
         toast.error(data?.error || 'บันทึกแบบป้ายไม่สำเร็จ');
         return false;
       }
-      const key = `${layout.lbsCode}:${layout.priType}`;
-      setCustomLayouts((prev) => ({ ...prev, [key]: layout }));
       await refreshLabelSizesAndMappings();
       toast.success(`บันทึกแบบป้าย ${layout.lbsCode} (${layout.priType === '2' ? 'โปรโมชัน' : 'ปกติ'}) เรียบร้อย`);
       return true;
@@ -2046,24 +2050,19 @@ function AdaBarprintWorkspace({
     }
   };
 
-  const handleResetCustomLayout = async (lbsCode: string, priType: '1' | '2'): Promise<boolean> => {
+  const handleResetCustomLayout = async (lbsCode: string, priType: '1' | '2', templateCode?: string): Promise<boolean> => {
     try {
-      const res = await fetch('/api/templates/reset', {
+      const res = await fetch(templateCode ? '/api/templates/restore' : '/api/templates/reset', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ lbsCode, priType }),
+        body: JSON.stringify({ lbsCode, priType, templateCode }),
       });
       const data = await parseApiJson(res);
       if (!res.ok || !data?.ok) {
         toast.error(data?.error || 'รีเซ็ตแบบป้ายไม่สำเร็จ');
         return false;
       }
-      const key = `${lbsCode}:${priType}`;
-      setCustomLayouts((prev) => {
-        const next = { ...prev };
-        delete next[key];
-        return next;
-      });
+      await refreshLabelSizesAndMappings();
       toast.info(`คืนค่าแบบป้าย ${lbsCode} (${priType === '2' ? 'โปรโมชัน' : 'ปกติ'}) เป็นค่าเริ่มต้นแล้ว`);
       return true;
     } catch (e) {
