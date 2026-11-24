@@ -124,7 +124,7 @@ export interface SheetConfigMeta {
 }
 
 export interface DesignerLabelSizeItem {
-  templates?: Array<{ FTLtmCode: string; FTLtmName: string; FTLtmPriType: string; FTLtmLayout?: string | null; hasOriginal?: boolean }>;
+  templates?: Array<{ FTLtmCode: string; FTLtmName: string; FTLtmPriType: string; FTLtmLayout?: string | null; hasOriginal?: boolean; userCreated?: boolean }>;
   FTLbsCode: string;
   FTLbsGroup?: string;
   FTLbsName: string | null;
@@ -161,6 +161,7 @@ export interface DesignerProductItem {
 }
 
 export interface SaveAsPayload {
+  reuseSize: boolean;
   sourceLbsCode: string;
   newLbsCode?: string;
   newLbsName: string;
@@ -455,6 +456,8 @@ export function LabelDesigner({
   const [advancedPropsOpen, setAdvancedPropsOpen] = useState(false);
   const [saveAsName, setSaveAsName] = useState('');
   const [saveAsCode, setSaveAsCode] = useState('');
+  const [saveSizeCode, setSaveSizeCode] = useState('');
+  const existingSaveSize = activeSizes.find(size => size.FTLbsCode === saveSizeCode);
   const [saveAsWidth, setSaveAsWidth] = useState(100);
   const [saveAsHeight, setSaveAsHeight] = useState(38);
   const [sheetPreviewMode, setSheetPreviewMode] = useState<'guide' | 'ink'>('guide');
@@ -1132,6 +1135,7 @@ export function LabelDesigner({
     setSaveAsName(
       isBlankWorkspace ? '' : `${currentSize.FTLbsName || effectiveLbsCode}${suffix}`
     );
+    setSaveSizeCode(effectiveLbsCode || activeSizes[0]?.FTLbsCode || '');
     setSaveAsCode('');
     setSaveAsWidth(doc.width);
     setSaveAsHeight(doc.height);
@@ -1143,6 +1147,7 @@ export function LabelDesigner({
   const openSaveAsBlankModal = () => {
     setSaveAsBlank(true);
     setSaveAsName('');
+    setSaveSizeCode(effectiveLbsCode || activeSizes[0]?.FTLbsCode || '');
     setSaveAsCode('');
     setSaveAsWidth(doc.width);
     setSaveAsHeight(doc.height);
@@ -1159,8 +1164,8 @@ export function LabelDesigner({
     const meta = resolvePaperMeta();
     const maxW = meta.paperWidthMm || 210;
     const maxH = meta.paperHeightMm || 297;
-    const wMm = Math.max(10, Math.min(maxW, Number(saveAsWidth) || doc.width));
-    const hMm = Math.max(10, Math.min(maxH, Number(saveAsHeight) || doc.height));
+    const wMm = existingSaveSize?.FCLbsWidth ?? Math.max(10, Math.min(maxW, Number(saveAsWidth) || doc.width));
+    const hMm = existingSaveSize?.FCLbsHeight ?? Math.max(10, Math.min(maxH, Number(saveAsHeight) || doc.height));
     const targetLayout: LabelDesignLayout = saveAsBlank
       ? {
           ...doc,
@@ -1186,8 +1191,9 @@ export function LabelDesigner({
     setSaving(true);
     try {
       const ok = await onSaveAsLayout({
-        sourceLbsCode: effectiveLbsCode || activeSizes[0]?.FTLbsCode || 'ADA-100x38',
-        newLbsCode: saveAsCode.trim() || undefined,
+        reuseSize: Boolean(existingSaveSize),
+        sourceLbsCode: existingSaveSize?.FTLbsCode || effectiveLbsCode || activeSizes[0]?.FTLbsCode || 'ADA-100x38',
+        newLbsCode: existingSaveSize ? undefined : saveAsCode.trim() || undefined,
         newLbsName: saveAsName.trim(),
         priType: newPrice,
         widthMm: wMm,
@@ -1580,7 +1586,7 @@ export function LabelDesigner({
     }
   };
 
-  const isCustomCreatedFormat = currentSize.FTLbsHhtCode === 'CUSTOM';
+  const isCustomCreatedFormat = selectedTemplate?.userCreated || currentSize.FTLbsHhtCode === 'CUSTOM';
 
   const executeReset = async (callServer: boolean) => {
     setSaving(true);
@@ -2186,7 +2192,7 @@ export function LabelDesigner({
                     </button>
                   )}
 
-                  {isCustomCreatedFormat && onDeleteCustomFormat && (
+                  {currentSize.FTLbsHhtCode === 'CUSTOM' && (sizeTemplates?.length ?? 0) <= 1 && onDeleteCustomFormat && (
                     <button
                       type="button"
                       className="w-full text-left px-3 py-2 hover:bg-red-50 flex items-center gap-2 text-red-600 border-t border-slate-100 mt-1"
@@ -3892,6 +3898,13 @@ export function LabelDesigner({
               />
             </div>
 
+            <label className="block text-xs">ขนาดและกระดาษ
+              <select className="mt-1 block w-full rounded border p-2" value={saveSizeCode} onChange={e => setSaveSizeCode(e.target.value)}>
+                {activeSizes.map(size => <option key={size.FTLbsCode} value={size.FTLbsCode}>{size.FTLbsCode} · {size.FCLbsWidth} × {size.FCLbsHeight} มม.</option>)}
+                <option value="">เพิ่มขนาดและกระดาษใหม่</option>
+              </select>
+            </label>
+            {!existingSaveSize && <>
             <div className="grid grid-cols-2 gap-2">
               <div className="space-y-1">
                 <Label className="text-xs font-medium">กว้าง (mm)</Label>
@@ -3920,7 +3933,7 @@ export function LabelDesigner({
             </div>
 
             <div className="space-y-1">
-              <Label className="text-xs font-medium">รหัสแบบใหม่ (ไม่บังคับ — เว้นว่างให้ระบบตั้งอัตโนมัติ)</Label>
+              <Label className="text-xs font-medium">รหัสขนาดใหม่ (ไม่บังคับ — เว้นว่างให้ระบบตั้งอัตโนมัติ)</Label>
               <Input
                 value={saveAsCode}
                 onChange={(e) => setSaveAsCode(e.target.value)}
@@ -3929,11 +3942,11 @@ export function LabelDesigner({
               />
             </div>
 
+            </>}
             <div className="rounded-md bg-slate-50 border border-slate-200 p-2.5 text-[11px] text-slate-600 space-y-0.5">
               <div>
-                ขนาดที่บันทึก: <strong>{saveAsWidth} × {saveAsHeight} mm</strong> · บนกระดาษ{' '}
-                <strong>{PAPER_SIZE_PRESETS[a4Metrics.paperSize]?.label || `${a4Metrics.paperWidthMm}×${a4Metrics.paperHeightMm}`}</strong>{' '}
-                ({a4Metrics.cols} × {a4Metrics.rows} ดวง/แผ่น)
+                {existingSaveSize ? <>{existingSaveSize.FCLbsWidth} × {existingSaveSize.FCLbsHeight} มม. · {existingSaveSize.FTLbsPaperSize || 'A4'} · {existingSaveSize.FNLbsCol} × {existingSaveSize.FNLbsRow} ดวง/แผ่น</> : <>{saveAsWidth} × {saveAsHeight} มม. · {a4Metrics.paperSize} · {a4Metrics.cols} × {a4Metrics.rows} ดวง/แผ่น</>}
+
               </div>
               <div className="grid grid-cols-2 gap-2 py-1">
                 <label>ประเภทป้าย<select className="block w-full rounded border p-1" value={newPrice} onChange={e=>setNewPrice(e.target.value==='2'?'2':'1')}><option value="1">ราคาปกติ</option><option value="2">ราคาโปรโมชัน</option></select></label>

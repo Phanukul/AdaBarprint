@@ -142,6 +142,9 @@ pub struct TCNMLabelTmpl {
     #[sqlx(default)]
     #[serde(default)]
     pub hasOriginal: bool,
+    #[sqlx(default)]
+    #[serde(default)]
+    pub userCreated: bool,
     pub FTLtmStaUse: String,
     pub FTLtmMode: Option<String>,
     pub FTPprCode: Option<String>,

@@ -386,3 +386,29 @@ async fn standard_designs_upgrade_profiles_and_preserve_exact_edits() {
         .fetch_all(&pool).await.unwrap();
     assert_eq!(modes,vec![("QA-PREPRINT-DESIGN-PMT".into(),"preprint".into()),("UFM-PRO-A5-STD-PMT".into(),"full".into())]);
 }
+
+#[tokio::test]
+async fn save_as_on_existing_size_adds_only_independent_templates() {
+    let (pool, _) = fixture().await;
+    let state = routes::AppState { pool: pool.clone() };
+    let sizes = || sqlx::query_scalar::<_, i64>("SELECT count(*) FROM TCNMLabelSize").fetch_one(&pool);
+    let before = sizes().await.unwrap();
+    let formats = || sqlx::query_scalar::<_, i64>("SELECT count(*) FROM TCNMLabelTmpl WHERE FTLbsCode='SH-50x38'").fetch_one(&pool);
+    let old_formats = formats().await.unwrap();
+    for mode in ["full","preprint"] {
+        let body = json!({"sourceLbsCode":"SH-50x38","newLbsName":"Independent","priType":"2",
+            "layout":{"designMode":mode,"elements":[{"type":"price","field":"price.value"}]}});
+        let response = routes::post_save_as_template(State(state.clone()),Json(serde_json::from_value(body).unwrap())).await;
+        assert!(response.status().is_success());
+        let bytes=axum::body::to_bytes(response.into_body(),65536).await.unwrap();
+        let saved:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(saved["lbsCode"],"SH-50x38");
+        let reopened:String=sqlx::query_scalar("SELECT FTLtmLayout FROM TCNMLabelTmpl WHERE FTLtmCode=? AND FTLbsCode='SH-50x38'")
+            .bind(saved["tmplCode"].as_str().unwrap()).fetch_one(&pool).await.unwrap();
+        let layout:serde_json::Value=serde_json::from_str(&reopened).unwrap();
+        assert_eq!(layout["designMode"],mode);
+        assert_eq!(layout["width"],50.0);
+    }
+    assert_eq!(sizes().await.unwrap(),before);
+    assert_eq!(formats().await.unwrap(),old_formats+2);
+}

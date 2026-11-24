@@ -539,7 +539,7 @@ pub async fn get_label_sizes(State(st): State<AppState>) -> Response {
     };
 
     let tmpls = sqlx::query_as::<_, TCNMLabelTmpl>(
-        "SELECT FTLtmCode, FTLbsCode, FTLtmPriType, FTLtmName, FTLtmLayout, FTLtmStaUse, FTLtmMode, FTPprCode, FTLtmOriginal IS NOT NULL AS hasOriginal FROM TCNMLabelTmpl WHERE FTLtmStaUse = '1'",
+        "SELECT FTLtmCode, FTLbsCode, FTLtmPriType, FTLtmName, FTLtmLayout, FTLtmStaUse, FTLtmMode, FTPprCode, FTLtmOriginal IS NOT NULL AS hasOriginal, coalesce(FTCreateBy,'')='DESIGNER' AS userCreated FROM TCNMLabelTmpl WHERE FTLtmStaUse = '1'",
     )
     .fetch_all(&st.pool)
     .await
@@ -568,6 +568,7 @@ pub async fn get_label_sizes(State(st): State<AppState>) -> Response {
                         "FTLtmPriType": t.FTLtmPriType,
                         "FTLtmLayout": hydrated_layout,
                         "hasOriginal": t.hasOriginal,
+                        "userCreated": t.userCreated,
                         "FTLtmMode": t.FTLtmMode,
                         "FTPprCode": t.FTPprCode
                     })
@@ -844,6 +845,7 @@ pub async fn post_save_template(
 #[serde(rename_all = "camelCase")]
 pub struct SaveAsTemplateReq {
     pub source_lbs_code: String,
+    pub reuse_size: Option<bool>,
     pub new_lbs_code: Option<String>,
     pub new_lbs_name: String,
     pub pri_type: String,
@@ -960,21 +962,31 @@ pub async fn post_save_as_template(
         format!("CUS-{}x{}-{}", width_mm.round() as i64, height_mm.round() as i64, suffix)
     };
 
+    let reuse = body.reuse_size.unwrap_or(raw_code.is_empty());
     let mut tx = match st.pool.begin_with("BEGIN IMMEDIATE").await {
         Ok(tx) => tx, Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()),
     };
-    match sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM TCNMLabelSize WHERE FTLbsCode=?)")
-        .bind(&new_lbs_code).fetch_one(&mut *tx).await {
-        Ok(true) => return err_json(StatusCode::CONFLICT,"รหัสแบบนี้มีอยู่แล้ว กรุณาใช้รหัสใหม่"),
-        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()),
-        Ok(false) => {}
-    }
-
-    let tmpl_code = format!(
-        "{}-DESIGN-{}",
-        new_lbs_code,
-        if pri_type == "2" { "PMT" } else { "NOR" }
-    );
+    let (new_lbs_code, tmpl_code, width_mm, height_mm, cols, rows, mag_top, mag_left, mag_bottom, mag_right, gap_h, gap_v) = if reuse {
+        let size = sqlx::query_as::<_, (f64,f64,i64,i64,f64,f64,f64,f64,f64,f64)>(
+            "SELECT FCLbsWidth,FCLbsHeight,coalesce(FNLbsCol,1),coalesce(FNLbsRow,1),coalesce(FCLbsMagTop,3),coalesce(FCLbsMagLeft,3),coalesce(FCLbsMagBottom,FCLbsMagTop,3),coalesce(FCLbsMagRight,FCLbsMagLeft,3),coalesce(FCLbsGapH,2),coalesce(FCLbsGapV,2) FROM TCNMLabelSize WHERE FTLbsCode=? AND FTLbsStaUse='1'")
+            .bind(source_code).fetch_optional(&mut *tx).await;
+        let (w,h,c,r,top,left,bottom,right,gh,gv) = match size {
+            Ok(Some(size)) => size,
+            Ok(None) => return err_json(StatusCode::BAD_REQUEST,"กรุณาเลือกขนาดป้ายที่เปิดใช้งาน"),
+            Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()),
+        };
+        let id = format!("{source_code}-{}", uuid::Uuid::new_v4().simple());
+        (source_code.to_owned(),id,w,h,c,r,top,left,bottom,right,gh,gv)
+    } else {
+        match sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM TCNMLabelSize WHERE FTLbsCode=?)")
+            .bind(&new_lbs_code).fetch_one(&mut *tx).await {
+            Ok(true) => return err_json(StatusCode::CONFLICT,"รหัสขนาดนี้มีอยู่แล้ว กรุณาใช้รหัสใหม่"),
+            Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()),
+            Ok(false) => {}
+        }
+        let id = format!("{}-DESIGN-{}", new_lbs_code, if pri_type=="2" {"PMT"} else {"NOR"});
+        (new_lbs_code,id,width_mm,height_mm,cols,rows,mag_top,mag_left,mag_bottom,mag_right,gap_h,gap_v)
+    };
 
     let mut layout_val = body.layout.clone();
     if let Some(obj) = layout_val.as_object_mut() {
@@ -1009,44 +1021,47 @@ pub async fn post_save_as_template(
     let layout_str = serde_json::to_string(&layout_val).unwrap_or_else(|_| "{}".to_string());
     let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-    let tmpl_nor = if pri_type == "1" { Some(tmpl_code.as_str()) } else { None };
-    let tmpl_pmt = if pri_type == "2" { Some(tmpl_code.as_str()) } else { None };
+    if !reuse {
+        let tmpl_nor = if pri_type == "1" { Some(tmpl_code.as_str()) } else { None };
+        let tmpl_pmt = if pri_type == "2" { Some(tmpl_code.as_str()) } else { None };
 
-    if let Err(e) = sqlx::query(
-        r#"
-        INSERT INTO TCNMLabelSize
-            (FTLbsCode, FTLbsGroup, FTLbsName, FCLbsWidth, FCLbsHeight, FNLbsCol, FNLbsRow, FCLbsMagTop, FCLbsMagLeft, FCLbsMagBottom, FCLbsMagRight, FCLbsGapH, FCLbsGapV, FNLbsQtyPageNor, FNLbsQtyPagePmt, FTLbsTmplNor, FTLbsTmplPmt, FTLbsHhtCode, FTLbsStaUse, FTLbsPaperSize, FCLbsPaperWidth, FCLbsPaperHeight, FTPprCode, FTLbsRmk, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CUSTOM', '1', ?, ?, ?, ?, ?, ?, 'DESIGNER', ?, 'DESIGNER')
-        "#,
-    )
-    .bind(&new_lbs_code)
-    .bind(&lbs_group)
-    .bind(new_name)
-    .bind(width_mm)
-    .bind(height_mm)
-    .bind(cols)
-    .bind(rows)
-    .bind(mag_top)
-    .bind(mag_left)
-    .bind(mag_bottom)
-    .bind(mag_right)
-    .bind(gap_h)
-    .bind(gap_v)
-    .bind(final_qty_nor)
-    .bind(final_qty_pmt)
-    .bind(tmpl_nor)
-    .bind(tmpl_pmt)
-    .bind(&paper_size)
-    .bind(paper_w)
-    .bind(paper_h)
-    .bind(&ppr_code_opt)
-    .bind(source_code)
-    .bind(&now)
-    .bind(&now)
-    .execute(&mut *tx)
-    .await
-    {
-        return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        if let Err(e) = sqlx::query(
+            r#"
+            INSERT INTO TCNMLabelSize
+                (FTLbsCode, FTLbsGroup, FTLbsName, FCLbsWidth, FCLbsHeight, FNLbsCol, FNLbsRow, FCLbsMagTop, FCLbsMagLeft, FCLbsMagBottom, FCLbsMagRight, FCLbsGapH, FCLbsGapV, FNLbsQtyPageNor, FNLbsQtyPagePmt, FTLbsTmplNor, FTLbsTmplPmt, FTLbsHhtCode, FTLbsStaUse, FTLbsPaperSize, FCLbsPaperWidth, FCLbsPaperHeight, FTPprCode, FTLbsRmk, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CUSTOM', '1', ?, ?, ?, ?, ?, ?, 'DESIGNER', ?, 'DESIGNER')
+            "#,
+        )
+        .bind(&new_lbs_code)
+        .bind(&lbs_group)
+        .bind(new_name)
+        .bind(width_mm)
+        .bind(height_mm)
+        .bind(cols)
+        .bind(rows)
+        .bind(mag_top)
+        .bind(mag_left)
+        .bind(mag_bottom)
+        .bind(mag_right)
+        .bind(gap_h)
+        .bind(gap_v)
+        .bind(final_qty_nor)
+        .bind(final_qty_pmt)
+        .bind(tmpl_nor)
+        .bind(tmpl_pmt)
+        .bind(&paper_size)
+        .bind(paper_w)
+        .bind(paper_h)
+        .bind(&ppr_code_opt)
+        .bind(source_code)
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+        }
+
     }
 
     if let Err(e) = sqlx::query(
