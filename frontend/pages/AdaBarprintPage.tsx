@@ -405,7 +405,7 @@ function AdaBarprintWorkspace({
   const [sysOptions, setSysOptions] = useState<SysOptionRow[]>([]);
   const [printerServers, setPrinterServers] = useState<PrinterServerRow[]>([]);
   const [settingsEditLbsCode, setSettingsEditLbsCode] = useState<string | null>(null);
-  const [settingsSubTab, setSettingsSubTab] = useState<'sizes' | 'preprints' | 'printers' | 'devices' | 'system' | 'autoprint' | 'autoprint_history' | 'connection' | 'jobs' | null>(null);
+  const [settingsSubTab, setSettingsSubTab] = useState<'sizes' | 'preprints' | 'printers' | 'devices' | 'autoprint' | 'autoprint_history' | 'connection' | 'jobs' | null>(null);
   const [filterOpen, setFilterOpen] = useState(true);
 
   // Master data

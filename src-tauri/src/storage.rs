@@ -66,6 +66,13 @@ pub fn default_master() -> PathBuf {
         .join("AdaPos6.0").join("AdaStoreFront").join("Data").join("AdaAccD.db")
 }
 pub fn default_local_master() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    if let Some(program_data) = std::env::var_os("ProgramData") {
+        let installed = PathBuf::from(program_data).join("AdaPos6.0").join("AdaBarprint").join("Data").join("AdaAccD.db");
+        if installed.is_file() {
+            return installed;
+        }
+    }
     data_root().join("Data").join("AdaAccD.db")
 }
 
@@ -412,6 +419,17 @@ mod tests {
         assert_eq!(crate::standalone::mode(&pool).await, "STANDALONE");
         assert_eq!(configured_branch(&pool).await, "00002");
 
+        // Explicit source selection must not silently attach or initialize a different kind of database.
+        for (mode, path) in [("POS_SHARED", &local_db), ("STANDALONE", &master)] {
+            let response = save_config(state(), Json(Config {
+                operator_password: String::new(), mode: mode.into(), sync: None,
+                path: path.to_string_lossy().into_owned(), branch: String::new(),
+                max_age_minutes: 1440, pin: "246810".into(), new_pin: String::new(),
+            })).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(configured_branch(&pool).await, "00002");
+        }
+
         // 2) Unified save pointing to existing StoreFront POS DB without API URL -> read-only POS attachment automatically
         let res_pos = save_config(state(), Json(Config {
             operator_password:String::new(),
@@ -606,6 +624,7 @@ pub async fn save_config(State(st):State<AppState>,Json(mut cfg):Json<Config>) -
     }else{None};
     if !["UNIFIED","POS_SHARED","STANDALONE"].contains(&cfg.mode.as_str()){return error("โหมดแหล่งข้อมูลไม่ถูกต้อง");}
     if cfg.path.trim().is_empty() {
+        if cfg.mode == "POS_SHARED" { return error("ระบุพาธไฟล์ AdaAccD.db ของ POS"); }
         cfg.path = default_local_master().to_string_lossy().into_owned();
     }
     let has_api = cfg
@@ -615,6 +634,9 @@ pub async fn save_config(State(st):State<AppState>,Json(mut cfg):Json<Config>) -
         .unwrap_or(false);
     let mut sync_json = String::from("{}");
     let effective_mode: String;
+    if cfg.mode == "POS_SHARED" && has_api {
+        return error("โหมด POS ต้องเลือกไฟล์ฐานข้อมูลของ POS");
+    }
     if has_api {
         let Some(mut sync) = cfg.sync.take() else { return error("ระบุการเชื่อมต่อ API2PSMaster"); };
         sync.base_url = sync.base_url.trim().to_string();
@@ -667,6 +689,12 @@ pub async fn save_config(State(st):State<AppState>,Json(mut cfg):Json<Config>) -
                 Ok(v) => v,
                 Err(e) => return error(e),
             };
+            if cfg.mode == "POS_SHARED" && is_owned {
+                return error("ไฟล์นี้เป็นฐานของ AdaBarprint กรุณาเลือกฐานข้อมูลของ POS");
+            }
+            if cfg.mode == "STANDALONE" && !is_owned {
+                return error("หากต้องการอ่านไฟล์ฐานข้อมูลของ POS ให้เลือกอ่านฐานข้อมูลของ POS");
+            }
             if is_owned {
                 effective_mode = "STANDALONE".into();
                 if cfg.branch.trim().is_empty() {

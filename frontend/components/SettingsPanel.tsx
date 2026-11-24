@@ -6,7 +6,6 @@ import { toast } from 'sonner';
 import {
   ArrowLeft,
   Calculator,
-  CheckCircle2,
   ChevronDown,
   ChevronUp,
   Edit3,
@@ -17,7 +16,6 @@ import {
   Printer,
   Save,
   Search,
-  Settings,
   Trash2,
   Wifi,
 } from 'lucide-react';
@@ -151,7 +149,7 @@ interface SettingsPanelProps {
   formatTrayLabel: (tray: string) => string;
   initialEditLbsCode?: string | null;
   onClearInitialEdit?: () => void;
-  initialSubTab?: 'sizes' | 'preprints' | 'printers' | 'devices' | 'system' | 'autoprint' | 'autoprint_history' | 'connection' | 'jobs' | null;
+  initialSubTab?: 'sizes' | 'preprints' | 'printers' | 'devices' | 'autoprint' | 'autoprint_history' | 'connection' | 'jobs' | null;
   onClearInitialSubTab?: () => void;
   onLoadManualRows?: (lines: ManualLoadLine[]) => void;
 }
@@ -203,7 +201,7 @@ export function SettingsPanel({
   onClearInitialSubTab,
   onLoadManualRows,
 }: SettingsPanelProps) {
-  const [subTab, setSubTab] = useState<'sizes' | 'preprints' | 'printers' | 'devices' | 'system' | 'autoprint' | 'autoprint_history' | 'connection' | 'jobs'>(() => {
+  const [subTab, setSubTab] = useState<'sizes' | 'preprints' | 'printers' | 'devices' | 'autoprint' | 'autoprint_history' | 'connection' | 'jobs'>(() => {
     if (initialEditLbsCode) return 'printers';
     if (!ENABLE_AUTO_PRINT_UI && initialSubTab === 'autoprint') {
       return 'sizes';
@@ -329,7 +327,6 @@ export function SettingsPanel({
   const [bulkPromoPrinter, setBulkPromoPrinter] = useState('');
   const [bulkPromoTray, setBulkPromoTray] = useState('');
   const [savingBulkDriver, setSavingBulkDriver] = useState(false);
-  const [advancedSystemOpen, setAdvancedSystemOpen] = useState(false);
   const [driverEditRow, setDriverEditRow] = useState<SettingsDriverMapping | null>(() => {
     if (!initialEditLbsCode) return null;
     const found = driverMappings.find((m) => m.lbsCode === initialEditLbsCode);
@@ -354,10 +351,8 @@ export function SettingsPanel({
   const getOpt = (code: string, fallback = '') =>
     sysOptions.find((o) => o.FTSopCode === code)?.FTSopValue ?? fallback;
 
-  const [optBranch, setOptBranch] = useState(() => getOpt('DefaultBranch', ''));
   const [optTemplate, setOptTemplate] = useState(() => getOpt('DefaultTemplate', ''));
   const [optPrinter, setOptPrinter] = useState(() => getOpt('DefaultPrinter', ''));
-  const [optDpi, setOptDpi] = useState(() => getOpt('DefaultDpi', '203'));
   const [optUrlTmpl, setOptUrlTmpl] = useState(() => getOpt('UrlTemplate', ''));
   const [optUser, setOptUser] = useState(() => getOpt('DefaultUser', ''));
   const [optServerName, setOptServerName] = useState(
@@ -369,10 +364,8 @@ export function SettingsPanel({
   React.useEffect(() => {
     const val = (code: string, fallback = '') =>
       sysOptions.find((o) => o.FTSopCode === code)?.FTSopValue ?? fallback;
-    setOptBranch(val('DefaultBranch', ''));
     setOptTemplate(val('DefaultTemplate', ''));
     setOptPrinter(val('DefaultPrinter', ''));
-    setOptDpi(val('DefaultDpi', '203'));
     setOptUrlTmpl(val('UrlTemplate', ''));
     setOptUser(val('DefaultUser', ''));
     if (printerServers[0]?.FTPsvName) {
@@ -904,23 +897,13 @@ export function SettingsPanel({
   };
 
   // ── Handlers: Tab 3 (System Options) ───────────────────────────────────────
-  const handleSaveOptions = async () => {
+  const handleSaveOptions = async (options: Array<{ code: string; value: string }>, server?: { serverCode: string; serverName: string }) => {
     setSavingOpts(true);
     try {
       const res = await fetch('/api/config/options', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          options: [
-            { code: 'DefaultTemplate', value: optTemplate },
-            { code: 'DefaultPrinter', value: optPrinter },
-            { code: 'DefaultDpi', value: optDpi },
-            { code: 'UrlTemplate', value: optUrlTmpl },
-            { code: 'DefaultUser', value: optUser },
-          ],
-          serverCode: driverServerCode,
-          serverName: optServerName,
-        }),
+        body: JSON.stringify({ options, ...server }),
       });
       const data = await parseApiJson(res);
       if (!res.ok || !data?.ok) {
@@ -938,7 +921,7 @@ export function SettingsPanel({
 
   const isAdminLockedView =
     workspace === 'settings' &&
-    ['connection', 'system'].includes(subTab) &&
+    subTab === 'connection' &&
     (!adminChecked || !adminGranted);
 
   const renderAdminGateCard = (title: string) => (
@@ -1039,12 +1022,12 @@ export function SettingsPanel({
       <Tabs value={subTab} onValueChange={(v) => setSubTab(v as typeof subTab)} className="space-y-4">
         <div className="space-y-3">
           {workspace==='jobs'?<TabsList className="bg-white border p-1 h-auto w-full justify-start overflow-x-auto"><TabsTrigger value="jobs" className="min-h-10">งานพิมพ์</TabsTrigger>{ENABLE_AUTO_PRINT_HISTORY_TAB&&<TabsTrigger value="autoprint_history" className="min-h-10">ประวัติก่อนย้ายระบบ</TabsTrigger>}</TabsList>:workspace==='profiles'?null:<>
-            <label className="block sm:hidden text-sm space-y-2"><span className="font-medium">หมวดการตั้งค่า</span><select className="w-full rounded-lg border bg-white p-3" value={subTab==='printers'?'devices':subTab} onChange={e=>setSubTab(e.target.value as typeof subTab)}>{[['sizes','ขนาดและกระดาษ'],['preprints','กระดาษพิมพ์พื้นหลัง'],['devices','เครื่องพิมพ์'],['connection','🔒 แหล่งข้อมูล (IT/Admin)'],['system','🔒 ค่าเริ่มต้น (IT/Admin)'],...(ENABLE_AUTO_PRINT_UI?[['autoprint','จัดการ Profile']]:[])].map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>
+            <label className="block sm:hidden text-sm space-y-2"><span className="font-medium">หมวดการตั้งค่า</span><select className="w-full rounded-lg border bg-white p-3" value={subTab==='printers'?'devices':subTab} onChange={e=>setSubTab(e.target.value as typeof subTab)}>{[['sizes','ขนาดและกระดาษ'],['preprints','กระดาษพิมพ์พื้นหลัง'],['devices','เครื่องพิมพ์'],['connection','🔒 แหล่งข้อมูล (IT/Admin)'],...(ENABLE_AUTO_PRINT_UI?[['autoprint','จัดการ Profile']]:[])].map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>
             <div className="hidden sm:block"><TabsList className="bg-white border border-slate-200 p-1 h-auto min-h-11 w-full max-w-full flex-nowrap overflow-x-auto justify-start gap-1">
-              {([['sizes','ขนาดและกระดาษ'],['preprints','กระดาษพิมพ์พื้นหลัง'],['devices','เครื่องพิมพ์'],...(ENABLE_AUTO_PRINT_UI?[['autoprint','จัดการ Profile']]:[]),['connection','🔒 แหล่งข้อมูล (IT/Admin)'],['system','🔒 ค่าเริ่มต้น (IT/Admin)']]).map(([value,label])=><TabsTrigger key={value} value={value==='devices'&&subTab==='printers'?'printers':value} className="flex-none min-h-10 text-sm px-3">{label}</TabsTrigger>)}
+              {([['sizes','ขนาดและกระดาษ'],['preprints','กระดาษพิมพ์พื้นหลัง'],['devices','เครื่องพิมพ์'],...(ENABLE_AUTO_PRINT_UI?[['autoprint','จัดการ Profile']]:[]),['connection','🔒 แหล่งข้อมูล (IT/Admin)']]).map(([value,label])=><TabsTrigger key={value} value={value==='devices'&&subTab==='printers'?'printers':value} className="flex-none min-h-10 text-sm px-3">{label}</TabsTrigger>)}
             </TabsList></div>
             {(subTab==='devices'||subTab==='printers')&&<div className="flex flex-wrap gap-2"><Button variant={subTab==='devices'?'default':'outline'} className={subTab==='devices'?'bg-teal-700 hover:bg-teal-800':''} onClick={()=>setSubTab('devices')}>รายชื่อเครื่องพิมพ์</Button><Button variant={subTab==='printers'?'default':'outline'} className={subTab==='printers'?'bg-teal-700 hover:bg-teal-800':''} onClick={()=>setSubTab('printers')}>เครื่องพิมพ์ตามแบบป้าย</Button></div>}
-            {adminGranted && ['connection', 'system'].includes(subTab) && (
+            {adminGranted && ['connection', 'sizes', 'devices'].includes(subTab) && (
               <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-teal-200 bg-teal-50 px-3 py-2 text-xs text-teal-900">
                 <span>โหมดผู้ดูแลระบบ (IT / Admin) ปลดล็อกอยู่ · สิทธิ์: {authUser.name} ({authUser.role})</span>
                 <Button type="button" size="sm" variant="outline" className="h-7 text-xs bg-white border-teal-300" onClick={() => void handleLockAdminConfig()}>
@@ -1064,6 +1047,31 @@ export function SettingsPanel({
           ) : (
             <MasterDatabaseSettings onSaved={() => window.location.reload()} />
           )}
+          {adminGranted && <details className="rounded-lg border bg-white p-4">
+            <summary className="cursor-pointer text-sm font-medium">ลิงก์สินค้าและผู้ใช้เริ่มต้น (IT/Admin)</summary>
+            <div className="mt-3 space-y-3">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                      <Label className="text-xs font-medium">รูปแบบลิงก์ QR Code</Label>
+                      <Input
+                        value={optUrlTmpl}
+                        onChange={(e) => setOptUrlTmpl(e.target.value)}
+                        className="h-9 text-xs font-mono"
+                      />
+                    </div>
+                <div className="space-y-1.5">
+                      <Label className="text-xs font-medium">รหัสผู้ใช้งานเริ่มต้น</Label>
+                      <Input
+                        value={optUser}
+                        onChange={(e) => setOptUser(e.target.value)}
+                        placeholder="เช่น ADMIN"
+                        className="h-9 text-xs"
+                      />
+                    </div>
+              </div>
+              <Button disabled={savingOpts} onClick={() => handleSaveOptions([{ code: 'UrlTemplate', value: optUrlTmpl }, { code: 'DefaultUser', value: optUser }])}>บันทึก</Button>
+            </div>
+          </details>}
         </TabsContent>
         <TabsContent value="jobs">{jobsPanel}</TabsContent>
 
@@ -1251,6 +1259,32 @@ export function SettingsPanel({
               />
             </CardContent>
           </Card>
+          <details className="rounded-lg border bg-white p-4">
+            <summary className="cursor-pointer text-sm font-medium">รูปแบบป้ายเริ่มต้น (IT/Admin)</summary>
+            {adminGranted ? <div className="mt-3 space-y-3">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium">รูปแบบป้ายเริ่มต้น</Label>
+                  <SearchableSelect
+                    value={optTemplate || '__NONE__'}
+                    onValueChange={(v) => setOptTemplate(v === '__NONE__' ? '' : v)}
+                    placeholder="-- ให้ผู้ใช้เลือกเอง --"
+                    searchPlaceholder="ค้นหารหัสหรือชื่อรูปแบบป้าย..."
+                    className="h-9 text-xs"
+                    options={[
+                      { value: '__NONE__', label: '-- ให้ผู้ใช้เลือกเอง --' },
+                      ...activeSizesForDefault.map((s) => ({
+                        value: s.FTLbsCode,
+                        label: `${s.FTLbsCode} — ${s.FTLbsName}`,
+                        keywords: `${s.FTLbsCode} ${s.FTLbsName}`,
+                      })),
+                    ]}
+                  />
+                </div>
+              </div>
+              <Button disabled={savingOpts} onClick={() => handleSaveOptions([{ code: 'DefaultTemplate', value: optTemplate }])}>บันทึก</Button>
+            </div> : renderAdminGateCard('รูปแบบป้ายเริ่มต้น')}
+          </details>
         </TabsContent>
 
         {/* ══════════════════ TAB 2: PRE-PRINT VAULT ════════════════════════ */}
@@ -1503,65 +1537,12 @@ export function SettingsPanel({
             </CardContent>
           </Card>
 
-        </TabsContent>
-
-        {/* ══════════════════ TAB 3: SYSTEM OPTIONS ═════════════════════════ */}
-        <TabsContent value="system" className="space-y-4 mt-0">
-          {!adminChecked ? (
-            <p className="p-6 text-sm text-slate-500">กำลังตรวจสอบสิทธิ์ผู้ดูแลระบบ...</p>
-          ) : isAdminLockedView ? (
-            renderAdminGateCard('ตั้งค่าเริ่มต้นของระบบ (Admin Config)')
-          ) : (
-          <Card className="border-slate-200 shadow-xs bg-white py-0 gap-0 max-w-3xl">
-            <CardHeader className="bg-[#3d4a57] text-white py-2.5 px-4">
-              <CardTitle className="text-sm font-semibold flex items-center gap-1.5">
-                <Settings className="h-4 w-4" />
-                ตั้งค่าเริ่มต้นของระบบ
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="p-5 space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <details className="rounded-lg border bg-white p-4">
+            <summary className="cursor-pointer text-sm font-medium">เครื่องพิมพ์สำรองและแม่ข่าย (IT/Admin)</summary>
+            {adminGranted ? <div className="mt-3 space-y-3">
+              <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5">
-                  <Label className="text-xs font-medium">สาขาของแหล่งข้อมูล StoreFront</Label>
-                  <SearchableSelect
-                    disabled
-                    value={optBranch || '__NONE__'}
-                    onValueChange={(v) => setOptBranch(v === '__NONE__' ? '' : v)}
-                    placeholder="-- ไม่กำหนด --"
-                    searchPlaceholder="ค้นหารหัสหรือชื่อสาขา..."
-                    className="h-9 text-xs"
-                    options={[
-                      { value: '__NONE__', label: '-- ไม่กำหนด (ทั้งหมด) --' },
-                      ...branches.map((b) => ({
-                        value: b.FTBchCode,
-                        label: `${b.FTBchCode} — ${b.FTBchName || b.FTBchCode}`,
-                        keywords: `${b.FTBchCode} ${b.FTBchName || ''}`,
-                      })),
-                    ]}
-                  />
-                </div>
-
-                <div className="space-y-1.5">
-                  <Label className="text-xs font-medium">รูปแบบป้ายเริ่มต้น</Label>
-                  <SearchableSelect
-                    value={optTemplate || '__NONE__'}
-                    onValueChange={(v) => setOptTemplate(v === '__NONE__' ? '' : v)}
-                    placeholder="-- ให้ผู้ใช้เลือกเอง --"
-                    searchPlaceholder="ค้นหารหัสหรือชื่อรูปแบบป้าย..."
-                    className="h-9 text-xs"
-                    options={[
-                      { value: '__NONE__', label: '-- ให้ผู้ใช้เลือกเอง --' },
-                      ...activeSizesForDefault.map((s) => ({
-                        value: s.FTLbsCode,
-                        label: `${s.FTLbsCode} — ${s.FTLbsName}`,
-                        keywords: `${s.FTLbsCode} ${s.FTLbsName}`,
-                      })),
-                    ]}
-                  />
-                </div>
-
-                <div className="space-y-1.5">
-                  <Label className="text-xs font-medium">เครื่องพิมพ์เริ่มต้น</Label>
+                  <Label className="text-xs font-medium">เครื่องพิมพ์สำรอง</Label>
                   <SearchableSelect
                     value={optPrinter || '__NONE__'}
                     onValueChange={(v) => setOptPrinter(v === '__NONE__' ? '' : v)}
@@ -1585,39 +1566,7 @@ export function SettingsPanel({
                     ]}
                   />
                 </div>
-              </div>
-
-              <div className="border border-slate-200 rounded-md overflow-hidden">
-                <button
-                  type="button"
-                  onClick={() => setAdvancedSystemOpen((o) => !o)}
-                  className="w-full flex items-center justify-between px-3 py-2 bg-slate-50 hover:bg-slate-100 text-xs font-medium text-slate-700 transition-colors"
-                >
-                  <span>ตั้งค่าขั้นสูง (สำหรับผู้ดูแลระบบ: DPI, Print Server, QR Link)</span>
-                  {advancedSystemOpen ? (
-                    <ChevronUp className="h-3.5 w-3.5 text-slate-500" />
-                  ) : (
-                    <ChevronDown className="h-3.5 w-3.5 text-slate-500" />
-                  )}
-                </button>
-
-                {advancedSystemOpen && (
-                  <div className="p-4 border-t border-slate-200 bg-white grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="space-y-1.5">
-                      <Label className="text-xs font-medium">ความละเอียดพิมพ์เริ่มต้น</Label>
-                      <Select value={optDpi || '203'} onValueChange={setOptDpi}>
-                        <SelectTrigger className="h-9 text-xs">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="203">203 DPI</SelectItem>
-                          <SelectItem value="300">300 DPI</SelectItem>
-                          <SelectItem value="600">600 DPI</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-
-                    <div className="space-y-1.5">
+                <div className="space-y-1.5">
                       <Label className="text-xs font-medium">ชื่อเครื่องแม่ข่ายพิมพ์ (Print Server)</Label>
                       <Input
                         value={optServerName}
@@ -1625,47 +1574,14 @@ export function SettingsPanel({
                         className="h-9 text-xs"
                       />
                     </div>
-
-                    <div className="space-y-1.5">
-                      <Label className="text-xs font-medium">รหัสผู้ใช้งานเริ่มต้น</Label>
-                      <Input
-                        value={optUser}
-                        onChange={(e) => setOptUser(e.target.value)}
-                        placeholder="เช่น ADMIN"
-                        className="h-9 text-xs"
-                      />
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <Label className="text-xs font-medium">รูปแบบลิงก์ QR Code</Label>
-                      <Input
-                        value={optUrlTmpl}
-                        onChange={(e) => setOptUrlTmpl(e.target.value)}
-                        className="h-9 text-xs font-mono"
-                      />
-                    </div>
-                  </div>
-                )}
               </div>
-
-              <div className="pt-2 border-t border-slate-100 flex justify-end">
-                <Button
-                  className="bg-[#007a87] hover:bg-[#00606b] text-white"
-                  disabled={savingOpts}
-                  onClick={handleSaveOptions}
-                >
-                  {savingOpts ? (
-                    <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
-                  ) : (
-                    <CheckCircle2 className="h-4 w-4 mr-1.5" />
-                  )}
-                  บันทึกการตั้งค่าระบบ
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-          )}
+              <Button disabled={savingOpts} onClick={() => handleSaveOptions([{ code: 'DefaultPrinter', value: optPrinter }], { serverCode: driverServerCode, serverName: optServerName })}>บันทึก</Button>
+            </div> : renderAdminGateCard('เครื่องพิมพ์สำรองและแม่ข่าย')}
+          </details>
         </TabsContent>
+
+        {/* ══════════════════ TAB 3: SYSTEM OPTIONS ═════════════════════════ */}
+
 
         {ENABLE_AUTO_PRINT_UI && (
           <TabsContent value="autoprint" className="space-y-4 mt-0">
