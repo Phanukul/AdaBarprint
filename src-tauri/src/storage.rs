@@ -202,7 +202,8 @@ fn default_age() -> i64 { 1440 }
 
 pub async fn validate(path: &str) -> Result<Value, String> {
     let p = Path::new(path.trim());
-    if !p.is_absolute() || !p.is_file() { return Err("เลือกไฟล์ AdaAccD.db ที่มีอยู่จริงด้วยพาธเต็ม".into()); }
+    if !p.is_absolute() { return Err("กรุณาระบุพาธเต็มของไฟล์ AdaAccD.db".into()); }
+    if !p.is_file() { return Err("ไม่พบไฟล์ AdaAccD.db ที่ตำแหน่งนี้ กรุณาเลือกหรือระบุตำแหน่งไฟล์".into()); }
     if std::fs::canonicalize(p).ok() == std::fs::canonicalize(print_db_path()).ok() { return Err("ฐานข้อมูล Master ต้องไม่ใช่ฐานข้อมูล AdaBarprint".into()); }
     let options = SqliteConnectOptions::new().filename(p).read_only(true).create_if_missing(false)
         .busy_timeout(Duration::from_secs(3));

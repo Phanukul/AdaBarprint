@@ -14,6 +14,8 @@ export function MasterDatabaseSettings({ onSaved }: { onSaved?: () => void }) {
   const [useApi, setUseApi] = useState(false);
   const [savedSource, setSavedSource] = useState('');
   const [dbPath, setDbPath] = useState('');
+  const [editingPath, setEditingPath] = useState(false);
+  const [databaseStatus, setDatabaseStatus] = useState('กำลังตรวจสอบฐานข้อมูล…');
   const [branch, setBranch] = useState('');
   const [age, setAge] = useState(1440);
   const [apiConfigured, setApiConfigured] = useState(false);
@@ -71,7 +73,10 @@ export function MasterDatabaseSettings({ onSaved }: { onSaved?: () => void }) {
     const mode = s.configured && s.mode === 'POS_SHARED' ? 'POS_SHARED' : 'STANDALONE';
     setSavedSource(s.configured ? mode : '');
     setUseApi(Boolean(s.apiConfigured || s.sync?.config?.baseUrl));
-    setDbPath(String(s.path || appDefaultPath || ''));
+    const path = String(s.path || appDefaultPath || '');
+    setDbPath(path);
+    setEditingPath(Boolean(s.error) || !path);
+    setDatabaseStatus(s.connected ? 'พร้อมใช้งาน' : s.error || (path ? 'พบฐานข้อมูลแล้ว' : 'กรุณาเลือกไฟล์ฐานข้อมูล'));
     setBranch(String(s.branch || ''));
     setAge(Number(s.maxAgeMinutes || 1440));
     setApiConfigured(Boolean(s.apiConfigured || s.sync?.config?.baseUrl));
@@ -108,11 +113,15 @@ export function MasterDatabaseSettings({ onSaved }: { onSaved?: () => void }) {
         } else if (s.sync?.config?.baseUrl) {
           setMessage(String(s.sync?.status || 'ตั้งค่า API2PSMaster แล้ว สามารถกด “ดาวน์โหลดข้อมูลตอนนี้” ได้'));
         } else {
-          setMessage(String(s.error || 'กำหนดไฟล์ AdaAccD.db หรือ API2PSMaster แล้วกดบันทึก'));
+          setMessage(s.error ? '' : 'กดบันทึกการตั้งค่าเพื่อใช้ฐานข้อมูลที่พบ');
         }
       })
       .catch((e) => {
-        if (active) setMessage(e instanceof Error ? e.message : String(e));
+        if (active) {
+          setDatabaseStatus('โหลดสถานะฐานข้อมูลไม่สำเร็จ');
+          setEditingPath(true);
+          setMessage(e instanceof Error ? e.message : String(e));
+        }
       });
     return () => {
       active = false;
@@ -238,6 +247,7 @@ export function MasterDatabaseSettings({ onSaved }: { onSaved?: () => void }) {
         const branchList = Array.isArray(r.branches) ? r.branches : [];
         setBranches(branchList);
         setCheckedPath(dbPath.trim());
+        setDatabaseStatus('ตรวจสอบไฟล์ผ่านแล้ว');
         if (branchList.length === 1 && branchList[0]?.code) {
           setBranch(branchList[0].code);
         } else if (!branchList.some((b: {code: string}) => b.code === branch)) {
@@ -311,7 +321,11 @@ export function MasterDatabaseSettings({ onSaved }: { onSaved?: () => void }) {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <span className="text-sm font-semibold text-slate-800">ฐานข้อมูลที่ใช้พิมพ์ป้าย</span>
           <div className="flex flex-wrap gap-2">
-            {'__TAURI_INTERNALS__' in window && (
+            {!editingPath && dbPath && (
+              <Button type="button" size="sm" variant="outline" disabled={busy}
+                onClick={() => setEditingPath(true)}>เปลี่ยนไฟล์ฐานข้อมูล</Button>
+            )}
+            {editingPath && '__TAURI_INTERNALS__' in window && (
               <Button
                 type="button"
                 size="sm"
@@ -323,6 +337,7 @@ export function MasterDatabaseSettings({ onSaved }: { onSaved?: () => void }) {
                     const selected = await invoke<string | null>('choose_master_database');
                     if (selected) {
                       setDbPath(selected);
+                      setDatabaseStatus('รอตรวจสอบไฟล์ที่เลือก');
                       setBranch('');
                       setCheckedPath('');
                       setBranches([]);
@@ -340,7 +355,7 @@ export function MasterDatabaseSettings({ onSaved }: { onSaved?: () => void }) {
               size="sm"
               variant="outline"
               className="h-8 text-xs bg-white"
-              disabled={busy}
+              disabled={busy || !dbPath.trim()}
               onClick={() => beginAction('check')}
             >
               ตรวจสอบไฟล์ DB
@@ -348,7 +363,8 @@ export function MasterDatabaseSettings({ onSaved }: { onSaved?: () => void }) {
           </div>
         </div>
 
-        <label className="block space-y-1.5 text-sm">
+        <p role="status" className="text-sm font-medium">{databaseStatus}</p>
+        {editingPath ? <label className="block space-y-1.5 text-sm">
           <span className="text-slate-700">ไฟล์ฐานข้อมูล AdaAccD.db</span>
           <Input
             className="w-full min-w-0 bg-white font-mono text-xs"
@@ -358,6 +374,7 @@ export function MasterDatabaseSettings({ onSaved }: { onSaved?: () => void }) {
             placeholder={defaultPath || 'เช่น D:\\AdaBarprint\\Data\\AdaAccD.db'}
             onChange={(e) => {
               setDbPath(e.target.value);
+              setDatabaseStatus('รอตรวจสอบไฟล์ที่ระบุ');
               setBranch('');
               setCheckedPath('');
               setBranches([]);
@@ -365,7 +382,7 @@ export function MasterDatabaseSettings({ onSaved }: { onSaved?: () => void }) {
             }}
           />
         {fieldError('path')}
-          </label>
+          </label> : <p className="break-all font-mono text-xs text-slate-600">{dbPath}</p>}
       </div>
   );
 
