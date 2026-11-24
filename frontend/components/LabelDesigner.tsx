@@ -331,7 +331,9 @@ export function LabelDesigner({
   );
 
   const effectiveLbsCode = selectedLabelCode || '';
-  const isBlankWorkspace = !effectiveLbsCode;
+  const [requestedTemplate, setRequestedTemplate] = useState(initialTemplateCode || '');
+  const blankSizeSelected = requestedTemplate === `blank:${effectiveLbsCode}`;
+  const isBlankWorkspace = !effectiveLbsCode || blankSizeSelected;
   const currentSize = useMemo(
     () =>
       (effectiveLbsCode ? activeSizes.find((l) => l.FTLbsCode === effectiveLbsCode) : undefined) || {
@@ -357,12 +359,12 @@ export function LabelDesigner({
 
   const buildEmptyBlankDoc = useCallback(
     (priceType: '1' | '2'): LabelDesignLayout => ({
-      lbsCode: '',
-      name: 'หน้ากระดาษเปล่า',
+      lbsCode: effectiveLbsCode,
+      name: 'ป้ายเปล่า',
       priType: priceType,
       designMode: 'full',
-      width: 100,
-      height: 60,
+      width: currentSize.FCLbsWidth,
+      height: currentSize.FCLbsHeight,
       backgroundColor: '#FFFFFF',
       borderWidth: 0.3,
       borderColor: '#CBD5E1',
@@ -370,7 +372,7 @@ export function LabelDesigner({
       customDesign: true,
       elements: [],
     }),
-    []
+    [effectiveLbsCode, currentSize.FCLbsWidth, currentSize.FCLbsHeight]
   );
 
   const [priType, setPriType] = useState<'1' | '2'>(() => {
@@ -381,7 +383,6 @@ export function LabelDesigner({
     return initialPriceType;
   });
   const formatOptions = useMemo(() => labelFormatOptions(activeSizes, true), [activeSizes]);
-  const [requestedTemplate, setRequestedTemplate] = useState(initialTemplateCode || '');
   const sizeTemplates = activeSizes.find(size => size.FTLbsCode === effectiveLbsCode)?.templates;
   useEffect(() => {
     const exact = sizeTemplates?.find(t => t.FTLtmCode === requestedTemplate);
@@ -392,7 +393,7 @@ export function LabelDesigner({
   const designCode = `${effectiveLbsCode}-DESIGN-${priType === '2' ? 'PMT' : 'NOR'}`;
   const legacySelected = requestedTemplate === `legacy:${effectiveLbsCode}`;
   const startingLayout = requestedTemplate === `starter:${effectiveLbsCode}`;
-  const selectedTemplate = startingLayout ? undefined : modeTemplates?.find(t => t.FTLtmCode === (legacySelected ? `${effectiveLbsCode}-STD-${priType === '2' ? 'PMT' : 'NOR'}` : requestedTemplate))
+  const selectedTemplate = startingLayout || isBlankWorkspace ? undefined : modeTemplates?.find(t => t.FTLtmCode === (legacySelected ? `${effectiveLbsCode}-STD-${priType === '2' ? 'PMT' : 'NOR'}` : requestedTemplate))
     || modeTemplates?.find(t => t.FTLtmCode === designCode) || modeTemplates?.[0];
   function selectFormat(value: string) {
     if (value.startsWith('legacy:')) {
@@ -509,7 +510,7 @@ export function LabelDesigner({
 
   // Load saved custom layout or blank/starter preset when switching format or price mode
   const layoutKey = effectiveLbsCode ? `${effectiveLbsCode}:${priType}` : '';
-  const savedLayoutForKey = layoutKey && !startingLayout && !legacySelected ? customLayouts[layoutKey] : undefined;
+  const savedLayoutForKey = layoutKey && !isBlankWorkspace && !startingLayout && !legacySelected ? customLayouts[layoutKey] : undefined;
 
   const templateDoc = useMemo(() => {
     const layout = previewLayout(selectedTemplate?.FTLtmLayout, currentSize);
@@ -524,7 +525,7 @@ export function LabelDesigner({
   }, [selectedTemplate, currentSize, effectiveLbsCode, priType]);
 
   useEffect(() => {
-    const nextDoc: LabelDesignLayout = !effectiveLbsCode
+    const nextDoc: LabelDesignLayout = isBlankWorkspace
       ? buildEmptyBlankDoc(priType)
       : templateDoc ? structuredClone(templateDoc) : savedLayoutForKey
         ? JSON.parse(JSON.stringify(savedLayoutForKey))
@@ -544,6 +545,7 @@ export function LabelDesigner({
     setZoom(defaultZoomForSize(nextDoc.width, nextDoc.height));
   }, [
     layoutKey,
+    isBlankWorkspace,
     savedLayoutForKey,
     templateDoc,
     effectiveLbsCode,
@@ -1586,7 +1588,7 @@ export function LabelDesigner({
     }
   };
 
-  const isCustomCreatedFormat = selectedTemplate?.userCreated || currentSize.FTLbsHhtCode === 'CUSTOM';
+  const isCustomCreatedFormat = !isBlankWorkspace && (selectedTemplate?.userCreated || currentSize.FTLbsHhtCode === 'CUSTOM');
 
   const executeReset = async (callServer: boolean) => {
     setSaving(true);
@@ -1813,13 +1815,13 @@ export function LabelDesigner({
     toast.success(`จัดกึ่งกลางแผ่นแล้ว (ขอบซ้าย/ขวา ${ml} mm · ขอบบน/ล่าง ${mt} mm)`);
   };
 
-  const hasSavedCustom = !startingLayout && (selectedTemplate ? Boolean(selectedTemplate.hasOriginal || selectedTemplate.FTLtmCode === designCode) : Boolean(customLayouts[layoutKey]));
+  const hasSavedCustom = !isBlankWorkspace && !startingLayout && (selectedTemplate ? Boolean(selectedTemplate.hasOriginal || selectedTemplate.FTLtmCode === designCode) : Boolean(customLayouts[layoutKey]));
 
   const formatPicker = (
     <SearchableSelect
       value={selectedTemplate?.FTLtmCode || ''}
       onValueChange={selectFormat}
-      placeholder={effectiveLbsCode ? `แบบตั้งต้น (ยังไม่บันทึก) · ${effectiveLbsCode}` : 'เลือกรูปแบบป้าย...'}
+      placeholder={!isBlankWorkspace && effectiveLbsCode ? `แบบตั้งต้น (ยังไม่บันทึก) · ${effectiveLbsCode}` : 'เลือกรูปแบบป้าย...'}
       searchPlaceholder="ค้นหารหัสหรือชื่อแบบป้าย..."
       className="h-8 w-[340px] max-w-[42vw] text-xs"
       dropdownMinWidth={380}
@@ -1854,7 +1856,24 @@ export function LabelDesigner({
         {/* Row 1: Format, Price Mode, Dimensions & Sample Product */}
         <div className="px-4 py-2 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Label className="text-xs font-semibold text-slate-600">ขนาดป้าย</Label>
+              <SearchableSelect
+                value={blankSizeSelected ? effectiveLbsCode : ''}
+                onValueChange={code => {
+                  if (dirty && !window.confirm('เปิดป้ายเปล่าและละทิ้งการแก้ไขที่ยังไม่ได้บันทึก?')) return;
+                  setRequestedTemplate(`blank:${code}`);
+                  onChangeLabelCode(code);
+                }}
+                options={activeSizes.map(size => ({
+                  value: size.FTLbsCode,
+                  label: `${size.FTLbsCode} · ${size.FCLbsWidth} × ${size.FCLbsHeight} มม.`,
+                  keywords: size.FTLbsName || '',
+                }))}
+                placeholder="เลือกขนาดป้าย..."
+                searchPlaceholder="ค้นหารหัส ชื่อ หรือขนาดป้าย..."
+                className="h-8 w-[230px] max-w-[80vw] text-xs"
+              />
               <Label className="text-xs font-semibold text-slate-600 whitespace-nowrap">รูปแบบป้าย:</Label>
               {formatPicker}
               <Button
@@ -2192,7 +2211,7 @@ export function LabelDesigner({
                     </button>
                   )}
 
-                  {currentSize.FTLbsHhtCode === 'CUSTOM' && (sizeTemplates?.length ?? 0) <= 1 && onDeleteCustomFormat && (
+                  {!isBlankWorkspace && currentSize.FTLbsHhtCode === 'CUSTOM' && (sizeTemplates?.length ?? 0) <= 1 && onDeleteCustomFormat && (
                     <button
                       type="button"
                       className="w-full text-left px-3 py-2 hover:bg-red-50 flex items-center gap-2 text-red-600 border-t border-slate-100 mt-1"

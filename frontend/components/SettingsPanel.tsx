@@ -1,3 +1,4 @@
+import type { LabelFormatOption } from '@/lib/labelFormatOptions';
 import { LabelPrinterRoutesEditor } from './LabelPrinterRoutesEditor';
 import { MasterDatabaseSettings } from './MasterDatabaseSettings';
 import type { AuthSessionUser } from '@/lib/auth';
@@ -146,6 +147,8 @@ interface SettingsPanelProps {
   onRefreshAll: () => Promise<void>;
   parseApiJson: (res: Response) => Promise<any>;
   formatTrayLabel: (tray: string) => string;
+  formatOptions: LabelFormatOption[];
+  initialEditFormat?: string;
   initialEditLbsCode?: string | null;
   onClearInitialEdit?: () => void;
   initialSubTab?: 'sizes' | 'preprints' | 'printers' | 'devices' | 'autoprint' | 'autoprint_history' | 'connection' | 'jobs' | null;
@@ -194,7 +197,7 @@ export function SettingsPanel({
   onRefreshAll,
   parseApiJson,
   formatTrayLabel,
-  initialEditLbsCode,
+  formatOptions, initialEditFormat, initialEditLbsCode,
   onClearInitialEdit,
   initialSubTab,
   onClearInitialSubTab,
@@ -299,7 +302,7 @@ export function SettingsPanel({
 
   // ── Tab 1: Label Sizes State ───────────────────────────────────────────────
   const [sizeSearch, setSizeSearch] = useState('');
-  const [sizeStatusFilter, setSizeStatusFilter] = useState<'all' | '1' | '2'>('1');
+  const [sizeStatusFilter, setSizeStatusFilter] = useState<'all' | '1' | '2'>('all');
   const [sizeGroupFilter, setSizeGroupFilter] = useState<'all' | '1' | '2'>('all');
   const [sizePage, setSizePage] = useState(1);
   const [sizePageSize, setSizePageSize] = useState(10);
@@ -316,7 +319,7 @@ export function SettingsPanel({
 
   // ── Tab 2: Driver Mapping + LAN Printers State ─────────────────────────────
   const [driverSearch, setDriverSearch] = useState('');
-  const [driverStatusFilter, setDriverStatusFilter] = useState<'active' | 'all'>('active');
+  const [editFormat, setEditFormat] = useState(initialEditFormat);
   const [driverPage, setDriverPage] = useState(1);
   const [driverPageSize, setDriverPageSize] = useState(10);
   const [printerPage, setPrinterPage] = useState(1);
@@ -351,10 +354,10 @@ export function SettingsPanel({
     if (initialEditLbsCode) {
       setSubTab('printers');
       const found = driverMappings.find((m) => m.lbsCode === initialEditLbsCode);
-      if (found) setDriverEditRow({ ...found });
+      if (found) { setEditFormat(initialEditFormat); setDriverEditRow({ ...found }); }
       onClearInitialEdit?.();
     }
-  }, [initialEditLbsCode, driverMappings, onClearInitialEdit]);
+  }, [initialEditLbsCode, initialEditFormat, driverMappings, onClearInitialEdit]);
 
   React.useEffect(() => {
     if (initialSubTab) {
@@ -386,20 +389,15 @@ export function SettingsPanel({
 
   const filteredMappings = useMemo(() => {
     const q = driverSearch.trim().toLowerCase();
-    const activeSet = new Set(
-      allLabelSizes.filter((s) => s.FTLbsStaUse === '1').map((s) => s.FTLbsCode)
-    );
-    return driverMappings.filter((m) => {
-      if (driverStatusFilter === 'active' && !activeSet.has(m.lbsCode)) return false;
-      if (!q) return true;
-      return (
-        m.lbsCode.toLowerCase().includes(q) ||
-        m.lbsName.toLowerCase().includes(q) ||
-        m.normalPrinter.toLowerCase().includes(q) ||
-        m.promoPrinter.toLowerCase().includes(q)
-      );
+    const mappings = new Map(driverMappings.map(mapping => [mapping.lbsCode, mapping]));
+    return formatOptions.flatMap(format => {
+      const mapping = mappings.get(format.lbsCode);
+      if (!mapping) return [];
+      const terms = [format.label, format.keywords, mapping.normalPrinter, mapping.promoPrinter, mapping.templateRoutes?.[format.value]?.printer];
+      if (q && !terms.some(term => term?.toLowerCase().includes(q))) return [];
+      return [{ format, mapping }];
     });
-  }, [driverMappings, driverSearch, driverStatusFilter, allLabelSizes]);
+  }, [driverMappings, driverSearch, formatOptions]);
 
   const filteredPreprints = useMemo(() => {
     const q = preprintSearch.trim().toLowerCase();
@@ -422,7 +420,7 @@ export function SettingsPanel({
 
   React.useEffect(() => {
     setDriverPage(1);
-  }, [driverSearch, driverStatusFilter, driverPageSize]);
+  }, [driverSearch, driverPageSize]);
 
   const pagedSizes = useMemo(() => {
     const maxP = Math.max(1, Math.ceil(filteredSizes.length / sizePageSize));
@@ -968,11 +966,10 @@ export function SettingsPanel({
       <Tabs value={subTab} onValueChange={(v) => setSubTab(v as typeof subTab)} className="space-y-4">
         <div className="space-y-3">
           {workspace==='jobs'?<TabsList className="bg-white border p-1 h-auto w-full justify-start overflow-x-auto"><TabsTrigger value="jobs" className="min-h-10">งานพิมพ์</TabsTrigger>{ENABLE_AUTO_PRINT_HISTORY_TAB&&<TabsTrigger value="autoprint_history" className="min-h-10">ประวัติก่อนย้ายระบบ</TabsTrigger>}</TabsList>:workspace==='profiles'?null:<>
-            <label className="block sm:hidden text-sm space-y-2"><span className="font-medium">หมวดการตั้งค่า</span><select className="w-full rounded-lg border bg-white p-3" value={subTab==='printers'?'devices':subTab} onChange={e=>setSubTab(e.target.value as typeof subTab)}>{[['sizes','ขนาดและกระดาษ'],['preprints','กระดาษพิมพ์พื้นหลัง'],['devices','เครื่องพิมพ์'],['connection','🔒 แหล่งข้อมูล (IT/Admin)'],...(ENABLE_AUTO_PRINT_UI?[['autoprint','จัดการ พิมพ์อัตโนมัติ']]:[])].map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>
+            <label className="block sm:hidden text-sm space-y-2"><span className="font-medium">หมวดการตั้งค่า</span><select className="w-full rounded-lg border bg-white p-3" value={subTab} onChange={e=>setSubTab(e.target.value as typeof subTab)}>{[['sizes','ขนาดและกระดาษ'],['printers','เครื่องพิมพ์ตามแบบป้าย'],['preprints','กระดาษพิมพ์พื้นหลัง'],['devices','เครื่องพิมพ์'],['connection','🔒 แหล่งข้อมูล (IT/Admin)'],...(ENABLE_AUTO_PRINT_UI?[['autoprint','จัดการ พิมพ์อัตโนมัติ']]:[])].map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>
             <div className="hidden sm:block"><TabsList className="bg-white border border-slate-200 p-1 h-auto min-h-11 w-full max-w-full flex-nowrap overflow-x-auto justify-start gap-1">
-              {([['sizes','ขนาดและกระดาษ'],['preprints','กระดาษพิมพ์พื้นหลัง'],['devices','เครื่องพิมพ์'],...(ENABLE_AUTO_PRINT_UI?[['autoprint','จัดการ พิมพ์อัตโนมัติ']]:[]),['connection','🔒 แหล่งข้อมูล (IT/Admin)']]).map(([value,label])=><TabsTrigger key={value} value={value==='devices'&&subTab==='printers'?'printers':value} className="flex-none min-h-10 text-sm px-3">{label}</TabsTrigger>)}
+              {([['sizes','ขนาดและกระดาษ'],['printers','เครื่องพิมพ์ตามแบบป้าย'],['preprints','กระดาษพิมพ์พื้นหลัง'],['devices','เครื่องพิมพ์'],...(ENABLE_AUTO_PRINT_UI?[['autoprint','จัดการ พิมพ์อัตโนมัติ']]:[]),['connection','🔒 แหล่งข้อมูล (IT/Admin)']]).map(([value,label])=><TabsTrigger key={value} value={value} className="flex-none min-h-10 text-sm px-3">{label}</TabsTrigger>)}
             </TabsList></div>
-            {(subTab==='devices'||subTab==='printers')&&<div className="flex flex-wrap gap-2"><Button variant={subTab==='devices'?'default':'outline'} className={subTab==='devices'?'bg-teal-700 hover:bg-teal-800':''} onClick={()=>setSubTab('devices')}>รายชื่อเครื่องพิมพ์</Button><Button variant={subTab==='printers'?'default':'outline'} className={subTab==='printers'?'bg-teal-700 hover:bg-teal-800':''} onClick={()=>setSubTab('printers')}>เครื่องพิมพ์ตามแบบป้าย</Button></div>}
             {adminGranted && ['connection', 'sizes', 'devices'].includes(subTab) && (
               <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-teal-200 bg-teal-50 px-3 py-2 text-xs text-teal-900">
                 <span>โหมดผู้ดูแลระบบ (IT / Admin) ปลดล็อกอยู่ · สิทธิ์: {authUser.name} ({authUser.role})</span>
@@ -1053,7 +1050,7 @@ export function SettingsPanel({
                   </Select>
                 </div>
                 <div className="text-xs text-slate-500">
-                  แสดง {filteredSizes.length} จากทั้งหมด {allLabelSizes.length} รูปแบบ
+                  แสดง {filteredSizes.length} จากทั้งหมด {allLabelSizes.length} ขนาด
                 </div>
               </div>
 
@@ -1283,15 +1280,15 @@ export function SettingsPanel({
                   <th scope="col" className="w-24 px-3 py-3 font-medium">กระดาษ</th>
                   <th scope="col" className="w-24 px-3 py-3 text-center font-medium">จัดการ</th>
                 </tr></thead>
-                <tbody className="divide-y divide-slate-200">{pagedMappings.map((m,index)=>{
+                <tbody className="divide-y divide-slate-200">{pagedMappings.map(({format, mapping:m},index)=>{
                   const size=allLabelSizes.find(s=>s.FTLbsCode===m.lbsCode);
                   const page=Math.min(driverPage,Math.max(1,Math.ceil(filteredMappings.length/driverPageSize)));
-                  return <tr key={m.lbsCode} className="even:bg-slate-50/60 hover:bg-teal-50/50">
+                  return <tr key={format.value} className="even:bg-slate-50/60 hover:bg-teal-50/50">
                     <td className="px-3 py-3 text-center text-slate-500">{(page-1)*driverPageSize+index+1}</td>
-                    <td className="px-3 py-3"><p className="font-medium break-words">{m.lbsName}</p><p className="mt-1 text-xs text-slate-500 break-all">{m.lbsCode}</p></td>
+                    <td className="px-3 py-3"><p className="font-medium break-words">{format.label}</p><p className="mt-1 text-xs text-slate-500 break-all">รหัสขนาด {m.lbsCode}</p></td>
                     <td className="px-3 py-3">{size?`${size.FCLbsWidth} × ${size.FCLbsHeight}`:'—'}</td>
                     <td className="px-3 py-3 break-words">{size?.FTLbsPaperSize||'—'}</td>
-                    <td className="px-3 py-3 text-center"><Button size="sm" variant="outline" aria-label={`ตั้งค่า ${m.lbsName}`} onClick={()=>setDriverEditRow({...m})}>ตั้งค่า</Button></td>
+                    <td className="px-3 py-3 text-center"><Button size="sm" variant="outline" aria-label={`ตั้งค่า ${format.label}`} onClick={()=>{setEditFormat(format.value);setDriverEditRow({...m});}}>ตั้งค่า</Button></td>
                   </tr>;
                 })}{!pagedMappings.length&&<tr><td colSpan={5} className="px-3 py-8 text-center text-slate-500">ไม่พบแบบป้ายที่ค้นหา</td></tr>}</tbody>
               </table>
@@ -1944,7 +1941,7 @@ export function SettingsPanel({
             </DialogDescription>
           </DialogHeader>
 
-          <div className="min-h-0 overflow-y-auto px-5 py-4">{driverEditRow && <LabelPrinterRoutesEditor key={driverEditRow.lbsCode} onReadyChange={setDriverEditorReady} value={driverEditRow} onChange={setDriverEditRow} windowsPrinters={windowsPrinters} printers={printers} formatTrayLabel={formatTrayLabel} paper={allLabelSizes.find(s=>s.FTLbsCode===driverEditRow.lbsCode)} disabled={savingDriver}/>}</div>
+          <div className="min-h-0 overflow-y-auto px-5 py-4">{driverEditRow && <LabelPrinterRoutesEditor initialFormat={editFormat} key={driverEditRow.lbsCode} onReadyChange={setDriverEditorReady} value={driverEditRow} onChange={setDriverEditRow} windowsPrinters={windowsPrinters} printers={printers} formatTrayLabel={formatTrayLabel} paper={allLabelSizes.find(s=>s.FTLbsCode===driverEditRow.lbsCode)} disabled={savingDriver}/>}</div>
 
           <DialogFooter className="shrink-0 border-t px-5 py-3 bg-white">
             <Button variant="outline" onClick={() => setDriverEditRow(null)}>

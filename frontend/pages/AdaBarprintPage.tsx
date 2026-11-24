@@ -2657,6 +2657,8 @@ function AdaBarprintWorkspace({
           onRefreshAll={refreshLabelSizesAndMappings}
           parseApiJson={parseApiJson}
           formatTrayLabel={formatTrayLabel}
+          formatOptions={manualFormatOptions}
+          initialEditFormat={selectedTemplateCode || undefined}
           initialEditLbsCode={settingsEditLbsCode}
           onClearInitialEdit={() => setSettingsEditLbsCode(null)}
           initialSubTab={settingsSubTab}
