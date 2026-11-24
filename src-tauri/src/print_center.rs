@@ -333,6 +333,14 @@ async fn load_layout(
 ) -> Result<(TCNMLabelSize, Vec<crate::templates::TemplateElement>)> {
     load_layout_for(pool, &r.size, &r.template, r.ip.is_empty()).await
 }
+// Capture the full designer document, including colours, fonts, layer order and conditional fields.
+async fn windows_design(pool:&SqlitePool, size:&str, template:&str, windows:bool)->Result<Value> {
+    if !windows || template.starts_with("legacy:") {return Ok(Value::Null);}
+    let raw:Option<String>=sqlx::query_scalar("SELECT FTLtmLayout FROM TCNMLabelTmpl WHERE FTLbsCode=? AND FTLtmCode=? AND FTLtmStaUse='1'")
+        .bind(size).bind(template).fetch_optional(pool).await.map_err(|e|e.to_string())?.flatten();
+    let doc: Value=serde_json::from_str(raw.as_deref().unwrap_or("null")).map_err(|e|e.to_string())?;
+    Ok(if doc["customDesign"]==true {doc} else {Value::Null})
+}
 async fn load_layout_for(
     pool: &SqlitePool,
     size_code: &str,
@@ -366,6 +374,7 @@ async fn load_layout_for(
     }
     // Refuse unsupported headless elements instead of silently losing parts of a label.
     for el in &visible {
+        if windows && layout["customDesign"] == true {break;}
         let kind = el["type"].as_str().unwrap_or("");
         let rich = windows && (matches!(kind,"image"|"qrcode") || (kind=="icon" && el["iconName"]=="heart"));
         if (!rich && !["text", "static", "price", "date", "barcode", "rect", "line"].contains(&kind))
@@ -888,6 +897,7 @@ async fn prepare_auto(pool: &SqlitePool, id: &str, config: &str) -> Result<()> {
     validate_rule(pool, &r).await?;
     if r.source.starts_with("PROMO_") && !crate::storage::promo_ready(pool).await { return Err("รอ StoreFront อัปเดตข้อมูลโปรโมชั่นให้พร้อม".into()); }
     let (lbs, elements) = load_layout(pool, &r).await?;
+    let design=windows_design(pool,&r.size,&r.template,r.ip.is_empty()).await?;
     let sync_revision=crate::storage::master_revision(pool).await;
     let items = candidates(pool, &r).await?;
     if crate::storage::master_revision(pool).await!=sync_revision {return Err("ข้อมูล Sync เปลี่ยนระหว่างเตรียมงาน กรุณาทำต่อเพื่อสร้าง snapshot ใหม่".into());}
@@ -934,7 +944,7 @@ async fn prepare_auto(pool: &SqlitePool, id: &str, config: &str) -> Result<()> {
     };
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     for (n, chunk) in pages.chunks(page_size).enumerate() {
-        let payload = json!({"route":route,"template":r.template,"size":lbs,"elements":elements,"legacy":r.template.starts_with("legacy:"),"contexts":chunk.iter().map(|(c,_)|c).collect::<Vec<_>>(),
+        let payload = json!({"design":design,"route":route,"template":r.template,"size":lbs,"elements":elements,"legacy":r.template.starts_with("legacy:"),"contexts":chunk.iter().map(|(c,_)|c).collect::<Vec<_>>(),
         "marks":chunk.iter().map(|(_,m)|m).filter(|m|!m.is_null()).collect::<Vec<_>>(),"date":date});
         sqlx::query("INSERT INTO ABPrintUnit(job,seq,kind,payload) VALUES(?,?,'AUTO',?)")
             .bind(id)
@@ -995,10 +1005,10 @@ async fn send_unit(pool: &SqlitePool, kind: &str, p: Value, id: &str, seq: i64) 
             )
             .map_err(|e| e.to_string())?;
             let contexts = p["contexts"].as_array().ok_or("ไม่มีข้อมูลป้าย")?;
-            if p["legacy"] == true && route.lan_ip.is_none() {
+            if (p["legacy"] == true || p["design"].is_object()) && route.lan_ip.is_none() {
                 #[cfg(target_os = "windows")]
                 {
-                    let image = crate::legacy_page::render(&size, contexts, &route.printer_name).await?;
+                    let image = crate::legacy_page::render(&size, contexts, &route.printer_name, &p["design"]).await?;
                     let request = crate::routes::WindowsDirectPrintBody {
                         printer_name: route.printer_name, tray_name: Some(route.tray_name),
                         lbs_code: Some(size.FTLbsCode), lbs_name: Some(size.FTLbsName),
@@ -1668,7 +1678,8 @@ async fn prepare_profile_job(pool: &SqlitePool, profile_code_or_id: &str, reprin
             let area = if items.is_empty() { Ok(None) } else {
                 crate::printable_area::read(&target.printer, &target.tray, &target.ip, &layout.0).await
             };
-            prepared.push((layout, items, area));
+            let design=windows_design(pool,&target.size,&target.template,target.ip.is_empty()).await?;
+            prepared.push((layout, items, area,design));
         }
         Ok::<_, String>(prepared)
     }.await;
@@ -1686,7 +1697,7 @@ async fn prepare_profile_job(pool: &SqlitePool, profile_code_or_id: &str, reprin
     let mut total_items = 0;
     let mut skipped_items = 0;
     let mut units = Vec::new();
-    for (idx,(target,((lbs,elements),items,area))) in targets.iter().zip(prepared).enumerate() {
+    for (idx,(target,((lbs,elements),items,area,design))) in targets.iter().zip(prepared).enumerate() {
         let scope = json!(["profile",r.id,idx]).to_string();
         let previous: std::collections::HashMap<String,String> = sqlx::query_as::<_,(String,String)>(
             "SELECT barcode,hash FROM ABPrintWatermark WHERE rule=?").bind(&scope)
@@ -1702,10 +1713,13 @@ async fn prepare_profile_job(pool: &SqlitePool, profile_code_or_id: &str, reprin
             dpi: target.dpi,
         };
         let mut pages = Vec::new();
+        use sha2::{Digest,Sha256};
+        let design_hash = if design.is_null() {None} else {Some(format!("{:x}",Sha256::digest(design.to_string())))};
         for it in items {
             let key = json!([it.pdt_code,it.bar_code]).to_string();
-            use sha2::{Digest,Sha256};
-            let hash = format!("{:x}",Sha256::digest(json!([target_date,r.source,target,lbs,it.price_hash]).to_string()));
+            let mut identity=json!([target_date,r.source,target,lbs,it.price_hash]);
+            if let Some(hash) = &design_hash { identity.as_array_mut().unwrap().push(json!(hash)); }
+            let hash = format!("{:x}",Sha256::digest(identity.to_string()));
             // Each transport acknowledgement records the last copy accepted for this label.
             // A cancelled, partially submitted run can resume without repeating its first copies.
             let sent_copies = if reprint { 0 } else {
@@ -1744,6 +1758,7 @@ async fn prepare_profile_job(pool: &SqlitePool, profile_code_or_id: &str, reprin
             let payload = json!({
                 "route": route,
                 "template": target.template,
+                "design":design,
                 "size": lbs,
                 "elements": elements,
                 "legacy": target.template.starts_with("legacy:"),

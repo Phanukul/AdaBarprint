@@ -200,7 +200,7 @@ export function SearchableSelect({
                   {selectedOption.badge}
                 </span>
               )}
-              <span className="truncate text-slate-900">{selectedOption.label}</span>
+              <span title={selectedOption.label} className="truncate text-slate-900">{selectedOption.label}</span>
             </>
           ) : (
             <span className="truncate text-muted-foreground">{placeholder}</span>

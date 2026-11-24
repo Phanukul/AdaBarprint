@@ -22,23 +22,18 @@ export function labelFormatOptions(sizes: Size[], includeLegacy: boolean): Searc
     if (size.FTLbsStaUse !== '1') continue;
     const badge = `${size.FCLbsWidth}×${size.FCLbsHeight} มม.`;
     const formats = (size.templates || []).filter(t => {
-      try { return JSON.parse(t.FTLtmLayout || 'null')?.elements?.length > 0; }
+      try { return Array.isArray(JSON.parse(t.FTLtmLayout || 'null')?.elements); }
       catch { return false; }
     });
     for (const t of formats) {
-      options.push({ value: t.FTLtmCode, label: t.FTLtmName || t.FTLtmCode, badge,
+      const mode = JSON.parse(t.FTLtmLayout!).designMode === 'preprint' ? 'Pre-Print' : 'พิมพ์ครบจบ';
+      options.push({ value: t.FTLtmCode, label: `${t.FTLtmName || size.FTLbsCode} · ${t.FTLtmPriType === '2' ? 'โปรโมชัน' : 'ปกติ'} · ${mode} · ${t.FTLtmCode}`, badge,
         keywords: `${size.FTLbsCode} ${size.FTLbsName || ''} ${size.FCLbsWidth}x${size.FCLbsHeight}` });
     }
-    if (!formats.length && includeLegacy) {
-      options.push({ value: `legacy:${size.FTLbsCode}`, label: size.FTLbsName || size.FTLbsCode,
-        badge: 'แบบเดิม', keywords: `${badge} ${size.FCLbsWidth}x${size.FCLbsHeight}` });
+    if (includeLegacy && !formats.length) {
+      options.push({ value: `legacy:${size.FTLbsCode}`, label: `แบบดั้งเดิม · ${size.FTLbsName || size.FTLbsCode} · ${size.FTLbsCode}`,
+        badge, keywords: `${badge} ${size.FCLbsWidth}x${size.FCLbsHeight}` });
     }
-  }
-  const counts = new Map<string, number>();
-  const key = (o: SearchableOption) => JSON.stringify([o.label, o.badge]);
-  for (const o of options) counts.set(key(o), (counts.get(key(o)) || 0) + 1);
-  for (const o of options) {
-    if (counts.get(key(o))! > 1) o.label += ` · รหัส ${o.value}`;
   }
   return options.sort((a, b) => a.label.localeCompare(b.label, 'th', { numeric: true }));
 }

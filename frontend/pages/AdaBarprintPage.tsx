@@ -515,7 +515,22 @@ function AdaBarprintWorkspace({
 
   const selectedTemplate=labelSizes.flatMap(size=>(size.templates||[]).map(t=>({...t,FTLbsCode:size.FTLbsCode}))).find(t=>t.FTLtmCode===selectedTemplateCode&&t.FTLbsCode===selectedLabelCode);
 
+  useEffect(() => {
+    if (selectedTemplateCode || !selectedLabelCode) return;
+    const size = labelSizes.find(s => s.FTLbsCode === selectedLabelCode);
+    const options = size?.templates || [];
+    const first = options.find(t => t.FTLtmCode === size?.FTLbsTmplNor) || options[0];
+    if (first) setSelectedTemplateCode(first.FTLtmCode);
+  }, [selectedLabelCode, selectedTemplateCode, labelSizes]);
+
   const [initialDesignTemplate, setInitialDesignTemplate] = useState('');
+  const [designPriceType, setDesignPriceType] = useState<'1' | '2'>('1');
+  function openDesign(size: string, template: string, promo: boolean) {
+    setDesignPriceType(promo ? '2' : '1');
+    setInitialDesignTemplate(template);
+    setDesignLabelCode(size);
+    setActiveMenu('design');
+  }
   const [designLabelCode, setDesignLabelCode] = useState('');
   const [selectedPrinterId, setSelectedPrinterId] = useState('');
 
@@ -685,6 +700,7 @@ function AdaBarprintWorkspace({
             lData.some((s: LabelSizeItem) => s.FTLbsCode === defTmpl && s.FTLbsStaUse === '1')
           ) {
             setSelectedLabelCode(defTmpl);
+            setSelectedTemplateCode(lData.find((s: LabelSizeItem) => s.FTLbsCode === defTmpl)?.FTLbsTmplNor || '');
           }
         } catch {
           // ignore
@@ -1431,6 +1447,10 @@ function AdaBarprintWorkspace({
   const printBusy = useRef(false);
   const prepareManualSet = async (): Promise<ManualPrintSet> => {
     if (selectedTemplateCode && !selectedTemplate) throw new Error('ไม่พบแบบป้ายที่เลือก');
+    if (selectedTemplate) {
+      const problem = manualTemplateProblem(selectedTemplate.FTLtmLayout);
+      if (problem) throw new Error(problem);
+    }
     const selected = printRows;
     if (!selected.length) throw new Error('ไม่มีรายการที่เลือกพิมพ์');
     const printer = printers.find(p => p.id === selectedPrinterId);
@@ -1530,7 +1550,7 @@ function AdaBarprintWorkspace({
         source: previewPurpose, date: effectiveDate, labelCode: selectedLabelCode, templateCode: selectedTemplateCode,
         printerId: selectedPrinterId, media: previewMedia, dated: useEffectiveDate, verify: sheetPriceType !== 'Normal', priceGroup: priceGroupCode,
         name: previewPurpose ? printPurposes[previewPurpose].title : 'รายการที่เลือก',
-        format: selectedTemplate?.FTLtmName || selectedLabelCode,
+        format: manualFormatName,
         sheets: previewSheetCount, labels: a4Layout.totalLabels, branch: resolveDefaultBranch(),
         lines: selected.map(row => ({ ...row, lbsCode: selectedLabelCode || row.lbsCode,
           tmplCode: selectedTemplateCode || (row.lbsCode === selectedLabelCode ? row.tmplCode : '') })),
@@ -1560,6 +1580,7 @@ function AdaBarprintWorkspace({
                     />);
 
   const manualFormatOptions = labelFormatOptions(labelSizes, true);
+  const manualFormatName = manualFormatOptions.find(option => option.value === (selectedTemplateCode || `legacy:${selectedLabelCode}`))?.label || selectedLabelCode;
   const formatPicker = (
 <SearchableSelect
                       value={selectedTemplateCode|| (selectedLabelCode?`legacy:${selectedLabelCode}`:'')}
@@ -1985,7 +2006,8 @@ function AdaBarprintWorkspace({
       await refreshLabelSizesAndMappings();
       if (data.lbsCode) {
         setSelectedLabelCode(data.lbsCode);
-        setDesignLabelCode(data.lbsCode);
+        setSelectedTemplateCode(data.tmplCode || '');
+        openDesign(data.lbsCode, data.tmplCode, payload.priType === '2');
       }
       toast.success(`สร้างแบบใหม่ "${data.lbsName}" (${data.lbsCode}) เรียบร้อยแล้ว`);
       return true;
@@ -2008,7 +2030,9 @@ function AdaBarprintWorkspace({
         return false;
       }
       await refreshLabelSizesAndMappings();
-      setSelectedLabelCode(resolveDefaultLabelCode());
+      const defaultSize = resolveDefaultLabelCode();
+      setSelectedLabelCode(defaultSize);
+      setSelectedTemplateCode(labelSizes.find(s => s.FTLbsCode === defaultSize)?.FTLbsTmplNor || '');
       setDesignLabelCode((prev) => (prev === lbsCode ? '' : prev));
       toast.info(`ลบแบบป้าย ${lbsCode} เรียบร้อยแล้ว`);
       return true;
@@ -2071,18 +2095,7 @@ function AdaBarprintWorkspace({
     }
   };
 
-  const resolveCustomLayout = (lbsCode: string, priType: string) => {
-    if(selectedTemplate && selectedTemplate.FTLbsCode===lbsCode){
-      return previewLayout(selectedTemplate.FTLtmLayout, selectedLabelSizeObj ?? undefined);
-    }
-
-    const t = priType === '2' ? '2' : '1';
-    return (
-      customLayouts[`${lbsCode}:${t}`] ||
-      customLayouts[`${lbsCode}:1`] ||
-      customLayouts[`${lbsCode}:2`]
-    );
-  };
+  const manualLayout = previewLayout(selectedTemplate?.FTLtmLayout, selectedLabelSizeObj ?? undefined);
 
   const handleSaveQuickPrintOffset = async () => {
     const ls = labelSizes.find((s) => s.FTLbsCode === selectedLabelCode);
@@ -2120,7 +2133,7 @@ function AdaBarprintWorkspace({
     scale: number,
     preview = false,
   ) => {
-    const layout = resolveCustomLayout(selectedLabelCode, line.priType);
+    const layout = manualLayout;
     const label = (
       <LabelPreview line={line} scale={scale} labelW={a4Layout.widthMm} labelH={a4Layout.heightMm}
         lbsCode={selectedLabelCode} customLayout={layout} preprintView="ink" />
@@ -2204,9 +2217,7 @@ function AdaBarprintWorkspace({
 
     return sheetPages.slice(start, end).map((pageItems, i) => {
       const pageIdx = start + i;
-      const firstPreprintLayout = pageItems
-        .map((it) => resolveCustomLayout(selectedLabelCode, it.priType))
-        .find((ly) => ly?.designMode === 'preprint');
+      const firstPreprintLayout = manualLayout?.designMode === 'preprint' ? manualLayout : undefined;
       const sheetBgUrl = firstPreprintLayout?.preprint?.sheetBgDataUrl;
       const showSheetGuide =
         Boolean(firstPreprintLayout) &&
@@ -2270,7 +2281,7 @@ function AdaBarprintWorkspace({
             }}
           >
             {pageItems.map((line, idx) => {
-              const customLy = resolveCustomLayout(selectedLabelCode, line.priType);
+              const customLy = manualLayout;
               const cellView =
                 customLy?.designMode === 'preprint'
                   ? previewPreprintView === 'ink'
@@ -2350,6 +2361,8 @@ function AdaBarprintWorkspace({
     }));
     if (mapped[0]?.lbsCode && labelSizes.some((s) => s.FTLbsCode === mapped[0].lbsCode && s.FTLbsStaUse === '1')) {
       setSelectedLabelCode(mapped[0].lbsCode);
+      const formats = labelSizes.find(s => s.FTLbsCode === mapped[0].lbsCode)?.templates;
+      setSelectedTemplateCode(formats?.find(t => t.FTLtmCode === mapped[0].tmplCode)?.FTLtmCode || '');
     }
     setMainRows((prev) => [...prev, ...mapped]);
     setMainPage(1);
@@ -2605,7 +2618,7 @@ function AdaBarprintWorkspace({
       </header>
 
       {activeMenu === 'design' ? (
-        <LabelDesigner
+        <LabelDesigner key={initialDesignTemplate}
           labelSizes={labelSizes}
           products={catalogProducts}
           paperSizes={paperSizes}
@@ -2613,6 +2626,7 @@ function AdaBarprintWorkspace({
           labelFields={labelFields}
           companyInfo={companyInfo}
           initialTemplateCode={initialDesignTemplate}
+          initialPriceType={designPriceType}
           selectedLabelCode={designLabelCode}
           onChangeLabelCode={setDesignLabelCode}
           customLayouts={customLayouts}
@@ -2647,6 +2661,7 @@ function AdaBarprintWorkspace({
           onClearInitialEdit={() => setSettingsEditLbsCode(null)}
           initialSubTab={settingsSubTab}
           onClearInitialSubTab={() => setSettingsSubTab(null)}
+          onOpenDesign={openDesign}
           onLoadManualRows={(lines) => handleLoadManualScheduleRows(lines, true)}
         />
       ) : (
@@ -2981,14 +2996,13 @@ function AdaBarprintWorkspace({
                         <button
                           type="button"
                           onClick={() => {
-                            setInitialDesignTemplate(selectedTemplateCode);
-                            setDesignLabelCode(selectedLabelCode);
-                            setActiveMenu('design');
+                            openDesign(selectedLabelCode, selectedTemplateCode || `legacy:${selectedLabelCode}`,
+                              printRows[0]?.priType === '2' || (!printRows.length && manualSource === 'PROMO_START'));
                           }}
                           className="text-[11px] font-medium text-[#007a87] hover:underline flex items-center gap-1"
                           title="เปิดหน้าออกแบบเพื่อแก้ไขรูปแบบป้ายนี้"
                         >
-                          <Palette className="h-3 w-3" />แก้ไขแบบป้ายนี้
+                          <Palette className="h-3 w-3" />{selectedTemplateCode ? 'แก้ไขแบบป้ายนี้' : 'เปิดแบบดั้งเดิมใน Design'}
                         </button>
                       )}
                     </div>
@@ -3562,7 +3576,7 @@ function AdaBarprintWorkspace({
           <DialogHeader className="shrink-0 border-b px-5 py-4 text-left">
             <DialogTitle className="text-lg font-semibold">ตัวอย่างก่อนพิมพ์</DialogTitle>
             <DialogDescription className="text-sm">
-              {previewPurpose === 'basket' ? `รวม ${printSets.length} ชุด · ${printSets.reduce((n, set) => n + set.labels, 0)} ดวง` : `${selectedTemplate?.FTLtmName || selectedLabelCode} · ป้าย ${a4Layout.widthMm} × ${a4Layout.heightMm} มม.`}
+              {previewPurpose === 'basket' ? `รวม ${printSets.length} ชุด · ${printSets.reduce((n, set) => n + set.labels, 0)} ดวง` : `${manualFormatName} · ป้าย ${a4Layout.widthMm} × ${a4Layout.heightMm} มม.`}
             </DialogDescription>
           </DialogHeader>
           <div className="flex min-h-0 flex-1 flex-col md:flex-row">
@@ -3611,8 +3625,7 @@ function AdaBarprintWorkspace({
               </details>
               {(() => {
                 const anyPreprint =
-                  resolveCustomLayout(selectedLabelCode, '1')?.designMode === 'preprint' ||
-                  resolveCustomLayout(selectedLabelCode, '2')?.designMode === 'preprint';
+                  manualLayout?.designMode === 'preprint';
                 const showOffsetControls = a4Layout.isRoll || anyPreprint || printOffsetX !== 0 || printOffsetY !== 0;
                 return (
                   <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-3 shrink-0">

@@ -189,6 +189,7 @@ interface LabelDesignerProps {
   labelFields?: LabelFieldRecord[];
   companyInfo?: CompanyInfoRecord;
   initialTemplateCode?: string;
+  initialPriceType?: '1' | '2';
   selectedLabelCode: string;
   onChangeLabelCode: (code: string) => void;
   customLayouts: Record<string, LabelDesignLayout>;
@@ -314,6 +315,7 @@ export function LabelDesigner({
   labelFields = [],
   companyInfo,
   initialTemplateCode,
+  initialPriceType = '1',
   selectedLabelCode,
   onChangeLabelCode,
   customLayouts,
@@ -370,18 +372,30 @@ export function LabelDesigner({
     []
   );
 
-  const [priType, setPriType] = useState<'1' | '2'>(() => labelSizes.find(s => s.FTLbsCode === selectedLabelCode)?.templates?.find(t => t.FTLtmCode === initialTemplateCode)?.FTLtmPriType === '2' ? '2' : '1');
+  const [priType, setPriType] = useState<'1' | '2'>(() => {
+    const exact = currentSize.templates?.find(t => t.FTLtmCode === initialTemplateCode);
+    if (exact) return exact.FTLtmPriType === '2' ? '2' : '1';
+    if (!initialTemplateCode && currentSize.templates?.length && !currentSize.templates.some(t => t.FTLtmPriType === initialPriceType))
+      return currentSize.templates[0].FTLtmPriType === '2' ? '2' : '1';
+    return initialPriceType;
+  });
   const formatOptions = useMemo(() => labelFormatOptions(activeSizes, true), [activeSizes]);
   const [requestedTemplate, setRequestedTemplate] = useState(initialTemplateCode || '');
   const sizeTemplates = activeSizes.find(size => size.FTLbsCode === effectiveLbsCode)?.templates;
+  useEffect(() => {
+    const exact = sizeTemplates?.find(t => t.FTLtmCode === requestedTemplate);
+    if (exact) setPriType(exact.FTLtmPriType === '2' ? '2' : '1');
+  }, [sizeTemplates, requestedTemplate]);
   const modeTemplates = sizeTemplates?.filter(t => (t.FTLtmPriType === '2' ? '2' : '1') === priType &&
     formatOptions.some(option => option.value === t.FTLtmCode));
   const designCode = `${effectiveLbsCode}-DESIGN-${priType === '2' ? 'PMT' : 'NOR'}`;
-  const selectedTemplate = modeTemplates?.find(t => t.FTLtmCode === requestedTemplate)
+  const legacySelected = requestedTemplate === `legacy:${effectiveLbsCode}`;
+  const startingLayout = requestedTemplate === `starter:${effectiveLbsCode}`;
+  const selectedTemplate = startingLayout ? undefined : modeTemplates?.find(t => t.FTLtmCode === (legacySelected ? `${effectiveLbsCode}-STD-${priType === '2' ? 'PMT' : 'NOR'}` : requestedTemplate))
     || modeTemplates?.find(t => t.FTLtmCode === designCode) || modeTemplates?.[0];
   function selectFormat(value: string) {
     if (value.startsWith('legacy:')) {
-      setRequestedTemplate('');
+      setRequestedTemplate(value);
       onChangeLabelCode(value.slice(7));
       return;
     }
@@ -432,6 +446,8 @@ export function LabelDesigner({
     })
   );
   const [saveAsOpen, setSaveAsOpen] = useState(false);
+  const [newPrice, setNewPrice] = useState<'1'|'2'>('1');
+  const [newMode, setNewMode] = useState<'full'|'preprint'>('full');
   const [saveAsBlank, setSaveAsBlank] = useState(false);
   const [overwriteConfirmOpen, setOverwriteConfirmOpen] = useState(false);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
@@ -490,7 +506,7 @@ export function LabelDesigner({
 
   // Load saved custom layout or blank/starter preset when switching format or price mode
   const layoutKey = effectiveLbsCode ? `${effectiveLbsCode}:${priType}` : '';
-  const savedLayoutForKey = layoutKey ? customLayouts[layoutKey] : undefined;
+  const savedLayoutForKey = layoutKey && !startingLayout && !legacySelected ? customLayouts[layoutKey] : undefined;
 
   const templateDoc = useMemo(() => {
     const layout = previewLayout(selectedTemplate?.FTLtmLayout, currentSize);
@@ -1119,6 +1135,8 @@ export function LabelDesigner({
     setSaveAsCode('');
     setSaveAsWidth(doc.width);
     setSaveAsHeight(doc.height);
+    setNewPrice(priType);
+    setNewMode(doc.designMode || 'full');
     setSaveAsOpen(true);
   };
 
@@ -1128,6 +1146,8 @@ export function LabelDesigner({
     setSaveAsCode('');
     setSaveAsWidth(doc.width);
     setSaveAsHeight(doc.height);
+    setNewPrice(priType);
+    setNewMode(doc.designMode || 'full');
     setSaveAsOpen(true);
   };
 
@@ -1153,13 +1173,23 @@ export function LabelDesigner({
           customDesign: true,
         }
       : { ...doc, width: wMm, height: hMm, customDesign: true };
+    targetLayout.priType = newPrice;
+    targetLayout.designMode = newMode;
+    if (newMode !== doc.designMode) {
+      targetLayout.preprint = undefined;
+      if (newMode === 'preprint') {
+        targetLayout.backgroundColor = 'transparent';
+        targetLayout.borderWidth = 0;
+        targetLayout.elements = stripDecorativeElements(targetLayout.elements);
+      }
+    }
     setSaving(true);
     try {
       const ok = await onSaveAsLayout({
         sourceLbsCode: effectiveLbsCode || activeSizes[0]?.FTLbsCode || 'ADA-100x38',
         newLbsCode: saveAsCode.trim() || undefined,
         newLbsName: saveAsName.trim(),
-        priType,
+        priType: newPrice,
         widthMm: wMm,
         heightMm: hMm,
         cols: meta.cols,
@@ -1192,8 +1222,8 @@ export function LabelDesigner({
       }
       if (
         el.type === 'static' &&
-        (el.label.includes('หัวป้าย') ||
-          el.label.includes('แบรนด์') ||
+        (el.label?.includes('หัวป้าย') ||
+          el.label?.includes('แบรนด์') ||
           (el.text || '').includes('ราคาสินค้า'))
       ) {
         return false;
@@ -1777,8 +1807,19 @@ export function LabelDesigner({
     toast.success(`จัดกึ่งกลางแผ่นแล้ว (ขอบซ้าย/ขวา ${ml} mm · ขอบบน/ล่าง ${mt} mm)`);
   };
 
-  const hasSavedCustom = selectedTemplate ? Boolean(selectedTemplate.hasOriginal || selectedTemplate.FTLtmCode === designCode) : Boolean(customLayouts[layoutKey]);
+  const hasSavedCustom = !startingLayout && (selectedTemplate ? Boolean(selectedTemplate.hasOriginal || selectedTemplate.FTLtmCode === designCode) : Boolean(customLayouts[layoutKey]));
 
+  const formatPicker = (
+    <SearchableSelect
+      value={selectedTemplate?.FTLtmCode || ''}
+      onValueChange={selectFormat}
+      placeholder={effectiveLbsCode ? `แบบตั้งต้น (ยังไม่บันทึก) · ${effectiveLbsCode}` : 'เลือกรูปแบบป้าย...'}
+      searchPlaceholder="ค้นหารหัสหรือชื่อแบบป้าย..."
+      className="h-8 w-[340px] max-w-[42vw] text-xs"
+      dropdownMinWidth={380}
+      options={formatOptions}
+    />
+  );
   return (
     <div className="flex flex-col h-[calc(100vh-58px)] min-h-[640px] bg-slate-100 select-none">
       <input
@@ -1809,15 +1850,7 @@ export function LabelDesigner({
           <div className="flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-2">
               <Label className="text-xs font-semibold text-slate-600 whitespace-nowrap">รูปแบบป้าย:</Label>
-              <SearchableSelect
-                value={selectedTemplate?.FTLtmCode || (effectiveLbsCode ? `legacy:${effectiveLbsCode}` : '')}
-                onValueChange={selectFormat}
-                placeholder={effectiveLbsCode ? currentSize.FTLbsName || effectiveLbsCode : 'เลือกรูปแบบป้าย...'}
-                searchPlaceholder="ค้นหารหัสหรือชื่อแบบป้าย..."
-                className="h-8 w-[340px] max-w-[42vw] text-xs"
-                dropdownMinWidth={380}
-                options={formatOptions}
-              />
+              {formatPicker}
               <Button
                 type="button"
                 size="sm"
@@ -1831,6 +1864,7 @@ export function LabelDesigner({
               </Button>
             </div>
 
+            {selectedTemplate ? <span className="text-xs text-slate-600">{priType === '2' ? 'ราคาโปรโมชัน' : 'ราคาปกติ'} · {doc.designMode === 'preprint' ? 'Pre-Print' : 'พิมพ์ครบจบ'}</span> : <>
             <div className="inline-flex rounded-md border border-slate-200 bg-slate-50 p-0.5">
               <button
                 type="button"
@@ -1881,6 +1915,7 @@ export function LabelDesigner({
               </button>
             </div>
 
+            </>}
             <Badge variant="secondary" className="text-[11px] font-mono px-2.5 py-0.5">
               {doc.width}×{doc.height} mm · {savedMetrics.cols}×{savedMetrics.rows} ({savedMetrics.totalPerSheet} ดวง/{getPaperSizeDisplayName(savedMetrics.paperSize, savedMetrics.paperWidthMm, savedMetrics.paperHeightMm)})
             </Badge>
@@ -2119,7 +2154,7 @@ export function LabelDesigner({
                       <FilePlus2 className="h-3.5 w-3.5 text-[#007a87]" />
                       บันทึกเป็นแบบใหม่ (ทำสำเนา)
                     </button>
-                  ) : !isBlankWorkspace ? (
+                  ) : !isBlankWorkspace && !startingLayout ? (
                     <button
                       type="button"
                       className="w-full text-left px-3 py-2 hover:bg-amber-50 flex items-center gap-2 text-amber-800"
@@ -3900,9 +3935,9 @@ export function LabelDesigner({
                 <strong>{PAPER_SIZE_PRESETS[a4Metrics.paperSize]?.label || `${a4Metrics.paperWidthMm}×${a4Metrics.paperHeightMm}`}</strong>{' '}
                 ({a4Metrics.cols} × {a4Metrics.rows} ดวง/แผ่น)
               </div>
-              <div>
-                โหมดที่กำลังบันทึก: <strong>{doc.designMode === 'preprint' ? 'Pre-Print (ฉากหลังไม่ออกพิมพ์)' : 'พิมพ์ครบจบ'}</strong> ·{' '}
-                <strong>{priType === '2' ? 'ราคาโปรโมชัน' : 'ราคาปกติ'}</strong>
+              <div className="grid grid-cols-2 gap-2 py-1">
+                <label>ประเภทป้าย<select className="block w-full rounded border p-1" value={newPrice} onChange={e=>setNewPrice(e.target.value==='2'?'2':'1')}><option value="1">ราคาปกติ</option><option value="2">ราคาโปรโมชัน</option></select></label>
+                <label>วิธีพิมพ์<select className="block w-full rounded border p-1" value={newMode} onChange={e=>setNewMode(e.target.value==='preprint'?'preprint':'full')}><option value="full">พิมพ์ครบจบ</option><option value="preprint">Pre-Print</option></select></label>
               </div>
             </div>
           </div>

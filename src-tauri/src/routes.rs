@@ -960,6 +960,16 @@ pub async fn post_save_as_template(
         format!("CUS-{}x{}-{}", width_mm.round() as i64, height_mm.round() as i64, suffix)
     };
 
+    let mut tx = match st.pool.begin_with("BEGIN IMMEDIATE").await {
+        Ok(tx) => tx, Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()),
+    };
+    match sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM TCNMLabelSize WHERE FTLbsCode=?)")
+        .bind(&new_lbs_code).fetch_one(&mut *tx).await {
+        Ok(true) => return err_json(StatusCode::CONFLICT,"รหัสแบบนี้มีอยู่แล้ว กรุณาใช้รหัสใหม่"),
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()),
+        Ok(false) => {}
+    }
+
     let tmpl_code = format!(
         "{}-DESIGN-{}",
         new_lbs_code,
@@ -975,8 +985,8 @@ pub async fn post_save_as_template(
         obj.insert("customDesign".to_string(), json!(true));
     }
     let (ltm_mode, ppr_code_opt) = match upsert_preprint_from_layout(
-        &st.pool,
-        None,
+        &mut *tx,
+        Some(&tmpl_code),
         &new_lbs_code,
         new_name,
         cols,
@@ -1007,29 +1017,6 @@ pub async fn post_save_as_template(
         INSERT INTO TCNMLabelSize
             (FTLbsCode, FTLbsGroup, FTLbsName, FCLbsWidth, FCLbsHeight, FNLbsCol, FNLbsRow, FCLbsMagTop, FCLbsMagLeft, FCLbsMagBottom, FCLbsMagRight, FCLbsGapH, FCLbsGapV, FNLbsQtyPageNor, FNLbsQtyPagePmt, FTLbsTmplNor, FTLbsTmplPmt, FTLbsHhtCode, FTLbsStaUse, FTLbsPaperSize, FCLbsPaperWidth, FCLbsPaperHeight, FTPprCode, FTLbsRmk, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CUSTOM', '1', ?, ?, ?, ?, ?, ?, 'DESIGNER', ?, 'DESIGNER')
-        ON CONFLICT(FTLbsCode) DO UPDATE SET
-            FTLbsName = excluded.FTLbsName,
-            FCLbsWidth = excluded.FCLbsWidth,
-            FCLbsHeight = excluded.FCLbsHeight,
-            FNLbsCol = excluded.FNLbsCol,
-            FNLbsRow = excluded.FNLbsRow,
-            FCLbsMagTop = excluded.FCLbsMagTop,
-            FCLbsMagLeft = excluded.FCLbsMagLeft,
-            FCLbsMagBottom = excluded.FCLbsMagBottom,
-            FCLbsMagRight = excluded.FCLbsMagRight,
-            FCLbsGapH = excluded.FCLbsGapH,
-            FCLbsGapV = excluded.FCLbsGapV,
-            FNLbsQtyPageNor = excluded.FNLbsQtyPageNor,
-            FNLbsQtyPagePmt = excluded.FNLbsQtyPagePmt,
-            FTLbsPaperSize = excluded.FTLbsPaperSize,
-            FCLbsPaperWidth = excluded.FCLbsPaperWidth,
-            FCLbsPaperHeight = excluded.FCLbsPaperHeight,
-            FTPprCode = COALESCE(excluded.FTPprCode, TCNMLabelSize.FTPprCode),
-            FTLbsTmplNor = COALESCE(excluded.FTLbsTmplNor, TCNMLabelSize.FTLbsTmplNor),
-            FTLbsTmplPmt = COALESCE(excluded.FTLbsTmplPmt, TCNMLabelSize.FTLbsTmplPmt),
-            FTLbsStaUse = '1',
-            FDLastUpdOn = excluded.FDLastUpdOn,
-            FTLastUpdBy = 'DESIGNER'
         "#,
     )
     .bind(&new_lbs_code)
@@ -1056,7 +1043,7 @@ pub async fn post_save_as_template(
     .bind(source_code)
     .bind(&now)
     .bind(&now)
-    .execute(&st.pool)
+    .execute(&mut *tx)
     .await
     {
         return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
@@ -1067,16 +1054,6 @@ pub async fn post_save_as_template(
         INSERT INTO TCNMLabelTmpl
             (FTLtmCode, FTLbsCode, FTLtmPriType, FTLtmName, FTLtmLayout, FTLtmStaUse, FTLtmMode, FTPprCode, FDCreateOn, FTCreateBy, FDLastUpdOn, FTLastUpdBy)
         VALUES (?, ?, ?, ?, ?, '1', ?, ?, ?, 'DESIGNER', ?, 'DESIGNER')
-        ON CONFLICT(FTLtmCode) DO UPDATE SET
-            FTLbsCode = excluded.FTLbsCode,
-            FTLtmPriType = excluded.FTLtmPriType,
-            FTLtmName = excluded.FTLtmName,
-            FTLtmLayout = excluded.FTLtmLayout,
-            FTLtmStaUse = '1',
-            FTLtmMode = excluded.FTLtmMode,
-            FTPprCode = excluded.FTPprCode,
-            FDLastUpdOn = excluded.FDLastUpdOn,
-            FTLastUpdBy = 'DESIGNER'
         "#,
     )
     .bind(&tmpl_code)
@@ -1088,12 +1065,15 @@ pub async fn post_save_as_template(
     .bind(&ppr_code_opt)
     .bind(&now)
     .bind(&now)
-    .execute(&st.pool)
+    .execute(&mut *tx)
     .await
     {
         return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     }
 
+    if let Err(e) = tx.commit().await {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
     Json(json!({
         "ok": true,
         "lbsCode": new_lbs_code,

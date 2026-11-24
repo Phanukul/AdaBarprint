@@ -144,6 +144,14 @@ function resolveDesignFieldValue(el: DesignElement, line: LabelPreviewLine): str
     case 'promotion.text':
       raw = String(promo.text || promo.name || 'โปรโมชันพิเศษ');
       break;
+    case 'promotion.discount_percent': {
+      const oldPrice = Number(price.old_value), current = Number(price.value);
+      raw = oldPrice > current && current >= 0 ? Math.round(100 * (oldPrice - current) / oldPrice) + '% OFF' : '';
+      break;
+    }
+    case 'promotion.free_text':
+      raw = String(promo.free_text || '');
+      break;
     case 'promotion.interval':
       raw = String(promo.interval || '');
       break;
@@ -336,7 +344,7 @@ export function CustomDesignRenderer({
         />
       )}
       {layout.elements
-        .filter(el=>!el.when||el.when.path.split('.').reduce<any>((v,key)=>v?.[key],line.ctx)===el.when.eq)
+        .filter(el=>!el.when||(el.when.path==='product.has_image' ? Boolean(line.ctx.product?.image) : el.when.path.split('.').reduce<any>((v,key)=>v?.[key],line.ctx))===el.when.eq)
         .filter((el) => el.visible !== false)
         .map((el) => {
           const commonStyle: React.CSSProperties = {

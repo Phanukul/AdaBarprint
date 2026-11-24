@@ -5,6 +5,7 @@ import type { PrinterConfig } from '@/types/printer';
 
 export interface Props {
   mode?: 'schedules' | 'jobs';
+  onOpenDesign?: (size: string, template: string, promo: boolean) => void;
   onOpenConnection?: () => void;
   authUser: AuthSessionUser;
   allLabelSizes: ConfigLabelSizeRow[]; sysOptions: SysOptionRow[];
@@ -32,6 +33,7 @@ function templateProblem(template:Template, windows:boolean):string {
     if(!layout||!Array.isArray(layout.elements)||!layout.elements.length)return 'ยังไม่มีแบบพร้อมใช้งาน';
     const elements=layout.elements.filter((el:{visible?:boolean})=>el.visible!==false);
     if(!elements.length)return 'ไม่มีองค์ประกอบที่เปิดแสดงบนป้าย';
+    if(windows && layout.customDesign) return '';
     if(!windows && layout.designMode==='preprint')return 'การพิมพ์อัตโนมัติยังไม่รองรับการชดเชยตำแหน่งบนกระดาษพิมพ์พื้นหลัง';
     const unsupported=elements.filter((el:{type?:string;iconName?:string})=>!(windows && (el.type==='image'||el.type==='qrcode'||(el.type==='icon'&&el.iconName==='heart'))) && !['text','static','price','date','barcode','rect','line'].includes(el.type||''));
     if(unsupported.length){const names:Record<string,string>={qrcode:'QR Code',qr:'QR Code',image:'รูปภาพ',icon:'ไอคอน'};return 'การพิมพ์อัตโนมัติยังไม่รองรับ: '+[...new Set(unsupported.map((el:{type:string})=>names[el.type]||el.type))].join(', ');}

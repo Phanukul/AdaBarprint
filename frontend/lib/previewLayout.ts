@@ -3,7 +3,7 @@ import type { DesignElement, LabelDesignLayout } from '@/types/design';
 export function previewLayout(raw?: string | null, size?: { FCLbsWidth: number; FCLbsHeight: number }): LabelDesignLayout | null {
   try {
     const layout = JSON.parse(raw || 'null');
-    if (!Array.isArray(layout?.elements) || !layout.elements.length) return null;
+    if (!Array.isArray(layout?.elements)) return null;
     return {
       ...layout, customDesign: true,
       width: layout.width || size?.FCLbsWidth,

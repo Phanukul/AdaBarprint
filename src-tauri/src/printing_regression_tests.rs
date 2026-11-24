@@ -349,3 +349,40 @@ async fn design_overwrite_reopens_selected_template_and_restores_original() {
         .fetch_one(&pool).await.unwrap();
     assert_eq!(default, sibling);
 }
+
+#[tokio::test]
+async fn standard_designs_upgrade_profiles_and_preserve_exact_edits() {
+    let (pool, _) = fixture().await;
+    let profile = json!({"source":"PROMO_START","size":"UFM-PRO-A5","template":"legacy:UFM-PRO-A5",
+        "targets":[{"size":"UFM-PRO-A5","template":"legacy:UFM-PRO-A5"},{"size":"BC-25x32","template":"BC-25x32-NOR"}]});
+    sqlx::query("INSERT INTO ABPrintRule VALUES('upgrade',?)").bind(profile.to_string()).execute(&pool).await.unwrap();
+    crate::standard_designs::install(&pool).await.unwrap();
+    let profile:String=sqlx::query_scalar("SELECT config FROM ABPrintRule WHERE id='upgrade'").fetch_one(&pool).await.unwrap();
+    let profile:serde_json::Value=serde_json::from_str(&profile).unwrap();
+    assert_eq!(profile["template"], "UFM-PRO-A5-STD-PMT");
+    assert_eq!(profile["targets"][0]["template"], profile["template"]);
+    assert_eq!(profile["targets"][1]["template"], "BC-25x32-NOR");
+    let docs:Vec<String>=sqlx::query_scalar("SELECT FTLtmLayout FROM TCNMLabelTmpl WHERE (FTLbsCode LIKE 'ADA-%' OR FTLbsCode LIKE 'UFM-%') AND FTLtmCode LIKE '%-STD-%'").fetch_all(&pool).await.unwrap();
+    assert_eq!(docs.len(),20);
+    for raw in docs {
+        let doc:serde_json::Value=serde_json::from_str(&raw).unwrap();
+        let layers=doc["elements"].as_array().unwrap();
+        assert!(layers.iter().any(|e|e["field"]=="price.value"));
+        assert!(layers.iter().any(|e|e["type"]=="barcode"));
+        assert!(layers.iter().all(|e|e["id"].is_string() && e["width"].as_f64().unwrap()>0.0));
+    }
+    sqlx::query("UPDATE TCNMLabelTmpl SET FTLtmLayout=json_set(FTLtmLayout,'$.elements[0].label','Edited') WHERE FTLtmCode='UFM-PRO-A5-STD-PMT'").execute(&pool).await.unwrap();
+    crate::standard_designs::install(&pool).await.unwrap();
+    let edited:Vec<String>=sqlx::query_scalar("SELECT FTLtmCode FROM TCNMLabelTmpl WHERE json_extract(FTLtmLayout,'$.elements[0].label')='Edited'").fetch_all(&pool).await.unwrap();
+    assert_eq!(edited,vec!["UFM-PRO-A5-STD-PMT"]);
+
+    let state=routes::AppState{pool:pool.clone()};
+    let draft=json!({"sourceLbsCode":"UFM-PRO-A5","newLbsCode":"QA-PREPRINT","newLbsName":"QA Pre-Print","priType":"2",
+        "widthMm":200,"heightMm":142,"layout":{"designMode":"preprint","elements":[{"type":"text","field":"product.name"}]}});
+    let copy=||routes::post_save_as_template(State(state.clone()),Json(serde_json::from_value(draft.clone()).unwrap()));
+    assert!(copy().await.status().is_success());
+    assert_eq!(copy().await.status(),axum::http::StatusCode::CONFLICT);
+    let modes:Vec<(String,String)>=sqlx::query_as("SELECT FTLtmCode,FTLtmMode FROM TCNMLabelTmpl WHERE FTLtmCode IN ('QA-PREPRINT-DESIGN-PMT','UFM-PRO-A5-STD-PMT') ORDER BY FTLtmCode")
+        .fetch_all(&pool).await.unwrap();
+    assert_eq!(modes,vec![("QA-PREPRINT-DESIGN-PMT".into(),"preprint".into()),("UFM-PRO-A5-STD-PMT".into(),"full".into())]);
+}

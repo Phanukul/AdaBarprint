@@ -15,13 +15,13 @@ fn browser() -> Option<PathBuf> {
 }
 
 /// Rasterize with the same React label and barcode capture as manual Windows printing.
-pub async fn render(size: &TCNMLabelSize, contexts: &[Value], printer: &str) -> Result<String, String> {
+pub async fn render(size: &TCNMLabelSize, contexts: &[Value], printer: &str, design:&Value) -> Result<String, String> {
     let exe = browser().ok_or("ต้องติดตั้ง Microsoft Edge หรือ Chrome สำหรับแบบป้ายเดิม")?;
     let bundle = Assets::get("legacy-print.js").ok_or("ไม่พบตัวแสดงป้ายเดิม กรุณา build เว็บก่อน")?;
     let dir = std::env::temp_dir().join(format!("AdaBarprint-preview-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&dir).map_err(|e| e.to_string())?;
     let result = async {
-        let data = json!({"size":size, "contexts":contexts, "thermal": size.FTLbsPaperSize.as_deref()==Some("ROLL") && printer.to_uppercase().contains("EZ520")});
+        let data = json!({"design":design,"size":size, "contexts":contexts, "thermal": size.FTLbsPaperSize.as_deref()==Some("ROLL") && printer.to_uppercase().contains("EZ520")});
         let html = format!(r#"<!doctype html><meta charset="utf-8"><div id="page"></div><script type="application/json" id="job">{}</script><script src="render.js"></script>"#, data.to_string().replace('<', "\\u003c"));
         let page = dir.join("page.html");
         std::fs::write(&page, html).map_err(|e| e.to_string())?;

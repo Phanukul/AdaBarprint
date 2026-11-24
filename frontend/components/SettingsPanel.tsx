@@ -150,6 +150,7 @@ interface SettingsPanelProps {
   onClearInitialEdit?: () => void;
   initialSubTab?: 'sizes' | 'preprints' | 'printers' | 'devices' | 'autoprint' | 'autoprint_history' | 'connection' | 'jobs' | null;
   onClearInitialSubTab?: () => void;
+  onOpenDesign?: (size: string, template: string, promo: boolean) => void;
   onLoadManualRows?: (lines: ManualLoadLine[]) => void;
 }
 
@@ -198,6 +199,7 @@ export function SettingsPanel({
   initialSubTab,
   onClearInitialSubTab,
   onLoadManualRows,
+  onOpenDesign,
 }: SettingsPanelProps) {
   const [subTab, setSubTab] = useState<'sizes' | 'preprints' | 'printers' | 'devices' | 'autoprint' | 'autoprint_history' | 'connection' | 'jobs'>(() => {
     if (initialEditLbsCode) return 'printers';
@@ -1438,6 +1440,7 @@ export function SettingsPanel({
         {ENABLE_AUTO_PRINT_UI && (
           <TabsContent value="autoprint" className="space-y-4 mt-0">
             <AutoScheduleSettings
+              onOpenDesign={onOpenDesign}
               onOpenConnection={()=>setSubTab('connection')}
               authUser={authUser}
               allLabelSizes={allLabelSizes}

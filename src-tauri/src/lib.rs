@@ -3,6 +3,7 @@ pub mod agent_setup;
 pub mod auth;
 pub mod barcode;
 pub mod db;
+mod standard_designs;
 pub mod delta_engine;
 pub mod label_renderer;
 #[cfg(target_os = "windows")]
@@ -84,6 +85,7 @@ pub async fn init_db_and_router() -> Result<(Router, SqlitePool), sqlx::Error> {
     let _ = db::seed_defaults(&pool).await;
     let _ = db::ensure_ufm_label_sizes(&pool).await;
     let _ = db::ensure_ada_label_sizes(&pool).await;
+    standard_designs::install(&pool).await?;
     if ENABLE_AUTO_PRINT
         && std::env::var("AUTOPRINT_DISABLE_EMBEDDED_SCHEDULER").as_deref() != Ok("1")
     {
@@ -247,6 +249,10 @@ pub fn run_profile_cli(profile_code: &str) -> i32 {
         if let Err(e) = print_center::ensure_schema(&pool).await {
             eprintln!("[AdaBarprint CLI] Print center schema failed: {e}");
             pool.close().await;
+            return 1;
+        }
+        if let Err(e) = standard_designs::install(&pool).await {
+            eprintln!("[AdaBarprint CLI] Template migration failed: {e}");
             return 1;
         }
         let outcome = print_center::execute_profile_cli(&pool, profile_code).await;

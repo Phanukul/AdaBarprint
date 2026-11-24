@@ -755,13 +755,14 @@ export function AutoPrintBulkSettings(
 
                         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 text-xs">
                           {targets.map((t, i) => {
-                            const tmpl = p.templates.find((x) => x.FTLtmCode === t.template);
+                            const format = templateOptions.find(o => o.value === t.template);
                             return (
                               <div key={i} className="rounded border border-slate-100 bg-slate-50 px-2.5 py-2 space-y-0.5">
                                 <div className="font-medium text-slate-800">
-                                  กระดาษ {i + 1}: {tmpl?.FTLtmName || templateOptions.find(o => o.value === t.template)?.label || t.template || '-'}
+                                  กระดาษ {i + 1}: {format?.label || t.template || '-'}
                                 </div>
                                 <div className="text-slate-600">
+                                  {format && p.onOpenDesign && <button type="button" className="block text-teal-700 underline" onClick={() => p.onOpenDesign?.(t.size, t.template, rule.source === 'PROMO_START')}>{t.template.startsWith('legacy:') ? 'เปิดแบบดั้งเดิมใน Design' : 'แก้ไขแบบป้ายนี้'}</button>}
                                   เครื่องพิมพ์: {t.printer || '-'}
                                   {t.tray ? ` (${p.formatTrayLabel(t.tray)})` : ''} · {t.quantity} ดวง/รายการ
                                 </div>
@@ -796,7 +797,7 @@ export function AutoPrintBulkSettings(
                 <section key={gIdx} className="min-w-0 rounded-md border">
                   <div className="flex flex-wrap items-start justify-between gap-3 p-3 text-sm">
                     <dl className="flex flex-wrap gap-x-8 gap-y-2">
-                      <div><dt className="text-xs text-slate-600">แบบป้าย</dt><dd>{tmpl?.FTLtmName || size?.FTLbsName || grp.template}</dd></div>
+                      <div><dt className="text-xs text-slate-600">แบบป้าย</dt><dd>{templateOptions.find(o => o.value === grp.template)?.label || grp.template}</dd></div>
                       <div><dt className="text-xs text-slate-600">เครื่องพิมพ์</dt><dd>{grp.printer}</dd></div>
                     </dl>
                     <span className="font-semibold">เข้าเงื่อนไข {grp.items.length} รายการ</span>
