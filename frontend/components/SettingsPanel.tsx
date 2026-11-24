@@ -32,7 +32,6 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { TablePagination } from './TablePagination';
-import { SearchableSelect } from '@/components/ui/searchable-select';
 import {
   Table,
   TableBody,
@@ -186,7 +185,6 @@ export function SettingsPanel({
   paperSizes,
   preprints,
   sysOptions,
-  printerServers,
   branches,
   windowsPrinters,
   driverMappings,
@@ -347,32 +345,6 @@ export function SettingsPanel({
   const [lanDarkness, setLanDarkness] = useState(10);
   const [testingLanId, setTestingLanId] = useState<string | null>(null);
 
-  // ── Tab 3: System Options State ────────────────────────────────────────────
-  const getOpt = (code: string, fallback = '') =>
-    sysOptions.find((o) => o.FTSopCode === code)?.FTSopValue ?? fallback;
-
-  const [optTemplate, setOptTemplate] = useState(() => getOpt('DefaultTemplate', ''));
-  const [optPrinter, setOptPrinter] = useState(() => getOpt('DefaultPrinter', ''));
-  const [optUrlTmpl, setOptUrlTmpl] = useState(() => getOpt('UrlTemplate', ''));
-  const [optUser, setOptUser] = useState(() => getOpt('DefaultUser', ''));
-  const [optServerName, setOptServerName] = useState(
-    () => printerServers[0]?.FTPsvName || ''
-  );
-  const [savingOpts, setSavingOpts] = useState(false);
-
-  // Sync Tab 3 inputs if sysOptions refresh externally
-  React.useEffect(() => {
-    const val = (code: string, fallback = '') =>
-      sysOptions.find((o) => o.FTSopCode === code)?.FTSopValue ?? fallback;
-    setOptTemplate(val('DefaultTemplate', ''));
-    setOptPrinter(val('DefaultPrinter', ''));
-    setOptUrlTmpl(val('UrlTemplate', ''));
-    setOptUser(val('DefaultUser', ''));
-    if (printerServers[0]?.FTPsvName) {
-      setOptServerName(printerServers[0].FTPsvName);
-    }
-  }, [sysOptions, printerServers]);
-
   React.useEffect(() => {
     if (initialEditLbsCode) {
       setSubTab('printers');
@@ -473,11 +445,6 @@ export function SettingsPanel({
     const cur = Math.min(printerPage, maxP);
     return printers.slice((cur - 1) * printerPageSize, cur * printerPageSize);
   }, [printers, printerPage, printerPageSize]);
-
-  const activeSizesForDefault = useMemo(
-    () => allLabelSizes.filter((s) => s.FTLbsStaUse === '1'),
-    [allLabelSizes]
-  );
 
   // ── Handlers: Tab 1 (Label Sizes) ──────────────────────────────────────────
   const openNewSizeForm = () => {
@@ -896,29 +863,6 @@ export function SettingsPanel({
     }
   };
 
-  // ── Handlers: Tab 3 (System Options) ───────────────────────────────────────
-  const handleSaveOptions = async (options: Array<{ code: string; value: string }>, server?: { serverCode: string; serverName: string }) => {
-    setSavingOpts(true);
-    try {
-      const res = await fetch('/api/config/options', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ options, ...server }),
-      });
-      const data = await parseApiJson(res);
-      if (!res.ok || !data?.ok) {
-        toast.error(data?.error || 'บันทึกตั้งค่าระบบไม่สำเร็จ');
-        return;
-      }
-      await onRefreshAll();
-      toast.success('บันทึกการตั้งค่าระบบเรียบร้อยแล้ว');
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSavingOpts(false);
-    }
-  };
-
   const isAdminLockedView =
     workspace === 'settings' &&
     subTab === 'connection' &&
@@ -1047,31 +991,6 @@ export function SettingsPanel({
           ) : (
             <MasterDatabaseSettings onSaved={() => window.location.reload()} />
           )}
-          {adminGranted && <details className="rounded-lg border bg-white p-4">
-            <summary className="cursor-pointer text-sm font-medium">ลิงก์สินค้าและผู้ใช้เริ่มต้น (IT/Admin)</summary>
-            <div className="mt-3 space-y-3">
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="space-y-1.5">
-                      <Label className="text-xs font-medium">รูปแบบลิงก์ QR Code</Label>
-                      <Input
-                        value={optUrlTmpl}
-                        onChange={(e) => setOptUrlTmpl(e.target.value)}
-                        className="h-9 text-xs font-mono"
-                      />
-                    </div>
-                <div className="space-y-1.5">
-                      <Label className="text-xs font-medium">รหัสผู้ใช้งานเริ่มต้น</Label>
-                      <Input
-                        value={optUser}
-                        onChange={(e) => setOptUser(e.target.value)}
-                        placeholder="เช่น ADMIN"
-                        className="h-9 text-xs"
-                      />
-                    </div>
-              </div>
-              <Button disabled={savingOpts} onClick={() => handleSaveOptions([{ code: 'UrlTemplate', value: optUrlTmpl }, { code: 'DefaultUser', value: optUser }])}>บันทึก</Button>
-            </div>
-          </details>}
         </TabsContent>
         <TabsContent value="jobs">{jobsPanel}</TabsContent>
 
@@ -1259,32 +1178,6 @@ export function SettingsPanel({
               />
             </CardContent>
           </Card>
-          <details className="rounded-lg border bg-white p-4">
-            <summary className="cursor-pointer text-sm font-medium">รูปแบบป้ายเริ่มต้น (IT/Admin)</summary>
-            {adminGranted ? <div className="mt-3 space-y-3">
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="space-y-1.5">
-                  <Label className="text-xs font-medium">รูปแบบป้ายเริ่มต้น</Label>
-                  <SearchableSelect
-                    value={optTemplate || '__NONE__'}
-                    onValueChange={(v) => setOptTemplate(v === '__NONE__' ? '' : v)}
-                    placeholder="-- ให้ผู้ใช้เลือกเอง --"
-                    searchPlaceholder="ค้นหารหัสหรือชื่อรูปแบบป้าย..."
-                    className="h-9 text-xs"
-                    options={[
-                      { value: '__NONE__', label: '-- ให้ผู้ใช้เลือกเอง --' },
-                      ...activeSizesForDefault.map((s) => ({
-                        value: s.FTLbsCode,
-                        label: `${s.FTLbsCode} — ${s.FTLbsName}`,
-                        keywords: `${s.FTLbsCode} ${s.FTLbsName}`,
-                      })),
-                    ]}
-                  />
-                </div>
-              </div>
-              <Button disabled={savingOpts} onClick={() => handleSaveOptions([{ code: 'DefaultTemplate', value: optTemplate }])}>บันทึก</Button>
-            </div> : renderAdminGateCard('รูปแบบป้ายเริ่มต้น')}
-          </details>
         </TabsContent>
 
         {/* ══════════════════ TAB 2: PRE-PRINT VAULT ════════════════════════ */}
@@ -1537,47 +1430,6 @@ export function SettingsPanel({
             </CardContent>
           </Card>
 
-          <details className="rounded-lg border bg-white p-4">
-            <summary className="cursor-pointer text-sm font-medium">เครื่องพิมพ์สำรองและแม่ข่าย (IT/Admin)</summary>
-            {adminGranted ? <div className="mt-3 space-y-3">
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="space-y-1.5">
-                  <Label className="text-xs font-medium">เครื่องพิมพ์สำรอง</Label>
-                  <SearchableSelect
-                    value={optPrinter || '__NONE__'}
-                    onValueChange={(v) => setOptPrinter(v === '__NONE__' ? '' : v)}
-                    placeholder="-- ไม่กำหนด --"
-                    searchPlaceholder="ค้นหาชื่อเครื่องพิมพ์..."
-                    className="h-9 text-xs"
-                    options={[
-                      { value: '__NONE__', label: '-- ไม่กำหนด --' },
-                      ...windowsPrinters.map((w) => ({
-                        value: w.name,
-                        label: w.name,
-                        keywords: w.name,
-                      })),
-                      ...printers
-                        .filter((p) => p.enabled && p.ip !== 'Windows' && p.brand !== 'WINDOWS' && p.brand !== 'SAMSUNG')
-                        .map((p) => ({
-                          value: p.name,
-                          label: `${p.name} (LAN ${p.brand})`,
-                          keywords: `${p.name} ${p.brand} ${p.ip}`,
-                        })),
-                    ]}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                      <Label className="text-xs font-medium">ชื่อเครื่องแม่ข่ายพิมพ์ (Print Server)</Label>
-                      <Input
-                        value={optServerName}
-                        onChange={(e) => setOptServerName(e.target.value)}
-                        className="h-9 text-xs"
-                      />
-                    </div>
-              </div>
-              <Button disabled={savingOpts} onClick={() => handleSaveOptions([{ code: 'DefaultPrinter', value: optPrinter }], { serverCode: driverServerCode, serverName: optServerName })}>บันทึก</Button>
-            </div> : renderAdminGateCard('เครื่องพิมพ์สำรองและแม่ข่าย')}
-          </details>
         </TabsContent>
 
         {/* ══════════════════ TAB 3: SYSTEM OPTIONS ═════════════════════════ */}
