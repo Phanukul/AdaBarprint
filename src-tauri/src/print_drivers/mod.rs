@@ -178,18 +178,36 @@ fn get_text_value(el: &TemplateElement, ctx: &Value) -> String {
     }
 }
 
+fn barcode_kind<'a>(el: &'a TemplateElement, data: &str) -> &'a str {
+    let kind = el.symbology.as_deref().unwrap_or("EAN13");
+    match kind {
+        "EAN13" | "EAN8" | "UPCA" | "CODE39" if crate::barcode::validate_barcode(data, kind).is_ok()
+            && data == data.trim() => kind,
+        _ => "CODE128",
+    }
+}
+
+fn module_dots(el: &TemplateElement, kind: &str, data: &str, dpi: u32) -> i64 {
+    let modules = match kind {
+        "EAN13" | "UPCA" => 95,
+        "EAN8" => 67,
+        "CODE39" => 16 * (data.len() + 2),
+        _ => 11 * (data.len() + 2) + 13,
+    };
+    (mm_to_dots(el.width.unwrap_or(25.0), dpi) / (modules as i64 + 22)).min(3)
+}
+
 // ─── GODEX EZPL ──────────────────────────────────────────────────────────────
 
 fn generate_ezpl_label(ctx: &Value, elements: &[TemplateElement], opts: &DriverOptions) -> String {
     let mut lines = vec![
-        "^@".to_string(),
-        format!("~R{}", opts.dpi),
         format!("^Q{},{}", opts.label_height_mm.round() as i64, opts.gap_mm.round() as i64),
         format!("^W{}", opts.label_width_mm.round() as i64),
         format!("^H{}", opts.darkness.min(19)),
         format!("^S{}", opts.speed.clamp(1, 7)),
         "^ON".to_string(),
         format!("^P{}", opts.copies),
+        "^L".to_string(),
     ];
 
     for el in elements {
@@ -206,25 +224,18 @@ fn generate_ezpl_label(ctx: &Value, elements: &[TemplateElement], opts: &DriverO
                 }
                 let font_mm = el.font_size.unwrap_or(8.0) * 0.352778;
                 let fh = mm_to_dots(font_mm * 1.4, opts.dpi).max(12);
-                let fw = mm_to_dots(font_mm * 0.6, opts.dpi).max(7);
-                let font = if fh >= 28 { "5" } else if fh >= 20 { "4" } else if fh >= 14 { "3" } else { "2" };
-                lines.push(format!("^FO{},{}^A{},N,{},{}^FD{}^FS", x, y, font, fh, fw, text));
+                let font = if fh >= 28 { "D" } else if fh >= 18 { "C" } else { "B" };
+                lines.push(format!("A{font},{x},{y},1,1,0,0,{text}"));
             }
             "barcode" => {
-                let data = el.field.as_deref().map(|f| dig_str(ctx, f)).unwrap_or_default();
-                if data.is_empty() {
-                    continue;
-                }
-                let w = mm_to_dots(el.width.unwrap_or(25.0), opts.dpi);
-                let h = mm_to_dots(el.height.unwrap_or(13.0), opts.dpi);
-                let show = if el.show_text.unwrap_or(true) { "Y" } else { "N" };
-                let sym = el.symbology.as_deref().unwrap_or("EAN13").to_uppercase();
-                let bdata = if (sym == "EAN13" || sym == "EAN8" || sym == "UPCA") && data.len() > 1 {
-                    &data[..data.len() - 1]
-                } else {
-                    data.as_str()
-                };
-                lines.push(format!("^FO{},{}^BC{},{},,{},N^FD{}^FS", x, y, w, h, show, bdata));
+                let data = dig_str(ctx,el.field.as_deref().unwrap_or("product.barcode"));
+                if data.is_empty() { continue; }
+                let kind = barcode_kind(el, &data);
+                let symbol = match kind { "EAN13"=>"E", "EAN8"=>"B", "UPCA"=>"H", "CODE39"=>"A3", _=>"Q" };
+                let dots = module_dots(el,kind,&data,opts.dpi);
+                let height = mm_to_dots(el.height.unwrap_or(13.0),opts.dpi);
+                let show = u8::from(el.show_text.unwrap_or(true));
+                lines.push(format!("B{symbol},{},{y},{dots},{},{height},0,{show},{data}",x+11*dots,2*dots));
             }
             "qrcode" => {
                 let data = el.field.as_deref().map(|f| dig_str(ctx, f)).unwrap_or_default();
@@ -232,17 +243,14 @@ fn generate_ezpl_label(ctx: &Value, elements: &[TemplateElement], opts: &DriverO
                     continue;
                 }
                 let size = mm_to_dots(el.width.unwrap_or(20.0), opts.dpi);
-                lines.push(format!("^FO{},{}^BE{},,,N^FD{}^FS", x, y, size, data));
+                let side = qrcode::QrCode::new(data.as_bytes()).map(|q| q.width() as i64).unwrap_or(21);
+                let dots = (size / (side + 8)).clamp(1, 40);
+                lines.push(format!("W{},{},5,2,M,8,{dots},{},0\r\n{data}", x + 4*dots, y + 4*dots, data.len()));
             }
             "rect" => {
                 let w = mm_to_dots(el.width.unwrap_or(100.0), opts.dpi);
                 let h = mm_to_dots(el.height.unwrap_or(38.0), opts.dpi);
-                let thick = if el.fill.as_deref().map(|f| f != "#FFFFFF").unwrap_or(false) {
-                    1
-                } else {
-                    1
-                };
-                lines.push(format!("^FO{},{}^GB{},{},{}^FS", x, y, w, h, thick));
+                lines.push(format!("R{x},{y},{},{},1,1", x+w, y+h));
             }
             _ => {}
         }
@@ -291,21 +299,23 @@ fn generate_zpl_like_label(
                 lines.push(format!("^FO{},{}^A0N,{},{}^FD{}^FS", x, y, fh, fw, text));
             }
             "barcode" => {
-                let data = el.field.as_deref().map(|f| dig_str(ctx, f)).unwrap_or_default();
+                let data = dig_str(ctx,el.field.as_deref().unwrap_or("product.barcode"));
                 if data.is_empty() {
                     continue;
                 }
                 let h = mm_to_dots(el.height.unwrap_or(13.0), opts.dpi).max(30);
                 let show = if el.show_text.unwrap_or(true) { "Y" } else { "N" };
-                let sym = el.symbology.as_deref().unwrap_or("EAN13").to_uppercase();
-                let cmd = match sym.as_str() {
+                let sym = barcode_kind(el, &data);
+                let dots = module_dots(el,sym,&data,opts.dpi);
+                let cmd = match sym {
                     "EAN13" => format!("^BEN,{},{},N", h, show),
                     "EAN8" => format!("^B8N,{},{},N", h, show),
                     "UPCA" => format!("^BUN,{},{},N,Y", h, show),
                     "CODE39" => format!("^B3N,N,{},{},N", h, show),
                     _ => format!("^BCN,{},{},N,N", h, show),
                 };
-                lines.push(format!("^FO{},{}^BY2{}{}^FD{}^FS", x, y, "", cmd, data));
+                let field = if matches!(sym,"EAN13"|"EAN8"|"UPCA") { &data[..data.len()-1] } else { &data };
+                lines.push(format!("^FO{},{y}^BY{dots}{cmd}^FD{field}^FS", x + 11*dots));
             }
             "qrcode" => {
                 let data = el.field.as_deref().map(|f| dig_str(ctx, f)).unwrap_or_default();
@@ -360,21 +370,22 @@ fn generate_tspl_like_label(
                 lines.push(format!("TEXT {},{},\"3\",0,{},{},\"{}\"", x, y, mul, mul, text));
             }
             "barcode" => {
-                let data = el.field.as_deref().map(|f| dig_str(ctx, f)).unwrap_or_default();
+                let data = dig_str(ctx,el.field.as_deref().unwrap_or("product.barcode"));
                 if data.is_empty() {
                     continue;
                 }
                 let h = mm_to_dots(el.height.unwrap_or(13.0), opts.dpi).max(30);
                 let show = if el.show_text.unwrap_or(true) { 1 } else { 0 };
-                let sym = el.symbology.as_deref().unwrap_or("EAN13").to_uppercase();
-                let btype = match sym.as_str() {
+                let sym = barcode_kind(el, &data);
+                let dots = module_dots(el,sym,&data,opts.dpi);
+                let btype = match sym {
                     "EAN13" => "EAN13",
                     "EAN8" => "EAN8",
                     "UPCA" => "UPCA",
                     "CODE39" => "39",
                     _ => "128",
                 };
-                lines.push(format!("BARCODE {},{},\"{}\",{}, {},0,2,2,\"{}\"", x, y, btype, h, show, data));
+                lines.push(format!("BARCODE {},{},\"{}\",{},{},0,{dots},{dots},\"{}\"", x + 11*dots, y, btype, h, show, data));
             }
             "qrcode" => {
                 let data = el.field.as_deref().map(|f| dig_str(ctx, f)).unwrap_or_default();
@@ -423,13 +434,16 @@ fn generate_dp_label(ctx: &Value, elements: &[TemplateElement], opts: &DriverOpt
                 lines.push(format!("PT \"{}\"", text));
             }
             "barcode" => {
-                let data = el.field.as_deref().map(|f| dig_str(ctx, f)).unwrap_or_default();
+                let data = dig_str(ctx,el.field.as_deref().unwrap_or("product.barcode"));
                 if data.is_empty() {
                     continue;
                 }
                 let h = mm_to_dots(el.height.unwrap_or(13.0), opts.dpi).max(30);
-                lines.push(format!("PP {},{}", x, y));
-                lines.push("BT \"EAN13\"".to_string());
+                let kind = barcode_kind(el, &data);
+                let dots = module_dots(el, kind, &data, opts.dpi);
+                lines.push(format!("PP {},{}", x + 11*dots, y));
+                lines.push(format!("BT \"{kind}\""));
+                lines.push(format!("BM {dots}"));
                 lines.push(format!("BH {}", h));
                 lines.push(format!("PB \"{}\"", data));
             }
@@ -457,9 +471,24 @@ pub fn generate_commands(
     labels: &[(Value, u32)],
     elements: &[TemplateElement],
     opts: &DriverOptions,
-) -> String {
+) -> Result<String, String> {
     let mut parts = Vec::new();
     for (ctx, qty) in labels {
+        for el in elements.iter().filter(|el| el.el_type == "barcode" && when_condition(el,ctx)) {
+            let data = dig_str(ctx,el.field.as_deref().unwrap_or("product.barcode"));
+            if data.is_empty() || !data.bytes().all(|b| (32..=126).contains(&b)) {
+                return Err("ข้อมูลบาร์โค้ดว่างหรือเครื่องพิมพ์ LAN เข้ารหัสไม่ได้".into());
+            }
+            if module_dots(el, barcode_kind(el, &data), &data, opts.dpi) < 1 {
+                return Err(format!("พื้นที่บาร์โค้ดแคบเกินไปสำหรับ {data} กรุณาขยายช่องบาร์โค้ด"));
+            }
+            let reserved = match brand {
+                PrinterBrand::Zebra | PrinterBrand::Argox => data.contains(['^','~','>']),
+                PrinterBrand::Tsc | PrinterBrand::Bixolon | PrinterBrand::Honeywell => data.contains('"'),
+                _ => false,
+            };
+            if reserved { return Err(format!("รหัส {data} มีอักขระพิเศษสำหรับคำสั่งเครื่องพิมพ์ ใช้ไดรเวอร์ Windows")); }
+        }
         for _ in 0..(*qty).max(1) {
             let cmd = match brand {
                 PrinterBrand::Godex => generate_ezpl_label(ctx, elements, opts),
@@ -472,7 +501,7 @@ pub fn generate_commands(
             parts.push(cmd);
         }
     }
-    parts.join("\r\n")
+    Ok(parts.join("\r\n"))
 }
 
 pub fn generate_test_pattern(brand: PrinterBrand, dpi: u32, width_mm: f64, height_mm: f64) -> String {
@@ -480,19 +509,19 @@ pub fn generate_test_pattern(brand: PrinterBrand, dpi: u32, width_mm: f64, heigh
     let h_dots = mm_to_dots(height_mm, dpi);
     match brand {
         PrinterBrand::Godex => format!(
-            "^@\r\n~R{}\r\n^Q{},2\r\n^W{}\r\n^H10\r\n^S2\r\n^ON\r\n^P1\r\n^FO20,20^A3,N,32,18^FDAdaPos 6.0 PrintBar TEST^FS\r\n^FO20,70^BC200,80,,Y,N^FD885000100001^FS\r\nE",
-            dpi, height_mm.round() as i64, width_mm.round() as i64
+            "^Q{},2\r\n^W{}\r\n^H10\r\n^S2\r\n^P1\r\n^L\r\nAC,20,20,1,1,0,0,AdaPos PrintBar TEST\r\nBE,30,70,2,4,80,0,1,8850001000019\r\nE",
+            height_mm.round() as i64, width_mm.round() as i64
         ),
         PrinterBrand::Zebra | PrinterBrand::Argox => format!(
-            "^XA\r\n^PW{}\r\n^LL{}\r\n^FO20,20^A0N,30,25^FDAdaPos 6.0 PrintBar TEST^FS\r\n^FO20,70^BY2^BEN,80,Y,N^FD8850001000014^FS\r\n^XZ",
+            "^XA\r\n^PW{}\r\n^LL{}\r\n^FO20,20^A0N,30,25^FDAdaPos 6.0 PrintBar TEST^FS\r\n^FO20,70^BY2^BEN,80,Y,N^FD885000100001^FS\r\n^XZ",
             w_dots, h_dots
         ),
         PrinterBrand::Tsc | PrinterBrand::Bixolon => format!(
-            "SIZE {} mm, {} mm\r\nGAP 2 mm, 0 mm\r\nCLS\r\nTEXT 20,20,\"3\",0,1,1,\"AdaPos 6.0 PrintBar TEST\"\r\nBARCODE 20,70,\"EAN13\",80,1,0,2,2,\"8850001000014\"\r\nPRINT 1,1",
+            "SIZE {} mm, {} mm\r\nGAP 2 mm, 0 mm\r\nCLS\r\nTEXT 20,20,\"3\",0,1,1,\"AdaPos 6.0 PrintBar TEST\"\r\nBARCODE 20,70,\"EAN13\",80,1,0,2,2,\"8850001000019\"\r\nPRINT 1,1",
             width_mm, height_mm
         ),
         PrinterBrand::Honeywell => {
-            "INPUT OFF\r\nCLL\r\nPP 20,20\r\nFT \"Swiss 721 BT\",12\r\nPT \"AdaPos 6.0 PrintBar TEST\"\r\nPP 20,70\r\nBT \"EAN13\"\r\nBH 80\r\nPB \"8850001000014\"\r\nPF 1".to_string()
+            "INPUT OFF\r\nCLL\r\nPP 20,20\r\nFT \"Swiss 721 BT\",12\r\nPT \"AdaPos 6.0 PrintBar TEST\"\r\nPP 20,70\r\nBT \"EAN13\"\r\nBH 80\r\nPB \"8850001000019\"\r\nPF 1".to_string()
         }
         PrinterBrand::Samsung | PrinterBrand::Windows => {
             "Windows Print Mode (System Printer Driver)".to_string()
@@ -530,5 +559,29 @@ pub async fn tcp_send(ip: &str, port: u16, data: &str) -> (bool, String, usize) 
         }
         Ok(Err(e)) => (false, format!("ผิดพลาด: {}", e), 0),
         Err(_) => (false, format!("หมดเวลาเชื่อมต่อ ({}:{}) 10 วินาที", ip, port), 0),
+    }
+}
+
+#[cfg(test)]
+mod barcode_output_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn mixed_product_codes_use_a_supported_command_and_preserve_the_value() {
+        let el: TemplateElement = serde_json::from_value(json!({
+            "type":"barcode", "field":"product.barcode", "symbology":"EAN13", "width":28
+        })).unwrap();
+        for (brand, command) in [(PrinterBrand::Godex, "BQ,"), (PrinterBrand::Zebra,"^BCN,"),
+            (PrinterBrand::Argox,"^BCN,"), (PrinterBrand::Tsc,"\"128\""), (PrinterBrand::Bixolon,"\"128\""),
+            (PrinterBrand::Honeywell,"BT \"CODE128\"")] {
+            for value in ["QA26112301B02","8850001000014"] {
+                let result = generate_commands(brand, &[(json!({"product":{"barcode":value}}),1)],
+                    std::slice::from_ref(&el), &DriverOptions::default()).unwrap();
+                assert!(result.contains(command) && result.contains(value), "{result}");
+            }
+            assert!(generate_commands(brand, &[(json!({"product":{"barcode":""}}),1)],
+                std::slice::from_ref(&el), &DriverOptions::default()).is_err());
+        }
     }
 }

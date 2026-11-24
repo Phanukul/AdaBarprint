@@ -325,11 +325,30 @@ async fn windows_artwork(elements: &[TemplateElement], items: &[Value]) -> Resul
     for item in items {
         let mut art = serde_json::Map::new();
         for (index, el) in elements.iter().enumerate() {
+            if let Some(when) = &el.when {
+                let flag = when.path.split('.').try_fold(item, |v,k| v.get(k)).and_then(Value::as_bool);
+                if flag != Some(when.eq) { continue; }
+            }
+            if el.el_type == "barcode" {
+                let path = el.field.as_deref().unwrap_or("product.barcode");
+                let value = match path.split('.').try_fold(item, |v,k| v.get(k)) {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::Number(n)) => n.to_string(),
+                    _ => String::new(),
+                };
+                let bits = encode_barcode_modules(&value, el.symbology.as_deref().unwrap_or("EAN13"));
+                if bits.is_empty() { return Err(format!("ข้อมูลบาร์โค้ดว่างหรือเข้ารหัสไม่ได้ ({path})")); }
+                art.insert(index.to_string(), json!({"bits":bits,"value":value}));
+                continue;
+            }
             if !matches!(el.el_type.as_str(),"image"|"qrcode") { continue; }
             let value = el.src.as_deref().or_else(||el.field.as_deref()
                 .and_then(|path|path.split('.').try_fold(item,|parent,key|parent.get(key)))
                 .and_then(Value::as_str)).or(el.text.as_deref()).unwrap_or("").trim();
-            if value.is_empty() { continue; }
+            if value.is_empty() {
+                if el.el_type == "qrcode" { return Err("ข้อมูล QR Code ว่าง".into()); }
+                continue;
+            }
             let key = (el.el_type.clone(),value.to_owned());
             if !cache.contains_key(&key) {
                 let data = if el.el_type=="qrcode" {
@@ -594,15 +613,19 @@ $doc.add_PrintPage({
           $g.DrawLine($pen, [float]$ex, [float]$ey, [float]($ex + $ew), [float]($ey + $eh))
           $pen.Dispose()
         } elseif ($tp -eq 'barcode') {
-          $bits = [string](Get-DigStr $it 'product.bar_bits')
-          $barVal = [string](Get-DigStr $it ([string]$el.field))
+          $code = $cfg.artwork[$idx].PSObject.Properties[[string]$ei].Value
+          $bits = [string]$code.bits
+          $barVal = [string]$code.value
           if ($bits.Length -gt 0) {
-            $barH = [Math]::Max(12.0, $eh - 12.0)
-            $modW = $ew / [double]$bits.Length
-            for ($bi = 0; $bi -lt $bits.Length; $bi++) {
-              if ($bits[$bi] -eq '1') {
-                $g.FillRectangle([System.Drawing.Brushes]::Black, [float]($ex + $bi * $modW), [float]$ey, [float][Math]::Max(0.8, $modW + 0.2), [float]$barH)
-              }
+            $barH = if ($el.showText -ne $false) { $eh - 12.0 } else { $eh }
+            $dot = 100.0 / $g.DpiX
+            $moduleDots = [Math]::Floor($ew / ($dot * ($bits.Length + 22)))
+            if ($moduleDots -lt 1 -or $barH -le 0) { throw "Barcode field too small: $barVal" }
+            $modW = $moduleDots * $dot
+            $start = [Math]::Round(($ex + ($ew - $bits.Length * $modW) / 2) / $dot) * $dot
+            $g.FillRectangle([System.Drawing.Brushes]::White,[float]$ex,[float]$ey,[float]$ew,[float]$barH)
+            foreach ($run in [regex]::Matches($bits,'1+')) {
+              $g.FillRectangle([System.Drawing.Brushes]::Black,[float]($start + $run.Index * $modW),[float]$ey,[float]($run.Length * $modW),[float]$barH)
             }
             if ($barVal -and ($el.showText -ne $false)) {
               $fb = New-Object System.Drawing.Font('Consolas', 7)
@@ -872,7 +895,7 @@ pub fn default_chunk_sender(biz_date: String, run_id: String) -> ChunkSenderFn<'
                     .enumerate()
                     .map(|(i, c)| (c, qtys.get(i).copied().unwrap_or(1)))
                     .collect();
-                let cmd_str = generate_commands(brand, &pairs, &elements, &opts);
+                let cmd_str = generate_commands(brand, &pairs, &elements, &opts)?;
                 let (ok, msg, _) = tcp_send(ip, route.lan_port, &cmd_str).await;
                 if ok {
                     Ok(())
@@ -942,15 +965,11 @@ pub async fn dispatch_run_queue<'a>(
         });
     }
 
-    let store_name: String = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT FTBchName FROM TCNMBranch_L WHERE FNLngID = 1 LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
-    .flatten()
-    .unwrap_or_else(|| "AdaSoft Store".to_string());
+    let branch = crate::storage::configured_branch(pool).await;
+    let store_name: String = sqlx::query_scalar(
+        "SELECT COALESCE(FTBchName,'AdaSoft Store') FROM TCNMBranch_L WHERE FNLngID=1 AND (?='' OR FTBchCode=?) ORDER BY FTBchCode LIMIT 1",
+    ).bind(&branch).bind(&branch).fetch_optional(pool).await.ok().flatten().unwrap_or_else(|| "AdaSoft Store".into());
+    let url_template = crate::routes::product_url_template(pool).await;
 
     let job_id = gen_guid();
     let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -1037,7 +1056,9 @@ pub async fn dispatch_run_queue<'a>(
                     name_cache.insert(r.FTPdtCode.clone(), fetched.clone());
                     fetched
                 };
-                ctxs.push(build_label_context(pool, r, &pdt_name, &store_name, biz_date).await);
+                let mut ctx = build_label_context(pool, r, &pdt_name, &store_name, biz_date).await;
+                ctx["product"]["url"] = json!(url_template.replace("{code}", &r.FTPdtCode).replace("{bch}", &branch));
+                ctxs.push(ctx);
                 refs.push(r);
             }
 
@@ -1281,7 +1302,8 @@ mod tests {
 
     #[tokio::test]
     async fn tc07_split_tray_routing_and_barcode_modules() {
-        assert_eq!(encode_barcode_modules("8850001000014", "EAN13").len(), 95);
+        assert_eq!(encode_barcode_modules("8850001000019", "EAN13").len(), 95);
+        assert_eq!(encode_barcode_modules("8850001000014", "EAN13"), encode_barcode_modules("8850001000014", "CODE128"));
         assert!(encode_barcode_modules("SKU-2026", "CODE128").len() >= 33);
 
         let pool = SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();

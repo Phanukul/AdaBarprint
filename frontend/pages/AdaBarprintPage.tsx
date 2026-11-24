@@ -1,3 +1,5 @@
+import { prepareThermalBarcodes } from '@/lib/thermalBarcode';
+import { packRollUnits, type PrintUnit } from '@/lib/packRollUnits';
 import {
   buildMasterJsonTemplate,
   buildMasterXlsxTemplate,
@@ -205,7 +207,7 @@ interface ManualPrintSet {
   labels: number;
   branch: string;
   lines: PrintQueueRow[];
-  units: Array<{ kind: string; payload: Record<string, unknown> }>;
+  units: PrintUnit[];
 }
 
 let queueRowSeq = 0;
@@ -270,6 +272,8 @@ async function capturePagesToPngBase64(
   const hPx = Math.max(40, Math.round((paperHeightMm / 25.4) * 96));
   const results: string[] = [];
   for (const el of sheetEls) {
+    const invalidCode = el.querySelector<HTMLElement>('[data-print-code-error]');
+    if (invalidCode) throw new Error(invalidCode.dataset.printCodeError);
     const clone = el.cloneNode(true) as HTMLElement;
     clone.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
     const imgs = Array.from(clone.querySelectorAll('img'));
@@ -289,6 +293,7 @@ async function capturePagesToPngBase64(
     const outputHeight = godexRoll ? Math.round(paperHeightMm * 203 / 25.4) : hPx * 2;
     const viewportWidth = godexRoll ? paperWidthMm * 96 / 25.4 : wPx;
     const viewportHeight = godexRoll ? paperHeightMm * 96 / 25.4 : hPx;
+    const paintBarcodes = prepareThermalBarcodes(el, clone, godexRoll ? 203 : 192);
     const serialized = new XMLSerializer().serializeToString(clone);
     const svgXml = `<svg xmlns="http://www.w3.org/2000/svg" width="${outputWidth}" height="${outputHeight}" viewBox="0 0 ${viewportWidth} ${viewportHeight}" preserveAspectRatio="none"><foreignObject x="0" y="0" width="100%" height="100%">${serialized}</foreignObject></svg>`;
     const svgUrl = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgXml);
@@ -317,6 +322,7 @@ async function capturePagesToPngBase64(
             }
             ctx.putImageData(pixels, 0, 0);
           }
+          paintBarcodes(ctx);
           resolve(canvas.toDataURL('image/png'));
         } catch (error) { reject(error); }
       };
@@ -400,6 +406,7 @@ function DateField({
       <Input
         type="text"
         value={text}
+        onClick={openPicker}
         onChange={handleTextChange}
         onBlur={() => setText(isoToDisplayDate(value))}
         placeholder={placeholder}
@@ -411,7 +418,6 @@ function DateField({
         type="button"
         onClick={openPicker}
         disabled={disabled}
-        tabIndex={-1}
         aria-label="เลือกวันที่"
         className="absolute right-2 text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:pointer-events-none"
       >
@@ -834,20 +840,34 @@ function AdaBarprintWorkspace({
     const code = scanInputBarcode.trim();
     if (!code) return;
     try {
-      const res = await fetch(`/api/products?keyword=${encodeURIComponent(code)}&limit=10`);
-      const data = await res.json();
-      const found: ProductItem | undefined = (data.products || []).find(
-        (p: ProductItem) =>
-          p.FTPdtCode.toLowerCase() === code.toLowerCase() ||
-          p.bars?.some(b => b.FTPdbBarCode.toLowerCase() === code.toLowerCase())
-      ) || data.products?.[0];
-
-      if (!found) {
-        toast.error(`ไม่พบสินค้าหรือบาร์โค้ด: ${code}`);
+      const candidates = [code];
+      // Numeric scanner keystrokes received under the Thai Kedmanee layout.
+      const thaiKeys = 'ๅ/-ภถุึคตจ';
+      if (/^[ๅ/ภถุึคตจ-]{8,14}$/.test(code) && /[ก-๙]/.test(code)) {
+        const digits = Array.from(code, ch => String((thaiKeys.indexOf(ch) + 1) % 10)).join('');
+        candidates.push(digits);
+      }
+      let match: { product: ProductItem; barcode: string } | undefined;
+      for (const candidate of candidates) {
+        const query = new URLSearchParams({ exactCode: candidate, keyword: candidate, limit: '10' });
+        const res = await fetch(`/api/products?${query}`);
+        if (!res.ok) throw new Error('ค้นหาบาร์โค้ดไม่สำเร็จ');
+        const products: ProductItem[] = (await res.json()).products || [];
+        const key = candidate.toLowerCase();
+        const byBar = products.find(p => p.bars?.some(b => b.FTPdbBarCode.toLowerCase() === key));
+        const product = byBar || products.find(p => p.FTPdtCode.toLowerCase() === key);
+        if (product) {
+          const bar = product.bars?.find(b => b.FTPdbBarCode.toLowerCase() === key) || product.bars?.[0];
+          match = { product, barcode: bar?.FTPdbBarCode || product.FTPdtCode };
+          break;
+        }
+      }
+      if (!match) {
+        toast.error(`ไม่พบสินค้าหรือบาร์โค้ด: ${candidates.at(-1)}`);
         return;
       }
-      const bar = found.bars?.[0]?.FTPdbBarCode || found.FTPdtCode;
-      addPdtToScanTmp(found.FTPdtCode, found.FTPdtName, bar);
+      const found = match.product;
+      addPdtToScanTmp(found.FTPdtCode, found.FTPdtName, match.barcode);
       setScanInputBarcode('');
       toast.success(`เพิ่ม ${found.FTPdtName} เข้าตารางสแกนแล้ว`);
     } catch {
@@ -1105,7 +1125,6 @@ function AdaBarprintWorkspace({
     setLookupFailures([]);
     try {
       if(manualSource){
-        if(!selectedLabelCode)throw new Error('กรุณาเลือกแบบป้ายก่อนแสดงข้อมูล');
         const data=await printApi('/api/print-center/manual-candidates',{source:manualSource,date:effectiveDate,size:selectedLabelCode,quantity:Math.max(1,defaultQty)});
         loadedEvent.current = {key: eventKey(manualSource), loaded: Date.now(), lines: indexEventPrices(data.lines)};
         setMainRows(data.lines.map((line:any)=>({rowKey:nextQueueRowKey(line.pdtCode,line.barcode,line.isPromo?'2':'1'),pdtCode:line.pdtCode,pdtName:line.pdtName,barCode:line.barcode,price:line.setPrice??0,priType:line.isPromo?'2':'1',qty:Math.max(1,defaultQty),selected:true,lbsCode:selectedLabelCode,tmplCode:selectedTemplateCode||line.tmplCode,ctx:line.ctx,promoName:line.promo?.name,statusText:printPurposes[manualSource].title})));
@@ -1397,6 +1416,14 @@ function AdaBarprintWorkspace({
   };
 
   const [printSets, setPrintSets] = useState<ManualPrintSet[]>([]);
+  const [packed, setPacked] = useState<{ sets: ManualPrintSet[]; entries: Awaited<ReturnType<typeof packRollUnits>> } | null>(null);
+  useEffect(() => {
+    let active = true;
+    packRollUnits(printSets).then(entries => {
+      if (active) setPacked({ sets: printSets, entries });
+    }).catch(error => { if (active) toast.error(String(error)); });
+    return () => { active = false; };
+  }, [printSets]);
   const [editingSet, setEditingSet] = useState('');
   const [draftBusy, setDraftBusy] = useState(false);
   const [hasDraft, setHasDraft] = useState(false);
@@ -1497,7 +1524,11 @@ function AdaBarprintWorkspace({
     const selected = printRows;
     if (!selected.length) throw new Error('ไม่มีรายการที่เลือกพิมพ์');
     const printer = printers.find(p => p.id === selectedPrinterId);
-      const queueUnits: Array<{ kind: string; payload: Record<string, unknown> }> = [];
+      const queueUnits: PrintUnit[] = [];
+      const rollGrid = (count: number) => a4Layout.isRoll ? {
+        count, cols: a4Layout.cols, cellWidth: a4Layout.widthMm, cellHeight: a4Layout.heightMm,
+        left: a4Layout.magLeftMm, gap: a4Layout.gapHMm,
+      } : undefined;
       const hasSplitMapping = Boolean(
         (normalRows.length > 0 && activeDriverMapping?.normalPrinter) ||
         (promoRows.length > 0 && activeDriverMapping?.promoPrinter)
@@ -1550,7 +1581,7 @@ function AdaBarprintWorkspace({
             a4Layout.paperHeightMm,
             a4Layout.isRoll && /\bEZ[ -]?520\b/i.test(d.printer)
           );
-          queueUnits.push({ kind: 'WINDOWS', payload: {
+          queueUnits.push({ kind: 'WINDOWS', roll: rollGrid(d.containerId === 'v5-capture-normal' ? a4Layout.normalLabelsCount : a4Layout.promoLabelsCount), payload: {
               printerName: d.printer, trayName: d.tray, lbsCode: selectedLabelCode,
               lbsName: activeDriverMapping.lbsName, priTypeLabel: d.label, testMode: false,
               pageImages, paperSize: a4Layout.paperSize,
@@ -1572,7 +1603,7 @@ function AdaBarprintWorkspace({
           if (!rows.length) continue;
           const pageImages = await capturePagesToPngBase64(containerId, a4Layout.paperWidthMm, a4Layout.paperHeightMm,
             a4Layout.isRoll && /\bEZ[ -]?520\b/i.test(name));
-          queueUnits.push({kind:'WINDOWS',payload:{printerName:name, trayName:printer?.tray||'', lbsCode:selectedLabelCode,
+          queueUnits.push({kind:'WINDOWS',roll:rollGrid(containerId === 'v5-capture-normal' ? a4Layout.normalLabelsCount : a4Layout.promoLabelsCount),payload:{printerName:name, trayName:printer?.tray||'', lbsCode:selectedLabelCode,
             priTypeLabel:label,pageImages,paperSize:a4Layout.paperSize,paperWidthMm:a4Layout.paperWidthMm,paperHeightMm:a4Layout.paperHeightMm}});
         }
       }
@@ -1649,6 +1680,7 @@ function AdaBarprintWorkspace({
       if (printSets.length && previewPurpose !== 'basket') { setPreviewPurpose('basket'); return; }
       if (printSets.some(set => set.review)) throw new Error('กรุณาตรวจชุดที่ข้อมูลเปลี่ยนก่อนยืนยัน');
       const sets = printSets.length ? printSets : [await prepareManualSet()];
+      const entries = packed?.sets === sets ? packed.entries : await packRollUnits(sets);
       const branch = resolveDefaultBranch();
       if (sets.some(set => set.branch !== branch)) throw new Error('สาขาของชุดพิมพ์ไม่ตรงกับสาขาปัจจุบัน');
       const lines = sets.flatMap(set => set.lines.map(row => ({
@@ -1669,7 +1701,7 @@ function AdaBarprintWorkspace({
         setPrintSets(sets);
       }
       const queued = await fetch('/api/print-center/manual', {method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({requestId:pendingJobId.current,jobId:pendingJobId.current,name:`สั่งพิมพ์เอง ${sets.length} ชุด · ${lines.length} รายการ`,units:sets.flatMap(set => set.units)})});
+        body:JSON.stringify({requestId:pendingJobId.current,jobId:pendingJobId.current,name:`สั่งพิมพ์เอง ${sets.length} ชุด · ${lines.length} รายการ`,units:entries.map(({ unit }) => ({ kind: unit.kind, payload: unit.payload }))})});
       const result = await queued.json();
       if (!queued.ok) throw new Error(result.error || 'บันทึกคิวไม่สำเร็จ');
       pendingJobId.current = '';
@@ -1897,7 +1929,19 @@ function AdaBarprintWorkspace({
     (normalRows.length > 0 && activeDriverMapping?.normalPrinter) ||
     (promoRows.length > 0 && activeDriverMapping?.promoPrinter)
   );
-  const previewSheetCount = hasSplitPreview
+  const fallbackPrinter = printers.find(p => p.id === selectedPrinterId)?.name || windowsPrinters[0]?.name;
+  const normalTarget = activeDriverMapping?.normalPrinter || fallbackPrinter;
+  const promoTarget = activeDriverMapping?.promoPrinter || fallbackPrinter;
+  const sharedRoll = a4Layout.isRoll && normalRows.length > 0 && promoRows.length > 0 &&
+    normalTarget === promoTarget && windowsPrinters.some(p => p.name === normalTarget) &&
+    (activeDriverMapping?.normalTray || '') === (activeDriverMapping?.promoTray || '');
+  const rollPreviewPages = useMemo(() => {
+    if (!sharedRoll) return a4Layout.pages;
+    const labels = [...a4Layout.normalPages.flat(), ...a4Layout.promoPages.flat()];
+    return Array.from({ length: Math.ceil(labels.length / a4Layout.cols) }, (_, i) =>
+      labels.slice(i * a4Layout.cols, (i + 1) * a4Layout.cols));
+  }, [sharedRoll, a4Layout]);
+  const previewSheetCount = hasSplitPreview && !sharedRoll
     ? a4Layout.normalPages.length + a4Layout.promoPages.length
     : a4Layout.pages.length;
 
@@ -2512,7 +2556,7 @@ function AdaBarprintWorkspace({
                   className="bg-[#007a87] hover:bg-[#00606b] text-white"
                   onClick={() => {
                     if (!printSets.length && !selectedLabelCode) {
-                      toast.error('กรุณาเลือกรูปแบบป้าย (Label Format)');
+                      toast.error('กรุณาเลือกแบบป้ายก่อนพิมพ์');
                       return;
                     }
                     if (!printSets.length && !mainRows.some(r => r.selected)) {
@@ -2681,7 +2725,7 @@ function AdaBarprintWorkspace({
                         ))}
                       </SelectContent>
                     </Select>
-                    {manualSource && <p className="text-xs text-slate-600">{manualSource === 'PROMO_END_REVERT' ? 'เลือกวันที่โปรสิ้นสุด ระบบตรวจราคาวันถัดไป และข้ามสินค้าที่ยังมีโปรอื่นใช้งานอยู่' : 'เลือกวันที่มีผล แล้วกดแสดงข้อมูล'} · ใช้แบบป้ายและเครื่องพิมพ์ที่เลือกด้านขวา</p>}
+                    {manualSource && <p className="text-xs text-slate-600">{manualSource === 'PROMO_END_REVERT' ? 'เลือกวันที่โปรสิ้นสุด ระบบตรวจราคาวันถัดไป และข้ามสินค้าที่ยังมีโปรอื่นใช้งานอยู่' : 'เลือกวันที่มีผล แล้วกดแสดงข้อมูล'} · เลือกแบบป้ายภายหลังได้ก่อนพิมพ์</p>}
                   </fieldset>
                   {/* Row 1: Price Type + Total Print */}
                   <div className="grid grid-cols-2 gap-3">
@@ -3685,17 +3729,17 @@ function AdaBarprintWorkspace({
               <div key={previewPurpose} className="min-h-0 min-w-0 flex-1 overflow-auto bg-slate-100 px-3 py-2 sm:px-5" aria-label="ตัวอย่างป้าย">
                 {previewPurpose === 'basket' ? (
                   <div className="space-y-6">
-                    {printSets.map(set => <section key={set.id} className="space-y-3">
-                      <h3 className="font-semibold">{set.name} · {set.format} · {set.labels} ดวง</h3>
-                      {set.units.map((unit, index) => unit.kind === 'WINDOWS'
+                    {packed?.sets !== printSets ? <p role="status">กำลังเตรียมภาพพิมพ์…</p> : packed.entries.map(({name, unit}, index) => <section key={index} className="space-y-3">
+                      <h3 className="font-semibold">{name} · {String(unit.payload.printerName || unit.payload.printerIp)}</h3>
+                      {unit.kind === 'WINDOWS'
                         ? (unit.payload.pageImages as string[]).map((src, page) => <figure key={index + '-' + page} className="mx-auto max-w-lg">
                             <figcaption className="mb-1 text-xs">{String(unit.payload.priTypeLabel)} · แผ่นที่ {page + 1} / {(unit.payload.pageImages as string[]).length}</figcaption>
-                            <img loading="lazy" className="h-auto w-full border bg-white" src={src} alt={set.name + ' แผ่นที่ ' + (page + 1)} />
+                            <img loading="lazy" className="h-auto w-full border bg-white" src={src} alt={name + ' แผ่นที่ ' + (page + 1)} />
                           </figure>)
                         : <div key={index} className="rounded border bg-white p-3 text-sm">
                             <strong>รายการส่งเครื่องพิมพ์ LAN</strong>
                             {(unit.payload.lines as PrintQueueRow[]).map((row,i) => <p key={i}>{row.barCode} · {row.pdtName} · {row.qty} ดวง</p>)}
-                          </div>)}
+                          </div>}
                     </section>)}
                   </div>
                 ) : previewPurpose && !printRows.length ? (
@@ -3708,7 +3752,7 @@ function AdaBarprintWorkspace({
                       </details>}
                     </div>
                   </div>
-                ) : hasSplitPreview ? (
+                ) : hasSplitPreview && !sharedRoll ? (
                   <div className="space-y-6 py-2 px-1">
                     {a4Layout.normalPages.length > 0 && (
                       <div className="space-y-3">
@@ -3747,7 +3791,7 @@ function AdaBarprintWorkspace({
                   </div>
                 ) : (
                   <div className="space-y-6 py-2 px-1">
-                    <PreviewPageWindow count={a4Layout.pages.length} render={(start, end) => renderPreviewSheets(a4Layout.pages, 'all', start, end)} />
+                    <PreviewPageWindow count={rollPreviewPages.length} render={(start, end) => renderPreviewSheets(rollPreviewPages, 'all', start, end)} />
                   </div>
                 )}
               </div>

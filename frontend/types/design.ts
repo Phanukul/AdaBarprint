@@ -3,6 +3,7 @@ export type DesignElementType =
   | 'text'
   | 'static'
   | 'barcode'
+  | 'qrcode'
   | 'image'
   | 'rect'
   | 'circle'

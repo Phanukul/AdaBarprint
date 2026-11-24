@@ -1,5 +1,24 @@
 import React, { useEffect, useRef, useState } from 'react';
 import JsBarcode from 'jsbarcode';
+import qrcode from 'qrcode-generator';
+
+qrcode.stringToBytes = value => Array.from(new TextEncoder().encode(value));
+
+function ProductQr({ value }: { value: string }) {
+  const src = React.useMemo(() => {
+    if (!value) return '';
+    try {
+      const qr = qrcode(0, 'M');
+      qr.addData(value, 'Byte');
+      qr.make();
+      return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(qr.createSvgTag(2, 8));
+    } catch { return ''; }
+  }, [value]);
+  return src
+    ? <img alt="QR Code" src={src} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+    : <span data-print-code-error="ข้อมูล QR Code ว่างหรือยาวเกินไป">ตรวจข้อมูล QR Code</span>;
+}
+
 import {
   DESIGN_ICON_LIST,
   type DesignElement,
@@ -156,6 +175,8 @@ function DesignBarcodeSvg({
 
   useEffect(() => {
     if (!svgRef.current || !value) return;
+    svgRef.current.dataset.barcodeValue = value;
+    svgRef.current.dataset.barcodeFormat = detectBarcodeFormat(value);
     try {
       const fmt = detectBarcodeFormat(value);
       JsBarcode(svgRef.current, value, {
@@ -186,7 +207,7 @@ function DesignBarcodeSvg({
 
   if (!value) {
     return (
-      <div
+      <div data-print-code-error="ข้อมูลบาร์โค้ดว่าง"
         style={{
           width: '100%',
           height: '100%',
@@ -459,11 +480,16 @@ export function CustomDesignRenderer({
             );
           }
 
+          if (el.type === 'qrcode') {
+            const value = el.field?.split('.').reduce<any>((v, key) => v?.[key], line.ctx) ?? el.text ?? '';
+            return <div key={el.id} style={commonStyle}><ProductQr value={String(value)} /></div>;
+          }
+
           if (el.type === 'barcode') {
             return (
               <div key={el.id} style={commonStyle}>
                 <DesignBarcodeSvg
-                  value={barcodeVal}
+                  value={el.field && el.field !== 'product.barcode' ? String(el.field.split('.').reduce<any>((v,k) => v?.[k], line.ctx) ?? '') : barcodeVal}
                   scale={scale}
                   heightMm={el.height}
                   showText={el.showText !== false}
@@ -558,6 +584,8 @@ export function LabelPreview({
 
   useEffect(() => {
     if (!barcodeRef.current || !barcodeValue) return;
+    barcodeRef.current.dataset.barcodeValue = barcodeValue;
+    barcodeRef.current.dataset.barcodeFormat = detectBarcodeFormat(barcodeValue);
     try {
       const fmt = detectBarcodeFormat(barcodeValue);
       JsBarcode(barcodeRef.current, barcodeValue, {

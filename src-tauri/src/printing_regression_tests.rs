@@ -105,12 +105,14 @@ async fn four_manual_events_resolve_group_promotion_and_revert_to_base() {
  sqlx::query("INSERT INTO TCNTPmtHD(FTAgnCode,FTPmhDocNo,FNPmhVersion,FTPmhName,FDPmhDStart,FDPmhDStop,FTPmhStaActive,FTPmhStaDoc,FTPmhStaPrcDoc,FTPmhRuleJson) SELECT 'OTHER','FOREIGN',FNPmhVersion,FTPmhName,FDPmhDStart,FDPmhDStop,FTPmhStaActive,FTPmhStaDoc,FTPmhStaPrcDoc,FTPmhRuleJson FROM TCNTPmtHD WHERE FTPmhDocNo='PROMO-GROUP'").execute(&mut c).await.unwrap();
  sqlx::query("UPDATE TCNMPdt SET FDCreateOn='2026-11-23' WHERE FTPdtCode='P1'").execute(&mut c).await.unwrap();
  for (event,day,expected) in [("PRICE_CHG","2026-11-23",100.0),("NEW_PDT","2026-11-23",79.0),("PROMO_START","2026-11-23",79.0),("PROMO_END_REVERT","2026-11-24",100.0)] {
-  let response=print_center::manual_candidates(State(routes::AppState{pool:pool.clone()}),Json(print_center::ManualCandidates{source:event.into(),date:day.into(),size:"SH-100x38".into(),quantity:1})).await;
+  for size in ["", "SH-100x38"] {
+  let response=print_center::manual_candidates(State(routes::AppState{pool:pool.clone()}),Json(print_center::ManualCandidates{source:event.into(),date:day.into(),size:size.into(),quantity:1})).await;
   let status=response.status();let bytes=axum::body::to_bytes(response.into_body(),1048576).await.unwrap();
   assert!(status.is_success(),"{event}: {}",String::from_utf8_lossy(&bytes));
   let result:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
   assert_eq!(result["lines"].as_array().unwrap().len(),1,"{event}: {result}");
   assert_eq!(result["lines"][0]["setPrice"],expected,"{event}");
+  }
  }
  // Exact exclusions must also suppress the expiry event, not just active price.
  sqlx::query("UPDATE TCNTPmtHD SET FTPmhRuleJson=json_set(FTPmhRuleJson,'$.groups.A.exclude',json('[{\"type\":\"BAR\",\"code\":\"8850000000016\"}]'))").execute(&mut c).await.unwrap();

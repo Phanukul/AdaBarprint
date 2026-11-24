@@ -910,7 +910,7 @@ async fn send_unit(pool: &SqlitePool, kind: &str, p: Value, id: &str, seq: i64) 
                     ..Default::default()
                 };
                 let labels = contexts.iter().map(|c| (c.clone(), 1)).collect::<Vec<_>>();
-                let cmd = crate::print_drivers::generate_commands(brand, &labels, &elements, &opts);
+                let cmd = crate::print_drivers::generate_commands(brand, &labels, &elements, &opts)?;
                 let (ok, msg, _) = crate::print_drivers::tcp_send(&ip, route.lan_port, &cmd).await;
                 if ok {
                     Ok(())

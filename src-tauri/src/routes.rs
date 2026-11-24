@@ -2375,6 +2375,7 @@ pub async fn get_promotions(State(st): State<AppState>) -> Response {
 #[serde(rename_all = "camelCase")]
 pub struct ProductsQuery {
     pub keyword: Option<String>,
+    pub exact_code: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
     pub pdt_from: Option<String>,
@@ -2501,7 +2502,11 @@ pub async fn get_products(
             "#,
         );
 
-        if !keyword.is_empty() {
+        let exact = q.exact_code.as_deref().unwrap_or("").trim();
+        if !exact.is_empty() {
+            qb.push(" AND (b.FTBarCode = ").push_bind(exact)
+                .push(" COLLATE NOCASE OR b.FTPdtCode = ").push_bind(exact).push(" COLLATE NOCASE)");
+        } else if !keyword.is_empty() {
             let like = format!("%{}%", keyword);
             qb.push(" AND (b.FTPdtCode LIKE ")
                 .push_bind(like.clone())
@@ -2586,7 +2591,11 @@ pub async fn get_products(
                 .push(")))");
         }
 
-        qb.push(" GROUP BY b.FTPdtCode, b.FTBarCode ORDER BY b.FTPdtCode ASC, b.FTBarCode ASC LIMIT ")
+        qb.push(" GROUP BY b.FTPdtCode, b.FTBarCode ORDER BY ");
+        if !exact.is_empty() {
+            qb.push("(b.FTBarCode = ").push_bind(exact).push(" COLLATE NOCASE) DESC, ");
+        }
+        qb.push("b.FTPdtCode ASC, b.FTBarCode ASC LIMIT ")
             .push_bind(limit).push(" OFFSET ").push_bind(q.offset.unwrap_or(0).max(0));
 
         let rows_res = qb.build_query_as::<AccdProductRow>().fetch_all(accd).await;
@@ -2814,6 +2823,19 @@ pub struct BuildLineBody {
     pub price_group: Option<String>,
 }
 
+pub(crate) async fn product_url_template(pool: &sqlx::SqlitePool) -> String {
+    sqlx::query_as::<_, (Option<String>,)>(
+            "SELECT FTSopValue FROM TCNSSysOption WHERE FTSopCode = 'UrlTemplate' LIMIT 1",
+        )
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|r| r.0)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "https://firster.com/product/{code}/?branch={bch}".to_string())
+}
+
 pub async fn post_build_line(
     State(st): State<AppState>,
     Json(body): Json<BuildLineBody>,
@@ -3021,16 +3043,7 @@ pub async fn post_build_line(
         .unwrap_or(None);
         let product_image = local_img.map(|r| r.0).unwrap_or_default();
 
-        let url_tmpl: String = sqlx::query_as::<_, (Option<String>,)>(
-            "SELECT FTSopValue FROM TCNSSysOption WHERE FTSopCode = 'UrlTemplate' LIMIT 1",
-        )
-        .fetch_optional(&st.pool)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|r| r.0)
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "https://firster.com/product/{code}/?branch={bch}".to_string());
+        let url_tmpl = product_url_template(&st.pool).await;
         let product_url = url_tmpl
             .replace("{code}", &item.FTPdtCode)
             .replace("{bch}", &body.bch_code);
@@ -3402,7 +3415,7 @@ pub async fn post_print_send(
             .await
             .unwrap_or(None);
 
-            let Some(group_lbs) = group_lbs else { continue };
+            let Some(group_lbs) = group_lbs else { return err_json(StatusCode::BAD_REQUEST,format!("ไม่พบขนาดป้าย {lbs_code}")); };
             let tmpl_code = if !explicit_template.is_empty() { explicit_template } else if pri_type == "2" {
                 group_lbs.FTLbsTmplPmt.unwrap_or_else(|| "SH-100x38-PMT".to_string())
             } else {
@@ -3423,7 +3436,7 @@ pub async fn post_print_send(
                 darkness,
                 copies: 1,
             };
-            parts.push(generate_commands(brand, &lbls, &elements, &opts));
+            parts.push(match generate_commands(brand, &lbls, &elements, &opts) { Ok(cmd) => cmd, Err(e) => return err_json(StatusCode::BAD_REQUEST,e) });
         }
         parts.join("\r\n\r\n")
     } else {
@@ -3527,7 +3540,7 @@ pub async fn post_print_ezpl(
             let tmpl = templates.iter().find(|t| t.code == tmpl_code).unwrap_or(&templates[0]);
             let ctx = sl.get("ctx").cloned().unwrap_or(json!({}));
             let opts = DriverOptions { dpi, label_width_mm: w, label_height_mm: h, ..Default::default() };
-            let ezpl = generate_commands(PrinterBrand::Godex, &[(ctx, 1)], &tmpl.elements, &opts);
+            let ezpl = match generate_commands(PrinterBrand::Godex, &[(ctx, 1)], &tmpl.elements, &opts) { Ok(cmd) => cmd, Err(e) => return err_json(StatusCode::BAD_REQUEST,e) };
             return Json(json!({
                 "ezpl": ezpl,
                 "labelWidth": w,
@@ -3569,7 +3582,7 @@ pub async fn post_print_ezpl(
         .await
         .unwrap_or(None);
 
-        let Some(group_lbs) = group_lbs else { continue };
+        let Some(group_lbs) = group_lbs else { return err_json(StatusCode::BAD_REQUEST,format!("ไม่พบขนาดป้าย {lbs_code}")); };
         let tmpl_code = if pri_type == "2" {
             group_lbs.FTLbsTmplPmt.unwrap_or_else(|| "SH-100x38-PMT".to_string())
         } else {
@@ -3584,7 +3597,7 @@ pub async fn post_print_ezpl(
         };
         let cnt: u32 = lbls.iter().map(|(_, q)| *q).sum();
         total_labels += cnt;
-        parts.push(generate_commands(PrinterBrand::Godex, &lbls, &tmpl.elements, &opts));
+        parts.push(match generate_commands(PrinterBrand::Godex, &lbls, &tmpl.elements, &opts) { Ok(cmd) => cmd, Err(e) => return err_json(StatusCode::BAD_REQUEST,e) });
         results.push(json!({
             "group": format!("{} ({})", lbs_code, if pri_type == "2" { "Promo" } else { "Normal" }),
             "labelCount": cnt

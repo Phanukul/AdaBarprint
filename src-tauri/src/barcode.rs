@@ -155,14 +155,15 @@ fn encode_ean13_modules(digits: &str) -> String {
 
 /// Encode barcode string to a scannable '1'/'0' bar pattern (EAN-13 if 13 digits valid check, otherwise Code128B).
 pub fn encode_barcode_modules(code: &str, symbology: &str) -> String {
-    let trimmed = code.trim();
-    if trimmed.is_empty() {
+    let trimmed = code;
+    if trimmed.is_empty() || !trimmed.bytes().all(|b| (32..=126).contains(&b)) {
         return String::new();
     }
     let sym = symbology.to_uppercase();
-    if (sym == "EAN13" || trimmed.len() == 13)
+    if sym == "EAN13"
         && trimmed.len() == 13
         && trimmed.chars().all(|c| c.is_ascii_digit())
+        && validate_barcode(trimmed, "EAN13").is_ok()
     {
         return encode_ean13_modules(trimmed);
     }
