@@ -51,7 +51,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { labelFormatOptions } from '@/lib/labelFormatOptions';
+import { sizePreprintKeywords, labelFormatOptions } from '@/lib/labelFormatOptions';
 import { previewLayout } from '@/lib/previewLayout';
 import { SearchableSelect } from '@/components/ui/searchable-select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -382,7 +382,10 @@ export function LabelDesigner({
       return currentSize.templates[0].FTLtmPriType === '2' ? '2' : '1';
     return initialPriceType;
   });
-  const formatOptions = useMemo(() => labelFormatOptions(activeSizes, true), [activeSizes]);
+  const preprintAliases = useMemo(() => new Map(preprints.map(form => [
+    form.FTPprCode, [form.FTPprCode, form.FTPprName, form.FTPprFileName].filter(Boolean).join(' '),
+  ])), [preprints]);
+  const formatOptions = useMemo(() => labelFormatOptions(activeSizes, true, preprintAliases), [activeSizes, preprintAliases]);
   const sizeTemplates = activeSizes.find(size => size.FTLbsCode === effectiveLbsCode)?.templates;
   useEffect(() => {
     const exact = sizeTemplates?.find(t => t.FTLtmCode === requestedTemplate);
@@ -1868,7 +1871,7 @@ export function LabelDesigner({
                 options={activeSizes.map(size => ({
                   value: size.FTLbsCode,
                   label: `${size.FTLbsCode} · ${size.FCLbsWidth} × ${size.FCLbsHeight} มม.`,
-                  keywords: size.FTLbsName || '',
+                  keywords: [size.FTLbsName, sizePreprintKeywords(size, preprintAliases)].join(' '),
                 }))}
                 placeholder="เลือกขนาดป้าย..."
                 searchPlaceholder="ค้นหารหัส ชื่อ หรือขนาดป้าย..."

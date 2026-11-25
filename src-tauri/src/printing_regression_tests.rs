@@ -114,6 +114,11 @@ async fn four_manual_events_resolve_group_promotion_and_revert_to_base() {
   assert_eq!(result["lines"][0]["setPrice"],expected,"{event}");
   }
  }
+ // A new promotion starts the day after the first one expires: do not issue a base-price label.
+ sqlx::query("INSERT INTO TCNTPmtHD(FTAgnCode,FTPmhDocNo,FNPmhVersion,FTPmhName,FDPmhDStart,FDPmhDStop,FTPmhStaActive,FTPmhStaDoc,FTPmhStaPrcDoc,FTPmhRuleJson)
+     SELECT FTAgnCode,'NEXT',FNPmhVersion,FTPmhName,'2026-11-25','2026-11-30',FTPmhStaActive,FTPmhStaDoc,FTPmhStaPrcDoc,FTPmhRuleJson
+     FROM TCNTPmtHD WHERE FTPmhDocNo='PROMO-GROUP'").execute(&mut c).await.unwrap();
+ assert!(delta_engine::compute_profile_candidates_exact(&pool,&schedule("PROMO_END_REVERT"),"2026-11-24").await.unwrap().items.is_empty());
  // Exact exclusions must also suppress the expiry event, not just active price.
  sqlx::query("UPDATE TCNTPmtHD SET FTPmhRuleJson=json_set(FTPmhRuleJson,'$.groups.A.exclude',json('[{\"type\":\"BAR\",\"code\":\"8850000000016\"}]'))").execute(&mut c).await.unwrap();
  assert!(crate::promo_v6::canonical_event_barcodes(&pool,"2026-11-24","2026-11-24",true).await.unwrap().is_empty());
@@ -124,7 +129,12 @@ async fn four_manual_events_resolve_group_promotion_and_revert_to_base() {
 async fn four_scheduler_profiles_enqueue_snapshots_without_sending() {
  let (pool,mut c)=fixture().await; seed_product(&mut c).await;
  let today=chrono::Local::now().format("%Y-%m-%d").to_string();
- price(&mut c,1,&today,"PCS","",100.0).await; canonical(&mut c).await;
+ // No published price: the approved document takes precedence over the 100 baht pack price.
+ sqlx::query("INSERT INTO TCNTPdtAdjPriHD(FTBchCode,FTXphDocNo,FTXphStaApv,FDXphDStart) VALUES('B1','ADJ','1',?)")
+     .bind(&today).execute(&mut c).await.unwrap();
+ sqlx::query("INSERT INTO TCNTPdtAdjPriDT(FTBchCode,FTXphDocNo,FNXpdSeq,FTPdtCode,FTPunCode,FCXpdPriceRet)
+     VALUES('B1','ADJ',1,'P1','PCS',110)").execute(&mut c).await.unwrap();
+ canonical(&mut c).await;
  sqlx::query("UPDATE TCNMPdt SET FDCreateOn=?").bind(&today).execute(&mut c).await.unwrap();
  sqlx::query("UPDATE TCNTPmtHD SET FDPmhDStart=?,FDPmhDStop=?").bind(&today).bind(&today).execute(&mut c).await.unwrap();
  let layout=json!({"elements":[{"type":"price","field":"price.value","x":1,"y":1,"width":30,"height":12,"fontSize":18}]});
@@ -137,6 +147,14 @@ async fn four_scheduler_profiles_enqueue_snapshots_without_sending() {
   assert_eq!(result["status"],"QUEUED","{event}: {result}");
   assert_eq!(result["itemCount"],1,"{event}: {result}");
   assert_eq!(result["printedUnits"],0);
+  let expected = if matches!(event, "PROMO_START" | "NEW_PDT") { "79.00" } else { "110.00" };
+  let queued: String = sqlx::query_scalar("SELECT json_extract(payload,'$.contexts[0].price.value') FROM ABPrintUnit WHERE job=?")
+      .bind(result["jobId"].as_str()).fetch_one(&pool).await.unwrap();
+  assert_eq!(queued, expected, "{event}");
+  let response = print_center::preview_rule(State(routes::AppState{pool:pool.clone()}),Json(serde_json::from_value(rule).unwrap())).await;
+  let preview: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(),65536).await.unwrap()).unwrap();
+  assert_eq!(preview["groups"][0]["items"][0]["context"]["price"]["value"], expected, "{event}: {preview}");
+
   assert!(print_center::enqueue_profile(&pool,event).await.unwrap_err().contains("มีอยู่ในคิวแล้ว"));
  }
  let states:Vec<String>=sqlx::query_scalar("SELECT status FROM ABPrintUnit").fetch_all(&pool).await.unwrap();
@@ -151,6 +169,16 @@ async fn four_scheduler_profiles_enqueue_snapshots_without_sending() {
   sqlx::query("INSERT INTO ABPrintWatermark VALUES(?,?,?)").bind(mark["rule"].as_str()).bind(mark["barcode"].as_str()).bind(mark["hash"].as_str()).execute(&pool).await.unwrap();
  }
  sqlx::query("UPDATE ABPrintJob SET status='SUBMITTED' WHERE id=?").bind(&job).execute(&pool).await.unwrap();
+ sqlx::query("UPDATE ABPrintHistory SET finished=datetime('now','-61 days') WHERE job=?")
+     .bind(&job).execute(&pool).await.unwrap();
+ assert_eq!(print_center::archive_finished_jobs(&pool).await.unwrap(),1);
+ assert_eq!(print_center::archive_finished_jobs(&pool).await.unwrap(),0);
+ assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM ABPrintUnit WHERE job=?").bind(&job).fetch_one(&pool).await.unwrap(),0);
+ assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM ABPrintUnit").fetch_one(&pool).await.unwrap(),3);
+ let details=print_center::job_details(State(routes::AppState{pool:pool.clone()}),axum::extract::Path(job.clone())).await;
+ let details:serde_json::Value=serde_json::from_slice(&axum::body::to_bytes(details.into_body(),65536).await.unwrap()).unwrap();
+ assert_eq!(details[0]["printer"],"SIMULATION ONLY");
+ assert_eq!(details[0]["units"],1);
  let repeated=print_center::execute_profile_cli(&pool,"NEW_PDT").await.unwrap();
  assert_eq!(repeated["status"],"ALREADY_SUBMITTED");
  let explicit=print_center::run_profile_api(State(routes::AppState{pool:pool.clone()}),Json(json!({"code":"NEW_PDT"}))).await;

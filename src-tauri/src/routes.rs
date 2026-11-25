@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
 
 use crate::db::{
-    apply_promo, format_date_th, is_seeded, promo_interval, resolve_accd_promotion, seed_defaults,
+    format_date_th, is_seeded, promo_interval, seed_defaults,
 };
 use crate::models::*;
 use crate::print_drivers::{
@@ -2886,8 +2886,6 @@ pub async fn post_build_line(
             FTPdtBrand: Option<String>,
             FTPdtCgyName: Option<String>,
             FTPdtDim: Option<String>,
-            FCPdtPriceRET: Option<f64>,
-            FCPdtPriceWHS: Option<f64>,
         }
 
         let pdt_filter: Option<&str> = body
@@ -2904,9 +2902,7 @@ pub async fn post_build_line(
                    ul.FTPunName AS FTPdtUnit,
                    bl.FTPbnName AS FTPdtBrand,
                    gl.FTPgpName AS FTPdtCgyName,
-                   ps.FTPdtUnitDim AS FTPdtDim,
-                   ps.FCPdtPriceRET,
-                   ps.FCPdtPriceWHS
+                   ps.FTPdtUnitDim AS FTPdtDim
             FROM TCNMPdtBar b
             LEFT JOIN TCNMPdt p ON p.FTPdtCode = b.FTPdtCode
             LEFT JOIN TCNMPdt_L pl ON pl.FTPdtCode = b.FTPdtCode AND pl.FNLngID = 1
@@ -2931,12 +2927,6 @@ pub async fn post_build_line(
             return err_json(StatusCode::NOT_FOUND, format!("ไม่พบสินค้าสำหรับบาร์โค้ด {}", body.barcode));
         };
 
-        // A missing price must remain distinct from an explicit zero price.
-        #[derive(sqlx::FromRow)]
-        struct AccdPriceRow {
-            FCPgdPriceRet: Option<f64>,
-            FCPgdPriceWhs: Option<f64>,
-        }
         let ppl_code: Option<(Option<String>,)> = sqlx::query_as("SELECT FTPplCode FROM TCNMBranch WHERE FTBchCode = ?")
             .bind(&body.bch_code)
             .fetch_optional(accd)
@@ -2950,48 +2940,17 @@ pub async fn post_build_line(
             .map(|s| s.to_string())
             .unwrap_or_else(|| ppl_code.and_then(|r| r.0).unwrap_or_default());
 
-        let p4 = sqlx::query_as::<_, AccdPriceRow>(
-            r#"
-            SELECT CAST(FCPgdPriceRet AS REAL) AS FCPgdPriceRet,
-                   CAST(FCPgdPriceWhs AS REAL) AS FCPgdPriceWhs
-            FROM TCNTPdtPrice4PDT
-            WHERE FTPdtCode = ? AND (FTPunCode = ? OR FTPunCode = '')
-              AND FTPghDocType = '1'
-              AND (FTPplCode = ? OR FTPplCode = '')
-              AND (COALESCE(FDPghDStart, '') = '' OR substr(FDPghDStart, 1, 10) <= ?)
-              AND (COALESCE(FDPghDStop, '') = '' OR substr(FDPghDStop, 1, 10) >= ?)
-            ORDER BY CASE WHEN FTPplCode = ? THEN 0 ELSE 1 END,
-                     CASE WHEN COALESCE(FTPunCode, '') = '' THEN 1 ELSE 0 END,
-                     FDPghDStart DESC, FTPghTStart DESC
-            LIMIT 1
-            "#,
-        )
-        .bind(&item.FTPdtCode)
-        .bind(&item.FTPunCode)
-        .bind(&bch_ppl)
-        .bind(&on_date_str)
-        .bind(&on_date_str)
-        .bind(&bch_ppl)
-        .fetch_optional(accd)
-        .await
-        .unwrap_or(None);
-
-        // pri_type selects the label's normal/promotion layout, not wholesale pricing.
-        let sale_price = p4.as_ref().and_then(|r| r.FCPgdPriceRet).or(item.FCPdtPriceRET);
-        let Some(sale_price) = sale_price.filter(|p|p.is_finite() && *p>=0.0) else {
-            return err_json(StatusCode::UNPROCESSABLE_ENTITY, "ไม่พบราคาขายที่ใช้ได้ กรุณาดาวน์โหลดข้อมูลหรือตรวจสอบราคาสินค้าก่อนพิมพ์");
+        let price = match crate::promo_v6::resolve_effective_price(
+            accd, &item.FTPdtCode, &item.FTBarCode, Some(&bch_ppl), &on_date_str, verify,
+        ).await {
+            Ok(price) => price,
+            Err(error) => return err_json(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
         };
+        let sale_price = price.normal_price;
         let unit_price = sale_price;
-
-        let promo = match resolve_accd_promotion(accd, &body.barcode, &item.FTPdtCode, on_date, verify).await {
-            Ok(promo)=>promo,
-            Err(error)=>return err_json(StatusCode::UNPROCESSABLE_ENTITY,error.to_string()),
-        };
-        let is_promo = promo.as_ref().map(|p| p.is_discount || p.is_gift).unwrap_or(false);
-        let final_price = match &promo {
-            Some(p) if p.is_discount => apply_promo(sale_price, p),
-            _ => sale_price,
-        };
+        let final_price = price.sale_price;
+        let is_promo = price.pri_type == "2";
+        let promo = price.promo;
 
         let def_label = sqlx::query_as::<_, TCNMPdtLabel>(
             "SELECT FTPdtCode, FTBarCode, FTLbsCode, FNPdlQty, FTPdlSource, FTPdlStaDef FROM TCNMPdtLabel WHERE FTPdtCode = ? AND FTBarCode = ? AND FTPdlStaDef = '1' LIMIT 1",

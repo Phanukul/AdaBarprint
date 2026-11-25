@@ -250,7 +250,7 @@ pub async fn resolve_normal_price_on_date(
             FROM TCNTPdtPrice4PDT
             WHERE FTPdtCode = ?
               AND (FTPunCode = ? OR COALESCE(FTPunCode, '') = '')
-              AND FTPghDocType = '1'
+              AND FTPghDocType = '1' AND FCPgdPriceRet IS NOT NULL
               AND (FTPplCode = ? OR FTPplCode = '' OR FTPplCode IS NULL)
               AND (COALESCE(FDPghDStart, '') = '' OR substr(FDPghDStart, 1, 10) <= ?)
               AND (COALESCE(FDPghDStop, '') = '' OR substr(FDPghDStop, 1, 10) >= ?)
@@ -276,7 +276,7 @@ pub async fn resolve_normal_price_on_date(
             FROM TCNTPdtPrice4PDT
             WHERE FTPdtCode = ?
               AND (FTPunCode = ? OR COALESCE(FTPunCode, '') = '')
-              AND FTPghDocType = '1'
+              AND FTPghDocType = '1' AND FCPgdPriceRet IS NOT NULL
               AND COALESCE(FTPplCode, '') = ''
               AND (COALESCE(FDPghDStart, '') = '' OR substr(FDPghDStart, 1, 10) <= ?)
               AND (COALESCE(FDPghDStop, '') = '' OR substr(FDPghDStop, 1, 10) >= ?)
@@ -302,19 +302,22 @@ pub async fn resolve_normal_price_on_date(
         SELECT CAST(dt.FCXpdPriceRet AS REAL)
         FROM TCNTPdtAdjPriDT dt
         JOIN TCNTPdtAdjPriHD hd
-          ON hd.FTBchCode = dt.FTBchCode AND hd.FTXphDocNo = dt.FTXphDocNo
-        WHERE dt.FTPdtCode = ? AND dt.FTPunCode = ?
+          ON hd.FTBchCode = dt.FTBchCode AND hd.FTXphDocNo = dt.FTXphDocNo AND hd.FTAgnCode=dt.FTAgnCode
+        WHERE dt.FTPdtCode = ? AND dt.FTPunCode = ? AND dt.FCXpdPriceRet IS NOT NULL
+          AND (COALESCE(hd.FTPplCode,'')='' OR hd.FTPplCode=?)
           AND COALESCE(hd.FTXphStaApv, '1') = '1'
           AND (COALESCE(hd.FDXphDStart, '') = '' OR substr(hd.FDXphDStart, 1, 10) <= ?)
           AND (COALESCE(hd.FDXphDStop, '') = '' OR substr(hd.FDXphDStop, 1, 10) >= ?)
-        ORDER BY substr(COALESCE(hd.FDXphDStart, ''), 1, 10) DESC, hd.FDCreateOn DESC
+        ORDER BY CASE WHEN hd.FTPplCode=? THEN 0 ELSE 1 END, substr(COALESCE(hd.FDXphDStart, ''), 1, 10) DESC, hd.FDCreateOn DESC
         LIMIT 1
         "#,
     )
     .bind(pdt_code)
     .bind(unit_code)
+    .bind(ppl)
     .bind(biz_date)
     .bind(biz_date)
+    .bind(ppl)
     .fetch_optional(pool)
     .await
     .unwrap_or(None);
@@ -337,7 +340,7 @@ pub async fn resolve_normal_price_on_date(
     }
 
     // Do not substitute a future/expired price or a Barprint-local mock price.
-    Err(sqlx::Error::Protocol("ไม่พบราคาที่มีผลในวันที่เลือก กรุณาตรวจสอบข้อมูลราคาก่อนพิมพ์".into()))
+    Err(sqlx::Error::Protocol("ไม่พบราคาขายที่ใช้ได้ในวันที่เลือก กรุณาตรวจสอบข้อมูลราคาก่อนพิมพ์".into()))
 }
 
 #[derive(Debug, Clone)]

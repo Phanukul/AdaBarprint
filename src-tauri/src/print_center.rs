@@ -174,9 +174,25 @@ pub async fn ensure_schema(pool: &SqlitePool) -> std::result::Result<(), sqlx::E
         payload TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'READY',error TEXT,PRIMARY KEY(job,seq));
       CREATE TABLE IF NOT EXISTS ABPrintWatermark(rule TEXT NOT NULL,barcode TEXT NOT NULL,hash TEXT NOT NULL,
         PRIMARY KEY(rule,barcode));
-      CREATE TABLE IF NOT EXISTS ABPrintAudit(id INTEGER PRIMARY KEY AUTOINCREMENT,job TEXT,action TEXT,created TEXT);")
-      .execute(pool).await?;
+      CREATE TABLE IF NOT EXISTS ABPrintAudit(id INTEGER PRIMARY KEY AUTOINCREMENT,job TEXT,action TEXT,created TEXT);
+        CREATE TABLE IF NOT EXISTS ABPrintHistory(job TEXT PRIMARY KEY, finished TEXT NOT NULL, destinations TEXT);
+        CREATE INDEX IF NOT EXISTS ABPrintHistoryDue ON ABPrintHistory(finished) WHERE destinations IS NULL;
+        CREATE TRIGGER IF NOT EXISTS ABPrintHistoryFinished AFTER UPDATE OF status ON ABPrintJob
+        WHEN NEW.status IN ('SUBMITTED','FAILED','CANCELLED') AND NEW.status <> OLD.status
+          AND EXISTS (SELECT 1 FROM ABPrintUnit WHERE job=NEW.id)
+        BEGIN
+            INSERT OR REPLACE INTO ABPrintHistory(job,finished) VALUES(NEW.id,datetime('now','localtime'));
+        END;").execute(pool).await?;
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    // Older releases recorded creation time only. Allow a full retention period after upgrade.
+    let seeded = sqlx::query("INSERT OR IGNORE INTO ABPrintSetting VALUES('historyRetentionMigrated','1')")
+        .execute(&mut *tx).await?.rows_affected();
+    if seeded > 0 {
+        sqlx::query("INSERT OR IGNORE INTO ABPrintHistory(job,finished)
+            SELECT id,datetime('now','localtime') FROM ABPrintJob
+            WHERE status IN ('SUBMITTED','FAILED','CANCELLED') AND EXISTS (SELECT 1 FROM ABPrintUnit WHERE job=id)")
+            .execute(&mut *tx).await?;
+    }
     let rows: Vec<(String,String)> = sqlx::query_as("SELECT id,trim(coalesce(json_extract(config,'$.code'),'')) FROM ABPrintRule ORDER BY id").fetch_all(&mut *tx).await?;
     let mut used: std::collections::HashSet<_> = rows.iter().map(|(_,code)|code.to_ascii_uppercase()).collect();
     let mut next = 1;
@@ -233,8 +249,23 @@ pub struct JobDestination {
 }
 
 pub async fn job_details(State(st): State<AppState>, axum::extract::Path(id): axum::extract::Path<String>) -> Response {
-    // Project only display fields. Page images and printer commands stay in the queue.
-    let details = sqlx::query_as::<_, JobDestination>(r#"
+    let result = async {
+        let mut tx = st.pool.begin().await?;
+        let archive: Option<String> = sqlx::query_scalar("SELECT destinations FROM ABPrintHistory WHERE job=? AND destinations IS NOT NULL")
+            .bind(&id).fetch_optional(&mut *tx).await?;
+        if let Some(data) = archive {
+            return serde_json::from_str::<Value>(&data).map_err(|e| sqlx::Error::Protocol(e.to_string()));
+        }
+        let rows = sqlx::query_as::<_, JobDestination>(DESTINATIONS).bind(&id).fetch_all(&mut *tx).await?;
+        Ok(json!(rows))
+    }.await;
+    match result {
+        Ok(rows) => Json(rows).into_response(),
+        Err(error) => err(error),
+    }
+}
+
+const DESTINATIONS: &str = r#"
         WITH units AS (
             SELECT u.seq, u.payload, j.config, u.kind,
                    json_extract(u.payload,'$.marks[0].rule') AS scope
@@ -251,11 +282,25 @@ pub async fn job_details(State(st): State<AppState>, axum::extract::Path(id): ax
                         ELSE json_extract(config,'$.template') END END) AS template,
                count(*) AS units
         FROM units GROUP BY printer,label,template ORDER BY min(seq)
-    "#).bind(id).fetch_all(&st.pool).await;
-    match details {
-        Ok(rows) => Json(rows).into_response(),
-        Err(error) => err(error),
+    "#;
+
+pub(crate) async fn archive_finished_jobs(pool: &SqlitePool) -> std::result::Result<usize, sqlx::Error> {
+    let days: Option<String> = sqlx::query_scalar("SELECT FTSopValue FROM TCNSSysOption WHERE FTSopCode='AutoPrintRetentionDays'")
+        .fetch_optional(pool).await?;
+    let days = days.and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(60).max(7);
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    let jobs: Vec<String> = sqlx::query_scalar("SELECT h.job FROM ABPrintHistory h JOIN ABPrintJob j ON j.id=h.job
+        WHERE h.destinations IS NULL AND h.finished < datetime('now','localtime',?)
+          AND j.status IN ('SUBMITTED','FAILED','CANCELLED') ORDER BY h.finished LIMIT 10")
+        .bind(format!("-{days} days")).fetch_all(&mut *tx).await?;
+    for job in &jobs {
+        let summary = sqlx::query_as::<_, JobDestination>(DESTINATIONS).bind(job).fetch_all(&mut *tx).await?;
+        sqlx::query("UPDATE ABPrintHistory SET destinations=? WHERE job=?")
+            .bind(json!(summary).to_string()).bind(job).execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM ABPrintUnit WHERE job=?").bind(job).execute(&mut *tx).await?;
     }
+    tx.commit().await?;
+    Ok(jobs.len())
 }
 
 pub async fn get_center(State(st): State<AppState>) -> Response {
@@ -1699,9 +1744,12 @@ async fn prepare_profile_job(pool: &SqlitePool, profile_code_or_id: &str, reprin
     let mut units = Vec::new();
     for (idx,(target,((lbs,elements),items,area,design))) in targets.iter().zip(prepared).enumerate() {
         let scope = json!(["profile",r.id,idx]).to_string();
+        // Limit the lookup to labels eligible on the target date, even after years of printing.
+        let keys: Vec<String> = items.iter().map(|it| json!([it.pdt_code,it.bar_code]).to_string()).collect();
         let previous: std::collections::HashMap<String,String> = sqlx::query_as::<_,(String,String)>(
-            "SELECT barcode,hash FROM ABPrintWatermark WHERE rule=?").bind(&scope)
-            .fetch_all(&mut *tx).await.map_err(|e|e.to_string())?.into_iter().collect();
+            "SELECT barcode,hash FROM ABPrintWatermark WHERE rule=? AND barcode IN (SELECT value FROM json_each(?))")
+            .bind(&scope).bind(json!(keys).to_string()).fetch_all(&mut *tx).await
+            .map_err(|e|e.to_string())?.into_iter().collect();
         let route = ResolvedPrinterRoute {
             lbs_code: target.size.clone(),
             pri_type: "1".into(),
@@ -1872,10 +1920,19 @@ pub fn spawn(pool: SqlitePool) {
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
         });
+        let mut next_cleanup = tokio::time::Instant::now();
         loop {
             if pool.is_closed() {
                 worker.abort();
                 break;
+            }
+            if tokio::time::Instant::now() >= next_cleanup {
+                let delay = match archive_finished_jobs(&pool).await {
+                    Ok(10) => 5,
+                    Ok(_) => 86400,
+                    Err(e) => { eprintln!("print history retention: {e}"); 300 }
+                };
+                next_cleanup = tokio::time::Instant::now() + Duration::from_secs(delay);
             }
             let _ = put(&pool, "heartbeat", &now()).await;
             // In-app timed scheduler loop disabled: scheduled Profiles are triggered externally

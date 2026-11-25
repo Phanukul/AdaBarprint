@@ -318,7 +318,10 @@ pub async fn require_api_session(
                 if session.FTBchCode != crate::storage::configured_branch(&pool).await {
                     return (StatusCode::UNAUTHORIZED, Json(json!({"error":"แหล่งข้อมูลเปลี่ยนแล้ว กรุณาเข้าสู่ระบบใหม่"}))).into_response();
                 }
-                let changes_settings=request.method()!=axum::http::Method::GET && (
+                // Both routes persist the design confirmed by the signed-in operator.
+                let save_design = request.method() == axum::http::Method::POST
+                    && matches!(path, "/api/templates/overwrite" | "/api/templates/save");
+                let changes_settings=!save_design && request.method()!=axum::http::Method::GET && (
                     path.starts_with("/api/config/") && !matches!(path, "/api/config/admin-verify" | "/api/config/admin-revoke")
                     || ["/api/paper-sizes/","/api/preprints/","/api/lan-printers/","/api/label-sizes/","/api/templates/","/api/schedules/"].iter().any(|prefix|path.starts_with(prefix))
                     || matches!(path,"/api/seed"|"/api/printers"|"/api/label-printers"|"/api/agent/register"|"/api/print-center/rule"|"/api/print-center/rules"|"/api/print-center/profile/delete"|"/api/print-center/sync"|"/api/print-center/action"));
