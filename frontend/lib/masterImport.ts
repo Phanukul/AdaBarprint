@@ -14,10 +14,18 @@ export interface MasterImportRow {
   quantity: number;
 }
 
+interface PrintFileFields {
+  code: string;
+  name: string;
+  unit: string;
+  normal?: number;
+  promo?: number;
+}
+
 export interface ParsedImportResult {
   kind: 'master' | 'barcode_only';
   masterRows: MasterImportRow[];
-  barcodeRows: Array<{ barcode: string; quantity: number }>;
+  barcodeRows: Array<{ barcode: string; quantity: number; fileFields?: PrintFileFields; rowNumber?: number }>;
 }
 
 function xmlEscape(text: string): string {
@@ -145,45 +153,39 @@ function buildZipStore(entries: Array<{ name: string; content: string }>): Uint8
 }
 
 const TEMPLATE_HEADERS = [
-  'รหัสสินค้า (FTPdtCode)',
-  'ชื่อสินค้า (FTPdtName)',
-  'บาร์โค้ด (FTBarCode)',
-  'รหัสหน่วย (FTPunCode)',
-  'ชื่อหน่วย (FTPunName)',
-  'ราคาปกติ (BasePrice)',
+  'รหัสสินค้า',
+  'ชื่อสินค้า',
+  'บาร์โค้ด',
+  'รหัสหน่วย',
+  'ชื่อหน่วย',
+  'ราคาปกติ',
   'วันเริ่มมีผล (YYYY-MM-DD)',
   'วันสิ้นสุด (YYYY-MM-DD)',
-  'ราคาโปรโมชัน (PriceOff)',
+  'ราคาโปรโมชัน',
   'ชื่อโปรโมชัน',
   'วันเริ่มโปรฯ (YYYY-MM-DD)',
   'วันหมดโปรฯ (YYYY-MM-DD)',
-  'จำนวนพิมพ์ (Qty)',
+  'จำนวนพิมพ์',
 ];
 
-function sampleTemplateRows(): string[][] {
-  const today = localDay();
-  return [
-    TEMPLATE_HEADERS,
-    ['PDT0001', 'กาแฟคั่วบด 250 กรัม', '8850123456789', 'PCS', 'ชิ้น', '159.00', today, '2099-12-31', '', '', '', '', '1'],
-    ['PDT0002', 'ชาเขียวพร้อมดื่ม 500 มล.', '8850987654321', 'BTL', 'ขวด', '25.00', today, '2099-12-31', '19.00', 'โปรโมชันประจำเดือน', today, today, '2'],
-  ];
+export function buildMasterXlsxTemplate(): Blob {
+  return buildXlsxTemplate(TEMPLATE_HEADERS);
 }
 
-export function buildMasterXlsxTemplate(): Blob {
-  const rowsXml = sampleTemplateRows()
-    .map((cols, rowIdx) => {
-      const rNum = rowIdx + 1;
-      const cells = cols
-        .map((val, colIdx) => `<c r="${colLetter(colIdx)}${rNum}" t="inlineStr"><is><t>${xmlEscape(val)}</t></is></c>`)
-        .join('');
-      return `<row r="${rNum}">${cells}</row>`;
-    })
+export function buildPrintXlsxTemplate(): Blob {
+  return buildXlsxTemplate(['รหัสสินค้า', 'ชื่อสินค้า', 'บาร์โค้ด', 'หน่วย', 'ราคาปกติ', 'ราคาโปรโมชัน', 'จำนวนดวง']);
+}
+
+function buildXlsxTemplate(headers: string[]): Blob {
+  const headerCells = headers
+    .map((header, index) => `<c r="${colLetter(index)}1" t="inlineStr"><is><t>${xmlEscape(header)}</t></is></c>`)
     .join('');
 
   const sheetXml =
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
     '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
-    `<sheetData>${rowsXml}</sheetData>` +
+    `<cols><col min="${headers.indexOf('บาร์โค้ด') + 1}" max="${headers.indexOf('บาร์โค้ด') + 1}" width="22" customWidth="1" style="1"/></cols>` +
+    `<sheetData><row r="1">${headerCells}</row></sheetData>` +
     '</worksheet>';
 
   const contentTypes =
@@ -193,6 +195,7 @@ export function buildMasterXlsxTemplate(): Blob {
     '<Default Extension="xml" ContentType="application/xml"/>' +
     '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
     '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
+    '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
     '</Types>';
 
   const rootRels =
@@ -211,6 +214,7 @@ export function buildMasterXlsxTemplate(): Blob {
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
     '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>' +
+    '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
     '</Relationships>';
 
   const zipBytes = buildZipStore([
@@ -218,6 +222,7 @@ export function buildMasterXlsxTemplate(): Blob {
     { name: '_rels/.rels', content: rootRels },
     { name: 'xl/workbook.xml', content: workbookXml },
     { name: 'xl/_rels/workbook.xml.rels', content: wbRels },
+    { name: 'xl/styles.xml', content: '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font/></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf/></cellStyleXfs><cellXfs count="2"><xf xfId="0"/><xf xfId="0" numFmtId="49" applyNumberFormat="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>' },
     { name: 'xl/worksheets/sheet1.xml', content: sheetXml },
   ]);
 
@@ -467,7 +472,34 @@ function mapObjectsToMaster(records: Array<Record<string, unknown>>, excel = fal
   return out;
 }
 
-export async function parseMasterOrPrintFile(file: File): Promise<ParsedImportResult> {
+function printWorksheet(headers: string[], rows: string[][]): ParsedImportResult {
+  const barcodeRows = rows.map((cols, i) => {
+    const rowNumber = i + 2;
+    const record = rowToMasterObject(headers, cols);
+    const field = (...names: string[]) => pickField(record, names);
+    const barcode = field('บาร์โค้ด', 'barcode', 'ftbarcode');
+    const quantity = Number(field('จำนวนดวง', 'จำนวนพิมพ์', 'จำนวน', 'qty', 'quantity', 'fnplbqty') || 1);
+    if (!barcode || !Number.isInteger(quantity) || quantity < 1 || quantity > 10000)
+      throw new Error(`แถวที่ ${rowNumber}: ต้องระบุบาร์โค้ดและจำนวนเต็ม 1–10,000`);
+    const price = (label: string, ...aliases: string[]) => {
+      const raw = field(label, ...aliases);
+      if (!raw) return undefined;
+      const value = Number(raw.replace(/,/g, ''));
+      if (!Number.isFinite(value) || value < 0) throw new Error(`แถวที่ ${rowNumber}: ${label}ไม่ถูกต้อง`);
+      return value;
+    };
+    const fields = {
+      code: field('รหัสสินค้า', 'ftpdtcode', 'sku'), name: field('ชื่อสินค้า', 'ftpdtname', 'name'),
+      unit: field('หน่วย', 'ชื่อหน่วย', 'ftpunname'), normal: price('ราคาปกติ', 'baseprice', 'price'),
+      promo: price('ราคาโปรโมชัน', 'ราคาโปร', 'priceoff', 'promoprice'),
+    };
+    return {barcode, quantity, rowNumber, fileFields: Object.values(fields).some(v => v !== '' && v !== undefined) ? fields : undefined};
+  });
+  if (!barcodeRows.length) throw new Error('กรุณากรอกข้อมูลสินค้าในไฟล์ก่อนนำเข้า');
+  return {kind: 'barcode_only', masterRows: [], barcodeRows};
+}
+
+export async function parseMasterOrPrintFile(file: File, target?: 'print' | 'master'): Promise<ParsedImportResult> {
   const lower = file.name.toLowerCase();
   if (lower.endsWith('.json')) {
     const parsed = JSON.parse(await file.text());
@@ -504,6 +536,7 @@ export async function parseMasterOrPrintFile(file: File): Promise<ParsedImportRe
     const rows = await parseXlsxRows(await file.arrayBuffer());
     if (!rows.length) throw new Error('ไม่พบข้อมูลในไฟล์ Excel');
     const headers = rows[0];
+    if (target === 'print' && headers.some(h => ['บาร์โค้ด', 'barcode', 'ftbarcode'].includes(normalizeKey(h)))) return printWorksheet(headers, rows.slice(1));
     const hasMasterHeader = headers.some((h) => {
       const nh = normalizeKey(h);
       return nh.includes('baseprice') || nh.includes('ราคา') || nh.includes('ftpdtcode') || nh.includes('pdtcode');
@@ -515,7 +548,7 @@ export async function parseMasterOrPrintFile(file: File): Promise<ParsedImportRe
     }
     const hasBarcodeHeader = headers.some((h) => ['barcode', 'ftbarcode', 'บาร์โค้ด'].includes(normalizeKey(h)));
     const bIdx = hasBarcodeHeader ? headers.findIndex((h) => ['barcode', 'ftbarcode', 'บาร์โค้ด'].includes(normalizeKey(h))) : 0;
-    const qIdx = hasBarcodeHeader ? headers.findIndex((h) => ['qty', 'quantity', 'fnplbqty', 'จำนวน', 'จำนวนพิมพ์'].includes(normalizeKey(h))) : 1;
+    const qIdx = hasBarcodeHeader ? headers.findIndex((h) => ['qty', 'quantity', 'fnplbqty', 'จำนวน', 'จำนวนพิมพ์', 'จำนวนดวง'].includes(normalizeKey(h))) : 1;
     const data = hasBarcodeHeader ? rows.slice(1) : rows;
     const barcodeRows = data.map((cols, idx) => {
       const barcode = (cols[bIdx] || '').trim();
@@ -562,6 +595,7 @@ export async function parseMasterOrPrintFile(file: File): Promise<ParsedImportRe
   if (!rawRows.length) throw new Error('ไม่พบข้อมูลในไฟล์');
 
   const headers = rawRows[0];
+  if (target === 'print' && headers.some(h => ['บาร์โค้ด', 'barcode', 'ftbarcode'].includes(normalizeKey(h)))) return printWorksheet(headers, rawRows.slice(1));
   const hasMasterHeader = headers.some((h) => {
     const nh = normalizeKey(h);
     return nh.includes('baseprice') || nh.includes('ราคา') || nh.includes('ftpdtcode');
@@ -573,7 +607,7 @@ export async function parseMasterOrPrintFile(file: File): Promise<ParsedImportRe
   }
 
   const barcodeIdx = headers.findIndex((h) => ['barcode', 'ftbarcode', 'บาร์โค้ด'].includes(normalizeKey(h)));
-  const qtyIdx = headers.findIndex((h) => ['qty', 'quantity', 'fnplbqty', 'จำนวน'].includes(normalizeKey(h)));
+  const qtyIdx = headers.findIndex((h) => ['qty', 'quantity', 'fnplbqty', 'จำนวน', 'จำนวนดวง'].includes(normalizeKey(h)));
   const data = barcodeIdx >= 0 ? rawRows.slice(1) : rawRows;
   const barcodeRows = data.map((cols, idx) => {
     const barcode = (cols[barcodeIdx >= 0 ? barcodeIdx : 0] || '').trim();

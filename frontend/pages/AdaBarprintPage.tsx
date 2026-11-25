@@ -4,6 +4,8 @@ import { capturePagesToPngBase64 } from '@/lib/captureLabelPages';
 import { packRollUnits, type PrintUnit } from '@/lib/packRollUnits';
 import {
   buildMasterJsonTemplate,
+  buildPrintXlsxTemplate,
+  type MasterImportRow,
   buildMasterXlsxTemplate,
   parseMasterOrPrintFile,
   triggerFileDownload,
@@ -167,6 +169,8 @@ interface PrintQueueRow {
   ctx: Record<string, any>;
   promoName?: string;
   statusText: string;
+  fileValues?: boolean;
+  comparisonPrice?: number;
 }
 
 type EventPrice = { pdtCode: string; barcode: string; setPrice: number; ctx: PrintQueueRow['ctx']; isPromo: boolean };
@@ -583,6 +587,7 @@ function AdaBarprintWorkspace({
   // Modal: Import Excel / JSON / CSV (Version 5 & Master)
   const [importModalOpen, setImportModalOpen] = useState(false);
   const [importingFile, setImportingFile] = useState(false);
+  const [pendingMaster, setPendingMaster] = useState<{file: string; branch: string; items: MasterImportRow[]} | null>(null);
   const [importTarget, setImportTarget] = useState<'print' | 'master'>('print');
 
   // Driver Mapping (กำหนดเครื่องพิมพ์และถาดกระดาษ — แยกปกติ / โปรโมชัน ตามรหัสฉลาก)
@@ -935,27 +940,13 @@ function AdaBarprintWorkspace({
   const handleExcelFileUpload = async (file: File) => {
     setImportingFile(true);
     try {
-      const parsed = await parseMasterOrPrintFile(file);
+      const parsed = await parseMasterOrPrintFile(file, importTarget);
 
       if (importTarget === 'master') {
         if (parsed.kind !== 'master' || !parsed.masterRows.length) {
           throw new Error('ไฟล์นี้ไม่มีคอลัมน์ข้อมูล Master (รหัสสินค้า, บาร์โค้ด, ราคาปกติ) กรุณาดาวน์โหลด Template ก่อน');
         }
-        const bchCode = resolveDefaultBranch() || '00001';
-        const impRes = await fetch('/api/import/master', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            branch: bchCode,
-            items: parsed.masterRows,
-          }),
-        });
-        const impData = await impRes.json().catch(() => ({}));
-        if (!impRes.ok) {
-          throw new Error(impData?.error || 'นำเข้าฐานข้อมูล Master ไม่สำเร็จ');
-        }
-        await reloadCatalogAfterSync();
-        toast.success(impData?.message || `นำเข้า Master สำเร็จ ${parsed.masterRows.length} รายการ`);
+        setPendingMaster({file: file.name, branch: resolveDefaultBranch() || '00001', items: parsed.masterRows});
         setImportModalOpen(false);
         return;
       }
@@ -964,7 +955,7 @@ function AdaBarprintWorkspace({
       const pass: PrintQueueRow[] = [];
       const fail: Array<{ pdtCode: string; barCode: string; pdtName: string; reason: string }> = [];
 
-      for (const { barcode: bar, quantity: qty } of parsed.barcodeRows) {
+      for (const { barcode: bar, quantity: qty, fileFields, rowNumber } of parsed.barcodeRows) {
         const res = await fetch('/api/print/build-line', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -980,29 +971,51 @@ function AdaBarprintWorkspace({
           }),
         });
         const data = await res.json();
-        if (!res.ok) {
-          fail.push({ pdtCode: '-', barCode: bar, pdtName: '-', reason: data.error || 'ไม่พบบาร์โค้ดในฐานข้อมูล' });
+        const missingProduct = res.status === 404 && String(data.error).includes('ไม่พบสินค้า');
+        if (!res.ok && !(missingProduct && fileFields?.name && (fileFields.normal !== undefined || fileFields.promo !== undefined))) {
+          const reason = missingProduct && fileFields
+            ? 'ไม่พบสินค้าในระบบ กรุณาระบุชื่อสินค้าและราคาในไฟล์'
+            : data.error || 'ตรวจสอบสินค้าไม่สำเร็จ';
+          fail.push({ pdtCode: fileFields?.code || '-', barCode: bar, pdtName: fileFields?.name || '-', reason: rowNumber ? `แถวที่ ${rowNumber}: ${reason}` : reason });
           continue;
         }
-        const isPromo = Boolean(data.isPromo);
+        const hasFilePrice = fileFields?.normal !== undefined || fileFields?.promo !== undefined;
+        const isPromo = hasFilePrice ? fileFields?.promo !== undefined : Boolean(data.isPromo);
+        const price = fileFields?.promo ?? fileFields?.normal ?? data.setPrice ?? 0;
+        const code = fileFields?.code || data.pdtCode || bar;
+        const name = fileFields?.name || data.pdtName;
+        const ctx = data.ctx || {store: {code: bchCode}, tag: {print_date: new Date().toLocaleDateString('en-GB')}};
+        if (fileFields) {
+          const unit = fileFields.unit || ctx.product?.unit || '';
+          ctx.product = {...ctx.product, code, sku: code, name, barcode: bar, unit};
+          ctx.tag = {...ctx.tag, selling_unit: unit};
+          if (hasFilePrice) {
+            const base = fileFields.normal ?? data.ctx?.price?.old_value ?? data.salePrice;
+            ctx.price = {...ctx.price, value: price, old_value: isPromo ? base ?? null : null, unit_price: price, type_name: isPromo ? 'โปรโมชั่น' : 'ปกติ'};
+            ctx.tag = {...ctx.tag, pri_status: isPromo ? '2' : '1', pri_per_unit: String(price)};
+            ctx.promotion = {};
+          }
+        }
         if (sheetPriceType === 'Promotion' && !isPromo) {
           fail.push({ pdtCode: data.pdtCode, barCode: bar, pdtName: data.pdtName, reason: 'ไม่มีโปรโมชันในช่วงวันที่เลือก' });
           continue;
         }
         const priType: '1' | '2' = isPromo ? '2' : '1';
         pass.push({
-          rowKey: nextQueueRowKey(data.pdtCode, data.barcode, priType),
-          pdtCode: data.pdtCode,
-          pdtName: data.pdtName,
-          barCode: data.barcode,
-          price: data.setPrice ?? 0,
+          rowKey: nextQueueRowKey(code, bar, priType),
+          pdtCode: code,
+          pdtName: name,
+          barCode: bar,
+          price,
           priType,
           qty,
           selected: true,
-          lbsCode: data.lbsCode,
-          tmplCode: data.tmplCode,
-          ctx: data.ctx,
-          promoName: data.promo?.name,
+          lbsCode: data.lbsCode || selectedLabelCode,
+          tmplCode: data.tmplCode || selectedTemplateCode,
+          ctx,
+          fileValues: Boolean(fileFields),
+          comparisonPrice: hasFilePrice && res.ok && data.setPrice !== price ? data.setPrice : undefined,
+          promoName: hasFilePrice ? undefined : data.promo?.name,
           statusText: 'ผ่านเงื่อนไข',
         });
       }
@@ -1018,6 +1031,28 @@ function AdaBarprintWorkspace({
     }
   };
 
+  const confirmMasterImport = async () => {
+    if (!pendingMaster || importingFile) return;
+    setImportingFile(true);
+    try {
+      const {branch, items} = pendingMaster;
+      const response = await fetch('/api/import/master', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({branch, items}),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || 'บันทึกข้อมูล Master ไม่สำเร็จ');
+      setPendingMaster(null);
+      toast.success(result.message || `บันทึก Master แล้ว ${items.length} รายการ`);
+      await reloadCatalogAfterSync();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'นำเข้า Master ไม่สำเร็จ');
+    } finally {
+      setImportingFile(false);
+    }
+  };
+
   // dcmPrintBarEventImpPdtToPrnLabel
   const handleConfirmImportToMain = () => {
     if (previewPass.length === 0) {
@@ -1028,7 +1063,7 @@ function AdaBarprintWorkspace({
       const merged = [...prev];
       for (const item of previewPass) {
         const idx = merged.findIndex(
-          m => m.pdtCode === item.pdtCode && m.barCode === item.barCode && m.priType === item.priType
+          m => m.pdtCode === item.pdtCode && m.barCode === item.barCode && m.priType === item.priType && (!m.fileValues && !item.fileValues || JSON.stringify(m.ctx) === JSON.stringify(item.ctx))
         );
         if (idx >= 0) {
           merged[idx] = { ...merged[idx], qty: merged[idx].qty + item.qty };
@@ -1245,6 +1280,7 @@ function AdaBarprintWorkspace({
     if (!sendPrintOpen || !previewPurpose) return [row];
     const line = eventLines?.get(JSON.stringify([row.pdtCode, row.barCode]));
     if (!line) return [];
+    if (row.fileValues) return [row];
     return [{...row, ctx: line.ctx, price: line.setPrice, priType: line.isPromo ? '2' as const : '1' as const}];
   }), [mainRows, sendPrintOpen, previewPurpose, eventLines]);
   const normalRows = useMemo(() => printRows.filter(r => selectedTemplateCode || r.priType === '1'), [printRows, selectedTemplateCode]);
@@ -1383,6 +1419,7 @@ function AdaBarprintWorkspace({
       [JSON.stringify([line.pdtCode, line.barcode]), line]));
     for (let i = 0; i < set.lines.length; i += 10) {
       const rows = await Promise.all(set.lines.slice(i, i + 10).map(async row => {
+        if (row.fileValues) return !candidates || byKey.has(JSON.stringify([row.pdtCode, row.barCode])) ? row : null;
         const line = candidates ? byKey.get(JSON.stringify([row.pdtCode, row.barCode])) :
           await printApi('/api/print/build-line', {barcode: row.barCode, pdtCode: row.pdtCode, qty: row.qty,
             bchCode: set.branch, overrideLbs: set.labelCode, verify: set.verify, priType: '1',
@@ -2554,9 +2591,6 @@ function AdaBarprintWorkspace({
                 {editingSet && <Button size="sm" variant="outline" onClick={() => {setEditingSet(''); setPreviewPurpose('basket'); setSendPrintOpen(true);}}>จบการแก้ไขโดยไม่บันทึก</Button>}
                 {hasDraft && !printSets.length && <Button size="sm" variant="outline" disabled={draftBusy} onClick={openDraft}>{draftBusy ? 'กำลังตรวจข้อมูล…' : 'เปิดฉบับร่าง'}</Button>}
                 {printSets.length > 0 && <Button size="sm" variant="outline" onClick={() => {setPreviewPurpose('basket'); setSendPrintOpen(true);}}>ชุดรอพิมพ์ ({printSets.length})</Button>}
-                <Button size="sm" variant="outline" className="border-[#007a87] text-[#007a87] hover:bg-teal-50/70" onClick={handleExportCsv}>
-                  <Download className="h-3.5 w-3.5 mr-1" />ส่งออก CSV
-                </Button>
 
                 {/* เมนูจุด 3 จุด (...) สำหรับคำสั่งที่ไม่บ่อย: ซิงค์ข้อมูล, นำเข้า Master, กำหนดเครื่องพิมพ์/ถาด */}
                 <div className="relative">
@@ -2595,6 +2629,17 @@ function AdaBarprintWorkspace({
                         >
                           <FileUp className="h-3.5 w-3.5 text-[#007a87]" />
                           <span>นำเข้า Master (Excel / JSON)</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMoreMenuOpen(false);
+                            handleExportCsv();
+                          }}
+                          className="w-full px-3 py-2 text-left hover:bg-slate-50 flex items-center gap-2 text-slate-700 cursor-pointer"
+                        >
+                          <Download className="h-3.5 w-3.5 text-[#007a87]" />
+                          <span>ส่งออกรายการที่เลือก (CSV)</span>
                         </button>
                         <button
                           type="button"
@@ -2949,28 +2994,28 @@ function AdaBarprintWorkspace({
                   })()}
 
                   {/* Bottom Action Buttons (Version 5 exact action bar) */}
-                  <div className="pt-2 flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex gap-1.5">
-                      <Button type="button" size="sm" variant="outline" className="h-8 text-xs border-[#007a87] text-[#007a87]" onClick={() => setImportModalOpen(true)}>
-                        <FileUp className="h-3.5 w-3.5 mr-1" />นำเข้า
+                  <div className="mt-3 grid grid-cols-2 gap-2 border-t border-slate-200 pt-3">
+                    <div className="contents">
+                      <Button type="button" size="sm" variant="outline" className="h-9 text-xs border-[#007a87] text-[#007a87]" onClick={() => { setImportTarget('print'); setImportModalOpen(true); }}>
+                        <FileUp className="h-3.5 w-3.5" />นำเข้ารายการพิมพ์
                       </Button>
                       <Button
                         type="button"
                         size="sm"
-                        className="h-8 text-xs bg-amber-600 hover:bg-amber-700 text-white"
+                        className="h-9 border border-slate-300 bg-white text-xs text-slate-700 hover:bg-slate-50"
                         onClick={() => { setScanPage(1); setScanModalOpen(true); }}
                       >
-                        <ScanLine className="h-3.5 w-3.5 mr-1" />สแกนสินค้า
+                        <ScanLine className="h-3.5 w-3.5" />สแกนสินค้า
                       </Button>
                     </div>
-                    <div className="flex gap-1.5">
-                      <Button type="button" size="sm" variant="outline" className="h-8 text-xs" onClick={handleClearFilters}>
-                        <RotateCcw className="h-3.5 w-3.5 mr-1" />ล้างข้อมูล
+                    <div className="contents">
+                      <Button type="button" size="sm" variant="outline" className="h-9 text-xs" onClick={handleClearFilters}>
+                        <RotateCcw className="h-3.5 w-3.5" />ล้างข้อมูล
                       </Button>
                       <Button
                         type="submit"
                         size="sm"
-                        className="relative h-8 text-xs bg-[#007a87] hover:bg-[#00606b] text-white"
+                        className="relative h-9 text-xs bg-[#007a87] hover:bg-[#00606b] text-white"
                         disabled={movingData}
                         aria-busy={movingData}
                       >
@@ -3244,7 +3289,7 @@ function AdaBarprintWorkspace({
             </Card>
             
     </div>
-          
+
     </div>
       </main>
       )}
@@ -3524,7 +3569,7 @@ function AdaBarprintWorkspace({
                           <TableCell className="text-xs font-mono">{r.pdtCode}</TableCell>
                           <TableCell className="text-xs">{r.pdtName}</TableCell>
                           <TableCell className="text-xs font-mono">{r.barCode}</TableCell>
-                          <TableCell className="text-xs text-right">{r.price.toFixed(2)}</TableCell>
+                          <TableCell className="text-xs text-right">{r.price.toFixed(2)}{r.comparisonPrice !== undefined && <div className="text-xs text-amber-700">ใช้ราคาจากไฟล์ · ราคาในระบบ {r.comparisonPrice.toFixed(2)}</div>}</TableCell>
                           <TableCell className="text-xs text-center">{r.qty}</TableCell>
                         </TableRow>
                       ))}
@@ -3570,7 +3615,7 @@ function AdaBarprintWorkspace({
           <DialogFooter>
             <Button variant="outline" onClick={() => setImportPreviewOpen(false)}>ยกเลิก</Button>
             <Button className="bg-[#007a87] hover:bg-[#00606b] text-white" onClick={handleConfirmImportToMain} disabled={previewPass.length === 0}>
-              ยืนยันการนำเข้า ({previewPass.length})
+              {previewPass.some(row => row.comparisonPrice !== undefined) ? 'ยืนยันใช้ราคาจากไฟล์และเพิ่มลงตาราง' : 'เพิ่มลงตารางพิมพ์'} ({previewPass.length})
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -3806,96 +3851,61 @@ function AdaBarprintWorkspace({
       </Dialog>
       
 {/* ===== Modal: นำเข้าข้อมูล Master / รายการพิมพ์ (Excel / JSON / CSV / V5) ===== */}
-      <Dialog open={importModalOpen} onOpenChange={setImportModalOpen}>
-        <DialogContent className="w-[95vw] sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle className="text-base">นำเข้าข้อมูล (Excel / JSON / CSV / V5)</DialogTitle>
-            <DialogDescription className="text-xs">
-              รองรับไฟล์ <code className="bg-slate-100 px-1 rounded">.xlsx</code>, <code className="bg-slate-100 px-1 rounded">.json</code>, <code className="bg-slate-100 px-1 rounded">.csv</code>, <code className="bg-slate-100 px-1 rounded">.txt</code> ทั้งแบบรายชื่อบาร์โค้ดสำหรับพิมพ์และแบบ Master สินค้า/ราคา
-            </DialogDescription>
+      <Dialog open={importModalOpen} onOpenChange={open => { if (!importingFile) setImportModalOpen(open); }}>
+        <DialogContent className="w-[94vw] max-h-[90dvh] gap-0 overflow-y-auto p-0 sm:max-w-lg">
+          <DialogHeader className="border-b border-slate-200 px-5 py-4 pr-12 text-left">
+            <DialogTitle className="text-lg">{importTarget === 'print' ? 'นำเข้ารายการพิมพ์' : 'นำเข้าข้อมูลสินค้าและราคา (Master)'}</DialogTitle>
+            <DialogDescription>{importTarget === 'print' ? 'กรอกสินค้าและราคาที่ต้องการพิมพ์ หรือกรอกเฉพาะบาร์โค้ดและจำนวนดวงเพื่อใช้ราคาจากระบบ' : 'เลือกไฟล์สินค้าและราคา แล้วตรวจรายละเอียดก่อนยืนยันบันทึกลงฐานข้อมูล'}</DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-2">
-            <div className="rounded-md bg-slate-50 border p-3 space-y-2">
-              <div className="text-xs font-medium text-slate-700">1. ดาวน์โหลดไฟล์ตัวอย่าง (Template)</div>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  className="h-8 text-xs border-[#007a87] text-[#007a87]"
-                  onClick={() => triggerFileDownload(buildMasterXlsxTemplate(), 'AdaBarprint-Master-Template.xlsx')}
-                >
-                  <FileDown className="h-3.5 w-3.5 mr-1" />Template Excel (.xlsx)
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  className="h-8 text-xs border-[#007a87] text-[#007a87]"
-                  onClick={() => triggerFileDownload(buildMasterJsonTemplate(), 'AdaBarprint-Master-Template.json')}
-                >
-                  <FileDown className="h-3.5 w-3.5 mr-1" />Template JSON (.json)
-                </Button>
-              </div>
-            </div>
 
-            <div className="space-y-1.5">
-              <div className="text-xs font-medium text-slate-700">2. เป้าหมายการนำเข้า</div>
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <button
-                  type="button"
-                  onClick={() => setImportTarget('print')}
-                  className={`rounded-md border px-3 py-2 text-left cursor-pointer ${
-                    importTarget === 'print'
-                      ? 'border-[#007a87] bg-teal-50 text-[#007a87] font-semibold'
-                      : 'border-slate-200 bg-white text-slate-600'
-                  }`}
-                >
-                  นำเข้าลงตารางพิมพ์ทันที
-                  <span className="block text-[10px] font-normal text-slate-500 mt-0.5">
-                    ตรวจบาร์โค้ดและราคา แล้วส่งขึ้นตารางพิมพ์
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setImportTarget('master')}
-                  className={`rounded-md border px-3 py-2 text-left cursor-pointer ${
-                    importTarget === 'master'
-                      ? 'border-[#007a87] bg-teal-50 text-[#007a87] font-semibold'
-                      : 'border-slate-200 bg-white text-slate-600'
-                  }`}
-                >
-                  นำเข้าฐาน Master (เครื่องแยก)
-                  <span className="block text-[10px] font-normal text-slate-500 mt-0.5">
-                    บันทึกสินค้า/ราคาลง AdaAccD.db อัตโนมัติ
-                  </span>
-                </button>
-              </div>
-            </div>
+          <div className="mx-5 my-4 flex flex-wrap items-center gap-2 rounded-xl bg-teal-50 px-4 py-4 ring-1 ring-inset ring-teal-100">
+            <span className="mr-auto text-base font-semibold text-teal-900">เทมเพลต{importTarget === 'print' ? 'รายการพิมพ์' : 'สินค้าและราคา'}</span>
+            <Button type="button" className="bg-[#007a87] text-white hover:bg-[#00606b]" onClick={() => importTarget === 'print' ? triggerFileDownload(buildPrintXlsxTemplate(), 'AdaBarprint-Print-Template.xlsx') : triggerFileDownload(buildMasterXlsxTemplate(), 'AdaBarprint-Master-Template.xlsx')}>
+              <FileDown className="h-4 w-4" /> ดาวน์โหลด Excel
+            </Button>
+            {importTarget === 'master' && <Button type="button" size="sm" variant="outline" onClick={() => triggerFileDownload(buildMasterJsonTemplate(), 'AdaBarprint-Master-Template.json')}>
+              <FileDown className="h-4 w-4" /> JSON
+            </Button>}
+          </div>
 
-            <div className="space-y-1.5">
-              <div className="text-xs font-medium text-slate-700">3. เลือกไฟล์เพื่ออัปโหลด</div>
-              <Input
-                type="file"
-                accept=".xlsx,.json,.csv,.txt"
-                disabled={importingFile}
-                onChange={e => {
-                  const f = e.target.files?.[0];
-                  if (f) void handleExcelFileUpload(f);
-                  e.target.value = '';
-                }}
-                className="text-xs"
-              />
-            </div>
 
-            {importingFile && (
-              <div className="flex items-center gap-2 text-xs text-slate-500">
-                <Loader2 className="h-4 w-4 animate-spin" />กำลังอ่านและตรวจสอบข้อมูลในไฟล์...
-              </div>
-            )}
+
+          <div className="relative mx-5 mb-5 grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-1 rounded-xl border border-slate-200 px-4 py-3 hover:border-teal-500 hover:bg-slate-50 focus-within:ring-2 focus-within:ring-teal-600">
+            <FileUp aria-hidden="true" className="row-span-2 h-9 w-9 rounded-lg bg-slate-100 p-2 text-slate-700" />
+            <label htmlFor="import-products-file" className="text-sm font-semibold text-slate-800">
+              เลือกไฟล์จากเครื่อง…
+            </label>
+            <input id="import-products-file" type="file" accept=".xlsx,.json,.csv,.txt" disabled={importingFile}
+              aria-describedby="import-file-formats" className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+              onChange={e => {
+                const file = e.target.files?.[0];
+                if (file) void handleExcelFileUpload(file);
+                e.target.value = '';
+              }} />
+            <span id="import-file-formats" className="text-xs text-slate-600">Excel (.xlsx), JSON, CSV หรือไฟล์ V5 (.txt)</span>
+            {importingFile && <span role="status" className="flex items-center gap-2 text-xs text-teal-800"><Loader2 className="h-4 w-4 animate-spin" />กำลังตรวจสอบไฟล์…</span>}
+          </div>
+
+
+          <DialogFooter className="border-t border-slate-200 bg-slate-50/60 px-5 py-3">
+            <Button variant="outline" disabled={importingFile} onClick={() => setImportModalOpen(false)}>ปิด</Button>
+          </DialogFooter>
+</DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(pendingMaster)} onOpenChange={open => { if (!open && !importingFile) setPendingMaster(null); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>ยืนยันบันทึกข้อมูล Master</DialogTitle>
+            <DialogDescription>ข้อมูลสินค้าและราคาจากไฟล์นี้จะถูกบันทึกลง AdaAccD.db</DialogDescription>
+          </DialogHeader>
+          <div className="rounded-lg bg-slate-50 p-4 text-sm">
+            <div className="break-all">{pendingMaster?.file}</div>
+            <div>สาขา {pendingMaster?.branch} · {pendingMaster?.items.length} รายการ</div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setImportModalOpen(false)}>ปิด</Button>
+            <Button variant="outline" disabled={importingFile} onClick={() => setPendingMaster(null)}>ยกเลิก</Button>
+            <Button disabled={importingFile} onClick={confirmMasterImport}>{importingFile ? 'กำลังบันทึก…' : 'ยืนยันบันทึกลงฐาน'}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
