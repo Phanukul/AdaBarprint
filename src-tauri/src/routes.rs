@@ -1107,6 +1107,25 @@ pub struct DeleteCustomFormatReq {
     pub allow_built_in: Option<bool>,
 }
 
+#[derive(Deserialize)]
+pub struct DeleteTemplateReq {
+    pub code: String,
+}
+
+pub async fn post_delete_template(State(st): State<AppState>, Json(body): Json<DeleteTemplateReq>) -> Response {
+    // A tombstone also prevents startup seeding from recreating a deleted standard template.
+    let result = sqlx::query("UPDATE TCNMLabelTmpl SET FTLtmStaUse='0', FDLastUpdOn=datetime('now') WHERE FTLtmCode=? AND FTLtmStaUse='1' AND NOT EXISTS (
+        SELECT 1 FROM TCNMLabelPrintRule WHERE
+        (coalesce(json_array_length(FTLprConfigJson,'$.targets'),0)=0 AND json_extract(FTLprConfigJson,'$.template')=?) OR
+        EXISTS (SELECT 1 FROM json_each(FTLprConfigJson,'$.targets') WHERE json_extract(value,'$.template')=?)
+    )").bind(&body.code).bind(&body.code).bind(&body.code).execute(&st.pool).await;
+    match result {
+        Ok(r) if r.rows_affected()==1 => Json(json!({"ok":true})).into_response(),
+        Ok(_) => err_json(StatusCode::CONFLICT,"แบบป้ายนี้ถูกลบแล้ว หรือมีโปรไฟล์พิมพ์อัตโนมัติใช้อยู่ กรุณาตรวจโปรไฟล์ก่อนลบ"),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()),
+    }
+}
+
 pub async fn post_delete_custom_format(
     State(st): State<AppState>,
     Json(body): Json<DeleteCustomFormatReq>,

@@ -154,6 +154,7 @@ pub fn build_router(pool: SqlitePool) -> Router {
         .route("/api/templates/restore", post(post_reset_template))
         .route("/api/templates/save", post(post_save_template))
         .route("/api/templates/save-as", post(post_save_as_template))
+        .route("/api/templates/delete", post(post_delete_template))
         .route("/api/templates/delete-custom", post(post_delete_custom_format))
         .route("/api/templates/reset", post(post_reset_template))
         .route("/api/printers", get(get_printers).post(post_printers))

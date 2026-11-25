@@ -318,6 +318,27 @@ export function SettingsPanel({
   const [preprintPageSize, setPreprintPageSize] = useState(10);
 
   // ── Tab 2: Driver Mapping + LAN Printers State ─────────────────────────────
+  const [removeFormat, setRemoveFormat] = useState<LabelFormatOption | null>(null);
+  const [removingFormat, setRemovingFormat] = useState(false);
+  async function deleteFormat() {
+    if (!removeFormat || removingFormat) return;
+    setRemovingFormat(true);
+    try {
+      const res = await fetch('/api/templates/delete', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: removeFormat.value }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'ลบแบบป้ายไม่สำเร็จ');
+      setRemoveFormat(null);
+      await onRefreshAll();
+      toast.success('ลบแบบป้ายแล้ว');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'ลบแบบป้ายไม่สำเร็จ');
+    } finally {
+      setRemovingFormat(false);
+    }
+  }
   const [driverSearch, setDriverSearch] = useState('');
   const [editFormat, setEditFormat] = useState(initialEditFormat);
   const [driverPage, setDriverPage] = useState(1);
@@ -1272,13 +1293,14 @@ export function SettingsPanel({
             <div><h2 className="font-semibold">เครื่องพิมพ์ตามแบบป้าย — พิมพ์เอง</h2><p className="text-sm text-slate-500 mt-1">เลือกขนาดและแบบป้ายเพื่อกำหนดเครื่องพิมพ์และถาด การตั้งค่านี้ไม่เปลี่ยนงานพิมพ์อัตโนมัติ</p></div>
             <Input aria-label="ค้นหาแบบป้าย" placeholder="ค้นหารหัสหรือชื่อป้าย…" value={driverSearch} onChange={e=>setDriverSearch(e.target.value)} className="max-w-md"/>
             <div className="overflow-x-auto rounded-lg border border-slate-200">
-              <table className="w-full min-w-[560px] table-fixed text-left text-sm">
+              <table className="w-full min-w-[720px] table-fixed text-left text-sm">
                 <thead className="bg-[#344b60] text-white"><tr>
                   <th scope="col" className="w-14 px-3 py-3 text-center font-medium">ลำดับ</th>
                   <th scope="col" className="px-3 py-3 font-medium">แบบป้าย</th>
                   <th scope="col" className="w-32 px-3 py-3 font-medium">ขนาด (มม.)</th>
                   <th scope="col" className="w-24 px-3 py-3 font-medium">กระดาษ</th>
-                  <th scope="col" className="w-24 px-3 py-3 text-center font-medium">จัดการ</th>
+                  <th scope="col" className="w-32 px-3 py-3 text-center font-medium">ตั้งค่า</th>
+                  <th scope="col" className="w-24 border-l border-white/20 px-3 py-3 text-center font-medium">ลบแบบป้าย</th>
                 </tr></thead>
                 <tbody className="divide-y divide-slate-200">{pagedMappings.map(({format, mapping:m},index)=>{
                   const size=allLabelSizes.find(s=>s.FTLbsCode===m.lbsCode);
@@ -1289,8 +1311,11 @@ export function SettingsPanel({
                     <td className="px-3 py-3">{size?`${size.FCLbsWidth} × ${size.FCLbsHeight}`:'—'}</td>
                     <td className="px-3 py-3 break-words">{size?.FTLbsPaperSize||'—'}</td>
                     <td className="px-3 py-3 text-center"><Button size="sm" variant="outline" aria-label={`ตั้งค่า ${format.label}`} onClick={()=>{setEditFormat(format.value);setDriverEditRow({...m});}}>ตั้งค่า</Button></td>
+                    <td className="border-l border-slate-200 px-3 py-3 text-center">
+                      {!format.value.startsWith('legacy:') && <Button size="sm" variant="ghost" className="text-red-600" aria-label={`ลบแบบป้าย ${format.label}`} title="ลบแบบป้าย" onClick={()=>setRemoveFormat(format)}><Trash2 className="size-4"/></Button>}
+                    </td>
                   </tr>;
-                })}{!pagedMappings.length&&<tr><td colSpan={5} className="px-3 py-8 text-center text-slate-500">ไม่พบแบบป้ายที่ค้นหา</td></tr>}</tbody>
+                })}{!pagedMappings.length&&<tr><td colSpan={6} className="px-3 py-8 text-center text-slate-500">ไม่พบแบบป้ายที่ค้นหา</td></tr>}</tbody>
               </table>
             </div>
             <TablePagination total={filteredMappings.length} page={driverPage} pageSize={driverPageSize} onPageChange={setDriverPage} onPageSizeChange={s=>{setDriverPageSize(s);setDriverPage(1);}}/>
@@ -1465,6 +1490,17 @@ export function SettingsPanel({
       </Tabs>
 
       {/* ════════════ MODAL: ADD / EDIT LABEL SIZE ════════════════════════════ */}
+      <Dialog open={Boolean(removeFormat)} onOpenChange={open=>{if (!open && !removingFormat) setRemoveFormat(null);}}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>ลบแบบป้ายนี้?</DialogTitle>
+            <DialogDescription>{removeFormat?.label} จะถูกนำออกจากรายการแบบป้าย ขนาดกระดาษและฟอร์ม Pre-Print ยังใช้กับแบบอื่นได้</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" disabled={removingFormat} onClick={()=>setRemoveFormat(null)}>ยกเลิก</Button>
+            <Button variant="destructive" disabled={removingFormat} onClick={deleteFormat}>ยืนยันลบแบบป้าย</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog open={Boolean(sizeForm)} onOpenChange={(o) => { if (!o) setSizeForm(null); }}>
         <DialogContent className="sm:max-w-xl">
           <DialogHeader>
