@@ -24,12 +24,26 @@ export async function readDraft<T>(owner: string): Promise<SavedDraft<T> | undef
   } finally { db.close(); }
 }
 
-export async function writeDraft<T>(owner: string, sets: T[]): Promise<void> {
+export async function writeDraft<T>(owner: string, sets: T[]): Promise<string> {
+  const db = await openDrafts();
+  const savedAt = new Date().toISOString();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction('drafts', 'readwrite');
+      tx.objectStore('drafts').put({ owner, sets, savedAt });
+      tx.oncomplete = () => resolve();
+      tx.onabort = () => reject(tx.error);
+    });
+    return savedAt;
+  } finally { db.close(); }
+}
+
+export async function deleteDraft(owner: string): Promise<void> {
   const db = await openDrafts();
   try {
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction('drafts', 'readwrite');
-      tx.objectStore('drafts').put({ owner, sets, savedAt: new Date().toISOString() });
+      tx.objectStore('drafts').delete(owner);
       tx.oncomplete = () => resolve();
       tx.onabort = () => reject(tx.error);
     });

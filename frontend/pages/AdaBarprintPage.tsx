@@ -10,7 +10,7 @@ import {
   parseMasterOrPrintFile,
   triggerFileDownload,
 } from '@/lib/masterImport';
-import { readDraft, writeDraft } from '@/lib/manualDraft';
+import { deleteDraft, readDraft, writeDraft } from '@/lib/manualDraft';
 import {resolveTemplateRoute,manualTemplateProblem} from '@/lib/printProfile';
 import {api as printApi, purposes as printPurposes} from '@/components/autoPrintShared';
 import { MasterDatabaseSettings } from '@/components/MasterDatabaseSettings';
@@ -1387,14 +1387,16 @@ function AdaBarprintWorkspace({
   }, [printSets]);
   const [editingSet, setEditingSet] = useState('');
   const [draftBusy, setDraftBusy] = useState(false);
-  const [hasDraft, setHasDraft] = useState(false);
+  const [savedDraft, setSavedDraft] = useState<{owner: string; date: string} | null>(null);
+  const [deleteDraftOwner, setDeleteDraftOwner] = useState<string | null>(null);
   const draftOwner = JSON.stringify([authUser.id, resolveDefaultBranch()]);
   const pendingJobId = useRef('');
   useEffect(() => {
     let active = true;
-    setHasDraft(false);
+    setSavedDraft(null);
+    setDeleteDraftOwner(null);
     readDraft<ManualPrintSet>(draftOwner).then(draft => {
-      if (active) setHasDraft(Boolean(draft?.sets.length));
+      if (active && draft?.sets.length) setSavedDraft({owner: draftOwner, date: draft.savedAt});
     }).catch(() => {});
     return () => { active = false; };
   }, [draftOwner]);
@@ -1403,8 +1405,8 @@ function AdaBarprintWorkspace({
     setDraftBusy(true);
     try {
       if (printSets.some(set => set.branch !== resolveDefaultBranch())) throw new Error('กรุณาเลือกสาขาเดิมของชุดพิมพ์');
-      await writeDraft(draftOwner, printSets);
-      setHasDraft(true);
+      const date = await writeDraft(draftOwner, printSets);
+      setSavedDraft({owner: draftOwner, date});
       toast.success('บันทึกฉบับร่างในเบราว์เซอร์นี้แล้ว');
     } catch (error) { toast.error(error instanceof Error ? error.message : 'บันทึกฉบับร่างไม่สำเร็จ'); }
     finally { setDraftBusy(false); }
@@ -2589,7 +2591,12 @@ function AdaBarprintWorkspace({
                   <Printer className="h-3.5 w-3.5 mr-1" />{editingSet ? 'ตรวจชุดที่แก้ไข' : 'พิมพ์'}
                 </Button>
                 {editingSet && <Button size="sm" variant="outline" onClick={() => {setEditingSet(''); setPreviewPurpose('basket'); setSendPrintOpen(true);}}>จบการแก้ไขโดยไม่บันทึก</Button>}
-                {hasDraft && !printSets.length && <Button size="sm" variant="outline" disabled={draftBusy} onClick={openDraft}>{draftBusy ? 'กำลังตรวจข้อมูล…' : 'เปิดฉบับร่าง'}</Button>}
+                {savedDraft?.owner === draftOwner && !printSets.length && <div className="flex flex-wrap items-center gap-1">
+                  <Button size="sm" variant="outline" disabled={draftBusy} onClick={openDraft}>
+                    {draftBusy ? 'กำลังตรวจข้อมูล…' : `เปิดฉบับร่าง · บันทึกเมื่อ ${new Date(savedDraft.date).toLocaleString('th-TH', {dateStyle: 'short', timeStyle: 'short'})}`}
+                  </Button>
+                  <Button size="sm" variant="ghost" disabled={draftBusy} onClick={() => setDeleteDraftOwner(draftOwner)}>ลบฉบับร่าง</Button>
+                </div>}
                 {printSets.length > 0 && <Button size="sm" variant="outline" onClick={() => {setPreviewPurpose('basket'); setSendPrintOpen(true);}}>ชุดรอพิมพ์ ({printSets.length})</Button>}
 
                 {/* เมนูจุด 3 จุด (...) สำหรับคำสั่งที่ไม่บ่อย: ซิงค์ข้อมูล, นำเข้า Master, กำหนดเครื่องพิมพ์/ถาด */}
@@ -3296,8 +3303,31 @@ function AdaBarprintWorkspace({
       </div>
 
       {/* ===== Modal: สแกนสินค้า (dcmPrintBarEventGetPdtInTmp) ===== */}
+      <Dialog open={deleteDraftOwner !== null && deleteDraftOwner === draftOwner} onOpenChange={open => { if (!open && !draftBusy) setDeleteDraftOwner(null); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>ลบฉบับร่างที่บันทึกไว้?</DialogTitle>
+            <DialogDescription>ร่างนี้เป็นของผู้ใช้ {authUser.id} สาขา {resolveDefaultBranch()} เมื่อลบแล้วจะเปิดร่างนี้อีกไม่ได้</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" disabled={draftBusy} onClick={() => setDeleteDraftOwner(null)}>ยกเลิก</Button>
+            <Button variant="destructive" disabled={draftBusy} onClick={async () => {
+              if (deleteDraftOwner !== draftOwner) return;
+              setDraftBusy(true);
+              try {
+                await deleteDraft(draftOwner);
+                setSavedDraft(null);
+                setDeleteDraftOwner(null);
+                toast.success('ลบฉบับร่างแล้ว');
+              } catch {
+                toast.error('ลบฉบับร่างไม่สำเร็จ');
+              } finally { setDraftBusy(false); }
+            }}>ยืนยันลบฉบับร่าง</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog open={scanModalOpen} onOpenChange={setScanModalOpen}>
-        <DialogContent className="w-[95vw] sm:max-w-4xl max-h-[90vh]">
+        <DialogContent className="w-[95vw] sm:max-w-4xl max-h-[90dvh] grid-cols-[minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)_auto]">
           <DialogHeader className="bg-[#3d4a57] text-white -mx-6 -mt-6 px-6 py-3 rounded-t-lg">
             <DialogTitle className="text-base font-bold">สแกนสินค้า</DialogTitle>
             <DialogDescription className="text-slate-300 text-xs">
@@ -3305,7 +3335,7 @@ function AdaBarprintWorkspace({
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-3 pt-2">
+          <div className="min-w-0 overflow-y-auto space-y-3 pt-2">
             {/* Top Toolbar inside Scan Modal */}
             <div className="flex flex-wrap items-end justify-between gap-3">
               <div className="w-full sm:w-64 space-y-1">
@@ -3323,7 +3353,7 @@ function AdaBarprintWorkspace({
                 
     </div>
 
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
                 <Button
                   size="sm"
                   variant="outline"
@@ -3341,7 +3371,7 @@ function AdaBarprintWorkspace({
                   value={scanInputBarcode}
                   onChange={e => setScanInputBarcode(e.target.value)}
                   onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); handleScanBarcodeEnter(); } }}
-                  className="w-56 h-8 text-xs"
+                  className="w-56 max-w-full h-8 text-xs"
                 />
                 <Button
                   size="sm"
@@ -3405,7 +3435,7 @@ function AdaBarprintWorkspace({
                           />
                         </TableCell>
                         <TableCell className="text-xs font-mono">{r.pdtCode}</TableCell>
-                        <TableCell className="text-xs">{r.pdtName}</TableCell>
+                        <TableCell className="whitespace-normal break-words text-xs">{r.pdtName}</TableCell>
                         <TableCell className="text-xs font-mono">{r.barCode}</TableCell>
                         <TableCell>
                           <Input
