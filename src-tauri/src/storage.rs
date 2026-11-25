@@ -60,20 +60,21 @@ pub fn is_dir_writable(dir: &Path) -> bool {
         Err(_) => false,
     }
 }
-pub fn print_db_path() -> PathBuf { std::env::var_os("ADABARPRINT_DB_DIR").map(PathBuf::from).unwrap_or_else(||data_root().join("Data")).join("AdaBarprint.db") }
+pub fn print_db_path() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    let dir = PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into()))
+        .join("AdaPos6.0").join("AdaBarprint").join("Data");
+    #[cfg(not(target_os = "windows"))]
+    let dir = std::env::var_os("ADABARPRINT_DB_DIR").map(PathBuf::from)
+        .unwrap_or_else(|| data_root().join("Data"));
+    dir.join("AdaBarprint.db")
+}
 pub fn default_master() -> PathBuf {
     PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| "C:\\ProgramData".into()))
         .join("AdaPos6.0").join("AdaStoreFront").join("Data").join("AdaAccD.db")
 }
 pub fn default_local_master() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    if let Some(program_data) = std::env::var_os("ProgramData") {
-        let installed = PathBuf::from(program_data).join("AdaPos6.0").join("AdaBarprint").join("Data").join("AdaAccD.db");
-        if installed.is_file() {
-            return installed;
-        }
-    }
-    data_root().join("Data").join("AdaAccD.db")
+    print_db_path().with_file_name("AdaAccD.db")
 }
 
 pub fn readonly_uri(path: &Path) -> String {
@@ -468,6 +469,11 @@ mod tests {
             assert_eq!(configured_branch(&pool).await, "00002");
         }
 
+        let rule = r#"{"code":"006","branch":"00002","enabled":true}"#;
+        sqlx::query("INSERT INTO TCNMLabelPrintRule VALUES('price-change',?)").bind(rule).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNTLabelPrintMark VALUES('price-change','barcode','printed')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNSLabelPrintSetting VALUES('ruleSince:price-change','2026-11-24'),('run:price-change','finished')").execute(&pool).await.unwrap();
+
         // 2) Unified save pointing to existing StoreFront POS DB without API URL -> read-only POS attachment automatically
         let res_pos = save_config(state(), Json(Config {
             operator_password:String::new(),
@@ -482,6 +488,9 @@ mod tests {
         assert!(res_pos.status().is_success());
         assert_eq!(crate::standalone::mode(&pool).await, "POS_SHARED");
         assert_eq!(configured_branch(&pool).await, "00001");
+        assert_eq!(sqlx::query_scalar::<_,String>("SELECT FTLprConfigJson FROM TCNMLabelPrintRule WHERE FTLprRuleID='price-change'").fetch_one(&pool).await.unwrap(), rule);
+        assert_eq!(sqlx::query_scalar::<_,String>("SELECT FTLpmPrintHash FROM TCNTLabelPrintMark WHERE FTLpmRuleScope='price-change' AND FTLpmItemKey='barcode'").fetch_one(&pool).await.unwrap(), "printed");
+        assert_eq!(sqlx::query_scalar::<_,String>("SELECT FTLpsValue FROM TCNSLabelPrintSetting WHERE FTLpsCode IN ('ruleSince:price-change','run:price-change') ORDER BY FTLpsCode").fetch_all(&pool).await.unwrap(), ["2026-11-24","finished"]);
         pool.close().await;
     }
 
@@ -795,11 +804,8 @@ pub async fn save_config(State(st):State<AppState>,Json(mut cfg):Json<Config>) -
         }).unwrap_or(true);
         let old:Option<(String,String)>=sqlx::query_as("SELECT FTLstDbPath,FTBchCode FROM TCNSLabelStorage WHERE FNLstID=1").fetch_optional(&mut *tx).await?;
         source_changed |= old.as_ref().map(|v|v.0!=canonical || v.1!=cfg.branch.trim()).unwrap_or(true);
-        if source_changed || old.as_ref().map(|v|v.0!=canonical || v.1!=cfg.branch.trim()).unwrap_or(true) {
-            // Do not carry deduplication or enabled schedules across branch/database boundaries.
-            sqlx::query("UPDATE TCNMLabelPrintRule SET FTLprConfigJson=json_set(FTLprConfigJson,'$.enabled',json('false'))").execute(&mut *tx).await?;
-            sqlx::query("DELETE FROM TCNTLabelPrintMark").execute(&mut *tx).await?;
-            sqlx::query("DELETE FROM TCNSLabelPrintSetting WHERE FTLpsCode LIKE 'ruleSince:%' OR FTLpsCode LIKE 'run:%'").execute(&mut *tx).await?;
+        if source_changed {
+            // Sessions belong to the selected identity source; print state belongs to its profiles.
             sqlx::query("DELETE FROM TCNTLabelAuthSession").execute(&mut *tx).await?;
         }
         sqlx::query("INSERT INTO TCNSLabelStorage(FNLstID,FTLstDbPath,FTBchCode,FNLstMaxAgeMin) VALUES(1,?,?,?) ON CONFLICT(FNLstID) DO UPDATE SET FTLstDbPath=excluded.FTLstDbPath,FTBchCode=excluded.FTBchCode,FNLstMaxAgeMin=excluded.FNLstMaxAgeMin")
