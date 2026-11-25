@@ -1,4 +1,4 @@
-import { prepareThermalBarcodes } from '@/lib/thermalBarcode';
+import { BarcodeResolutionError, prepareThermalBarcodes } from '@/lib/thermalBarcode';
 
 async function toDataUrl(src: string): Promise<string> {
   if (!src || src.startsWith('data:')) return src;
@@ -54,11 +54,19 @@ export async function capturePagesToPngBase64(
         }
       })
     );
-    const outputWidth = godexRoll ? Math.round(paperWidthMm * 203 / 25.4) : wPx * 2;
-    const outputHeight = godexRoll ? Math.round(paperHeightMm * 203 / 25.4) : hPx * 2;
+    let dpi = godexRoll ? 203 : 192;
+    let paintBarcodes: ReturnType<typeof prepareThermalBarcodes>;
+    try {
+      paintBarcodes = prepareThermalBarcodes(el, clone, dpi);
+    } catch (error) {
+      if (godexRoll || !(error instanceof BarcodeResolutionError)) throw error;
+      dpi = 384;
+      paintBarcodes = prepareThermalBarcodes(el, clone, dpi);
+    }
     const viewportWidth = godexRoll ? paperWidthMm * 96 / 25.4 : wPx;
     const viewportHeight = godexRoll ? paperHeightMm * 96 / 25.4 : hPx;
-    const paintBarcodes = prepareThermalBarcodes(el, clone, godexRoll ? 203 : 192);
+    const outputWidth = Math.round(viewportWidth * dpi / 96);
+    const outputHeight = Math.round(viewportHeight * dpi / 96);
     const serialized = new XMLSerializer().serializeToString(clone);
     const svgXml = `<svg xmlns="http://www.w3.org/2000/svg" width="${outputWidth}" height="${outputHeight}" viewBox="0 0 ${viewportWidth} ${viewportHeight}" preserveAspectRatio="none"><foreignObject x="0" y="0" width="100%" height="100%">${serialized}</foreignObject></svg>`;
     const svgUrl = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgXml);

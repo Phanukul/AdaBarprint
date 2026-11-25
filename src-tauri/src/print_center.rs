@@ -1126,14 +1126,11 @@ pub async fn recover(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 async fn worker_tick(pool: &SqlitePool) -> Result<()> {
-    let head:Option<(String,String,String,String)>=sqlx::query_as("SELECT FTLqjJobID,FTLqjStatus,FTLqjConfigJson,FTLqjSource FROM TCNTLabelQueueJob WHERE FTLqjStatus NOT IN ('SUBMITTED','EMPTY','NO_MATCH','ALREADY_SUBMITTED','FAILED','CANCELLED') ORDER BY FNLqjSeq LIMIT 1")
+    let head:Option<(String,String,String,String)>=sqlx::query_as("SELECT FTLqjJobID,FTLqjStatus,FTLqjConfigJson,FTLqjSource FROM TCNTLabelQueueJob WHERE FTLqjStatus IN ('WAIT_DATA','QUEUED') ORDER BY FNLqjSeq LIMIT 1")
       .fetch_optional(pool).await.map_err(|e|e.to_string())?;
     let Some((id, status, config, source)) = head else {
         return Ok(());
     };
-    if ["BLOCKED", "NEEDS_REVIEW"].contains(&status.as_str()) {
-        return Ok(());
-    }
     if status == "WAIT_DATA" {
         if !fresh(pool).await {
             return Ok(());
@@ -1324,6 +1321,8 @@ mod tests {
             assert!(tokio::time::timeout(Duration::from_millis(150), listener.accept()).await.is_err());
             received
         });
+        let parked = insert_job(&p, "PROFILE", "006", json!({"code":"006"}), None,
+            "NEEDS_REVIEW", vec![]).await.unwrap();
         let mut ids = vec![];
         for (source, command) in [("MANUAL", "manual-test"), ("PROFILE", "profile-test")] {
             ids.push(insert_job(&p,source,"test",Value::Null,None,"QUEUED",
@@ -1332,6 +1331,7 @@ mod tests {
         for _ in 0..5 { worker_tick(&p).await.unwrap(); }
         let received = tokio::time::timeout(Duration::from_secs(5),receiver).await.unwrap().unwrap();
         assert_eq!(received,vec!["manual-test","profile-test"]);
+        assert_eq!(status(&p,&parked).await,"NEEDS_REVIEW");
         for id in ids { assert_eq!(status(&p,&id).await,"SUBMITTED"); }
         p.close().await;
     }
@@ -1413,7 +1413,7 @@ mod tests {
             .unwrap()
     }
     #[tokio::test]
-    async fn fifo_blocks_b_until_a_is_explicitly_cancelled() {
+    async fn parked_job_can_be_cancelled_after_later_job_finishes() {
         let p = fixture().await;
         let a = insert_job(&p, "AUTO", "A", json!({}), None, "BLOCKED", vec![])
             .await
@@ -1422,7 +1422,8 @@ mod tests {
             .await
             .unwrap();
         worker_tick(&p).await.unwrap();
-        assert_eq!(status(&p, &b).await, "QUEUED");
+        assert_eq!(status(&p, &b).await, "SUBMITTED");
+        assert_eq!(status(&p, &a).await, "BLOCKED");
         let res = queue_action(
             State(AppState { pool: p.clone() }),
             Json(json!({"id":a,"action":"CANCEL"})),
@@ -1865,11 +1866,6 @@ pub async fn execute_profile_cli(pool: &SqlitePool, profile_code_or_id: &str) ->
             "NEEDS_REVIEW" | "BLOCKED" | "CANCELLED" =>
                 return Err(format!("งาน {job}: {status}: {}", error.unwrap_or_default())),
             _ => {}
-        }
-        let blocker: Option<String> = sqlx::query_scalar("SELECT FTLqjJobID FROM TCNTLabelQueueJob WHERE FNLqjSeq < (SELECT FNLqjSeq FROM TCNTLabelQueueJob WHERE FTLqjJobID=?) AND FTLqjStatus IN ('BLOCKED','NEEDS_REVIEW') ORDER BY FNLqjSeq LIMIT 1")
-            .bind(&job).fetch_optional(pool).await.map_err(|e|e.to_string())?;
-        if let Some(blocker) = blocker {
-            return Err(format!("งาน {job} อยู่ในคิวแล้ว แต่รอตรวจสอบงานก่อนหน้า {blocker}; อย่าเรียกซ้ำ ให้จัดการในคิวงานพิมพ์"));
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(format!("หมดเวลารอ งาน {job} ยังอยู่ในคิว ตรวจสอบสถานะก่อนเรียกซ้ำ"));

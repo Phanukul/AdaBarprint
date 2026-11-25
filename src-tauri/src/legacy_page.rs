@@ -33,6 +33,11 @@ pub async fn render(size: &TCNMLabelSize, contexts: &[Value], printer: &str, des
         let output = tokio::time::timeout(Duration::from_secs(60), cmd.output()).await
             .map_err(|_| "สร้างภาพป้ายเดิมเกินเวลา".to_string())?.map_err(|e|e.to_string())?;
         let dom = String::from_utf8_lossy(&output.stdout);
+        if let Some((_, tail)) = dom.split_once(r#"<output id="render-error">"#) {
+            if let Some((reason, _)) = tail.split_once("</output>") {
+                return Err(format!("สร้างภาพป้ายไม่สำเร็จ: {}", reason));
+            }
+        }
         let png = dom.split_once("<output>").and_then(|(_,s)|s.split_once("</output>"))
             .map(|(s,_)|s).filter(|s|s.starts_with("data:image/png;base64,iVBOR"));
         png.filter(|_|output.status.success()).map(str::to_owned).ok_or_else(||"สร้างภาพป้ายเดิมไม่สำเร็จ".into())

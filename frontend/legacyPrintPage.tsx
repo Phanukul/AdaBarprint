@@ -30,4 +30,9 @@ async function render() {
   const [image] = await capturePagesToPngBase64('page', pw, ph, thermal);
   if (image) document.body.innerHTML = '<output>'+image+'</output>';
 }
-void render();
+void render().catch(error => {
+  const message = document.createElement('output');
+  message.id = 'render-error';
+  message.textContent = error instanceof Error ? error.message : String(error);
+  document.body.replaceChildren(message);
+});

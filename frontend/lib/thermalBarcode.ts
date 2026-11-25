@@ -1,5 +1,7 @@
 import JsBarcode from 'jsbarcode';
 
+export class BarcodeResolutionError extends Error {}
+
 // Build the bars on the thermal head's dot grid, including quiet zones.
 export function prepareThermalBarcodes(sheet: HTMLElement, clone: HTMLElement, dpi: number) {
   const selector = 'svg[data-barcode-value]';
@@ -45,7 +47,7 @@ export function prepareThermalBarcodes(sheet: HTMLElement, clone: HTMLElement, d
     const moduleSize = (data: string) => Math.floor(width / (data.length + 2 * quiet));
     if (format === 'CODE39' && moduleSize(bits) < 2) bits = encode('CODE128');
     const dots = moduleSize(bits);
-    if (dots < 1 || height < 1) throw new Error(`พื้นที่บาร์โค้ดแคบเกินไปสำหรับ ${value} กรุณาขยายช่องบาร์โค้ด`);
+    if (dots < 1 || height < 1) throw new BarcodeResolutionError(`พื้นที่บาร์โค้ดแคบเกินไปสำหรับ ${value} กรุณาขยายช่องบาร์โค้ด`);
     // Keep the SVG's layout box, but only paint the dot-aligned bars once.
     clonedCodes[index].style.visibility = 'hidden';
     symbols.push({ x, y, width, height, dots, bits });
