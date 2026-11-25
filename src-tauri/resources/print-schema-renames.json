@@ -1,0 +1,105 @@
+[
+  {
+    "old": "ABPrintJob",
+    "new": "TCNTLabelQueueJob",
+    "columns": {
+      "seq": "FNLqjSeq",
+      "id": "FTLqjJobID",
+      "dedup": "FTLqjDedupKey",
+      "source": "FTLqjSource",
+      "name": "FTLqjName",
+      "status": "FTLqjStatus",
+      "created": "FDCreateOn",
+      "config": "FTLqjConfigJson",
+      "error": "FTLqjError",
+      "completed": "FNLqjQtySent",
+      "total": "FNLqjQtyTotal"
+    }
+  },
+  {
+    "old": "ABPrintUnit",
+    "new": "TCNTLabelQueueUnit",
+    "columns": {
+      "job": "FTLqjJobID",
+      "seq": "FNLquSeq",
+      "kind": "FTLquKind",
+      "payload": "FTLquPayloadJson",
+      "status": "FTLquStatus",
+      "error": "FTLquError"
+    }
+  },
+  {
+    "old": "ABPrintRule",
+    "new": "TCNMLabelPrintRule",
+    "columns": {
+      "id": "FTLprRuleID",
+      "config": "FTLprConfigJson"
+    }
+  },
+  {
+    "old": "ABPrintSetting",
+    "new": "TCNSLabelPrintSetting",
+    "columns": {
+      "id": "FTLpsCode",
+      "value": "FTLpsValue"
+    }
+  },
+  {
+    "old": "ABPrintWatermark",
+    "new": "TCNTLabelPrintMark",
+    "columns": {
+      "rule": "FTLpmRuleScope",
+      "barcode": "FTLpmItemKey",
+      "hash": "FTLpmPrintHash"
+    }
+  },
+  {
+    "old": "ABPrintAudit",
+    "new": "TCNTLabelQueueAudit",
+    "columns": {
+      "id": "FNLqaSeq",
+      "job": "FTLqjJobID",
+      "action": "FTLqaAction",
+      "created": "FDCreateOn"
+    }
+  },
+  {
+    "old": "ABPrintHistory",
+    "new": "TCNTLabelQueueHistory",
+    "columns": {
+      "job": "FTLqjJobID",
+      "finished": "FDLqhFinishedOn",
+      "destinations": "FTLqhDestJson"
+    }
+  },
+  {
+    "old": "ABStorage",
+    "new": "TCNSLabelStorage",
+    "columns": {
+      "id": "FNLstID",
+      "path": "FTLstDbPath",
+      "branch": "FTBchCode",
+      "max_age_minutes": "FNLstMaxAgeMin"
+    }
+  },
+  {
+    "old": "ABSource",
+    "new": "TCNSLabelSource",
+    "columns": {
+      "id": "FNLsoID",
+      "mode": "FTLsoMode",
+      "config": "FTLsoConfigJson",
+      "status": "FTLsoStatus",
+      "last_success": "FDLsoLastSuccess",
+      "lease_until": "FNLsoLeaseUntilUnix"
+    }
+  },
+  {
+    "old": "ABAdminGrant",
+    "new": "TCNTLabelAdminGrant",
+    "columns": {
+      "token_hash": "FTLagTokenHash",
+      "expires": "FNLagExpiresUnix"
+    }
+  }
+]

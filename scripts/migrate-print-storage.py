@@ -10,6 +10,7 @@ import json
 import pathlib
 import sqlite3
 from datetime import datetime
+from print_schema import TABLES as RENAMES, rename_schema, table_names
 
 TABLES = (
     'TCNMPrinterServer', 'TCNSSysOption', 'TCNMPaperSize', 'TCNMPreprint',
@@ -17,7 +18,7 @@ TABLES = (
     'TCNMPdtLabel', 'TCNTLabelJob', 'TCNTLabelJobDt', 'TCNTLabelLog',
     'TCNTLabelSchedule', 'TCNTLabelSchedRun', 'TCNTLabelSchedQueue',
     'TCNTLabelSchedWatermark', 'ABPrintRule', 'ABPrintSetting', 'ABPrintJob',
-    'ABPrintUnit', 'ABPrintWatermark', 'ABPrintAudit',
+    'ABPrintUnit', 'ABPrintWatermark', 'ABPrintAudit', 'ABPrintHistory',
 )
 RETIRED_OPTIONS = ('MasterApiUrl', 'MasterApiKey', 'MasterAgnCode', 'MasterBchCode', 'MasterPosCode', 'AutoPrintRetryWaitSec')
 
@@ -52,7 +53,7 @@ def migrate(source, target):
     report = {}
     try:
         dst.execute('BEGIN IMMEDIATE')
-        for table in TABLES:
+        for table in (*TABLES, *(entry['new'] for entry in RENAMES if entry['old'] in TABLES)):
             ddl = snap.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
             if not ddl:
                 continue
@@ -68,13 +69,15 @@ def migrate(source, target):
                 dst.execute(index)
         if 'TCNSSysOption' in report:
             dst.executemany('DELETE FROM TCNSSysOption WHERE FTSopCode=?', [(x,) for x in RETIRED_OPTIONS])
-        if 'ABPrintSetting' in report:
-            dst.execute("DELETE FROM ABPrintSetting WHERE id LIKE 'sync%' OR id='heartbeat'")
-        if 'ABPrintRule' in report:
-            for key, raw in dst.execute('SELECT id,config FROM ABPrintRule').fetchall():
+        rename_schema(dst)
+        present = table_names(dst)
+        if 'TCNSLabelPrintSetting' in present:
+            dst.execute("DELETE FROM TCNSLabelPrintSetting WHERE FTLpsCode LIKE 'sync%' OR FTLpsCode='heartbeat'")
+        if 'TCNMLabelPrintRule' in present:
+            for key, raw in dst.execute('SELECT FTLprRuleID,FTLprConfigJson FROM TCNMLabelPrintRule').fetchall():
                 rule = json.loads(raw)
                 rule['enabled'] = False
-                dst.execute('UPDATE ABPrintRule SET config=? WHERE id=?', (json.dumps(rule, ensure_ascii=False), key))
+                dst.execute('UPDATE TCNMLabelPrintRule SET FTLprConfigJson=? WHERE FTLprRuleID=?', (json.dumps(rule, ensure_ascii=False), key))
         if 'TCNTLabelSchedule' in report:
             dst.execute("UPDATE TCNTLabelSchedule SET FTLscStaUse='2', FTLscSyncMode='STOREFRONT'")
         if dst.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':

@@ -97,7 +97,7 @@ pub async fn connect() -> Result<SqlitePool, sqlx::Error> {
     connect_path(&print_db_path()).await
 }
 
-pub const PRINT_SCHEMA_REVISION: i64 = 20261121;
+pub const PRINT_SCHEMA_REVISION: i64 = 20261125;
 
 /// Snapshot only the print-owned database; VACUUM INTO includes committed WAL
 /// data and does not require copying a live SQLite file or touching StoreFront.
@@ -122,6 +122,42 @@ pub async fn backup_before_upgrade(path: &Path) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+#[derive(serde::Deserialize)]
+struct PrintTableRename {
+    old: String,
+    new: String,
+    columns: std::collections::BTreeMap<String, String>,
+}
+
+async fn migrate_print_names(db: &mut SqliteConnection) -> Result<(), sqlx::Error> {
+    let names: Vec<PrintTableRename> = serde_json::from_str(include_str!("../resources/print-schema-renames.json"))
+        .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+    let mut tx = db.begin_with("BEGIN IMMEDIATE").await?;
+    for table in names {
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)")
+            .bind(&table.old).fetch_one(&mut *tx).await?;
+        if exists {
+            sqlx::query(&format!("ALTER TABLE [{}] RENAME TO [{}]", table.old, table.new)).execute(&mut *tx).await?;
+            for (old, new) in table.columns {
+                sqlx::query(&format!("ALTER TABLE [{}] RENAME COLUMN [{}] TO [{}]", table.new, old, new)).execute(&mut *tx).await?;
+            }
+        }
+    }
+    for (kind, old, new) in [
+        ("INDEX", "ABPrintRuleCode", "TCNMLabelPrintRuleCode"),
+        ("INDEX", "ABPrintHistoryDue", "TCNTLabelQueueHistoryDue"),
+        ("TRIGGER", "ABPrintHistoryFinished", "TCNTLabelQueueHistoryFinished"),
+    ] {
+        let ddl: Option<String> = sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name=?")
+            .bind(old).fetch_optional(&mut *tx).await?;
+        if let Some(ddl) = ddl {
+            sqlx::query(&format!("DROP {kind} [{old}]")).execute(&mut *tx).await?;
+            sqlx::query(&ddl.replacen(old, new, 1)).execute(&mut *tx).await?;
+        }
+    }
+    tx.commit().await
+}
+
 pub async fn connect_path(path: &Path) -> Result<SqlitePool, sqlx::Error> {
     let options = SqliteConnectOptions::new().filename(path).create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal).busy_timeout(Duration::from_secs(5));
@@ -134,8 +170,9 @@ pub async fn connect_path(path: &Path) -> Result<SqlitePool, sqlx::Error> {
     if !encoding.eq_ignore_ascii_case("UTF-16le") {
         return Err(sqlx::Error::Protocol("AdaBarprint.db ต้องย้ายเป็น UTF-16LE ก่อนใช้ Master ของ StoreFront".into()));
     }
-    sqlx::query("CREATE TABLE IF NOT EXISTS ABStorage(id INTEGER PRIMARY KEY CHECK(id=1), path TEXT NOT NULL, branch TEXT NOT NULL, max_age_minutes INTEGER NOT NULL DEFAULT 1440)").execute(&mut bootstrap).await?;
-    sqlx::query("CREATE TABLE IF NOT EXISTS ABSource(id INTEGER PRIMARY KEY CHECK(id=1), mode TEXT NOT NULL DEFAULT 'POS_SHARED', config TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT '', last_success TEXT NOT NULL DEFAULT '', lease_until INTEGER NOT NULL DEFAULT 0)").execute(&mut bootstrap).await?;
+    migrate_print_names(&mut bootstrap).await?;
+    sqlx::query("CREATE TABLE IF NOT EXISTS TCNSLabelStorage(FNLstID INTEGER PRIMARY KEY CHECK(FNLstID=1), FTLstDbPath TEXT NOT NULL, FTBchCode TEXT NOT NULL, FNLstMaxAgeMin INTEGER NOT NULL DEFAULT 1440)").execute(&mut bootstrap).await?;
+    sqlx::query("CREATE TABLE IF NOT EXISTS TCNSLabelSource(FNLsoID INTEGER PRIMARY KEY CHECK(FNLsoID=1), FTLsoMode TEXT NOT NULL DEFAULT 'POS_SHARED', FTLsoConfigJson TEXT NOT NULL DEFAULT '{}', FTLsoStatus TEXT NOT NULL DEFAULT '', FDLsoLastSuccess TEXT NOT NULL DEFAULT '', FNLsoLeaseUntilUnix INTEGER NOT NULL DEFAULT 0)").execute(&mut bootstrap).await?;
     bootstrap.close().await?;
     SqlitePoolOptions::new().max_connections(8)
         .after_connect(|c, _| Box::pin(async move { refresh_attachment(c).await }))
@@ -144,10 +181,10 @@ pub async fn connect_path(path: &Path) -> Result<SqlitePool, sqlx::Error> {
 }
 
 async fn refresh_attachment(c: &mut SqliteConnection) -> Result<(), sqlx::Error> {
-    let cfg: Option<(String, String)> = sqlx::query_as("SELECT path,branch FROM main.ABStorage WHERE id=1").fetch_optional(&mut *c).await?;
+    let cfg: Option<(String, String)> = sqlx::query_as("SELECT FTLstDbPath,FTBchCode FROM main.TCNSLabelStorage WHERE FNLstID=1").fetch_optional(&mut *c).await?;
     let attached: Vec<(i64,String,String)> = sqlx::query_as("PRAGMA database_list").fetch_all(&mut *c).await?;
     let current = attached.iter().find(|r| r.1 == "master").map(|r| r.2.as_str());
-    let standalone_ready:Option<(String,String)>=sqlx::query_as("SELECT mode,last_success FROM main.ABSource WHERE id=1").fetch_optional(&mut *c).await?;
+    let standalone_ready:Option<(String,String)>=sqlx::query_as("SELECT FTLsoMode,FDLsoLastSuccess FROM main.TCNSLabelSource WHERE FNLsoID=1").fetch_optional(&mut *c).await?;
     let ready=standalone_ready.map(|(m,last)|m!="STANDALONE"||!last.is_empty()).unwrap_or(true);
     let wanted = cfg.as_ref().map(|r| r.0.as_str()).filter(|p| ready && Path::new(p).is_file());
     let same = match (current,wanted) {
@@ -185,8 +222,8 @@ async fn refresh_attachment(c: &mut SqliteConnection) -> Result<(), sqlx::Error>
                 }).collect::<Vec<_>>().join(",")
             } else {"*".into()};
             let filter=if table=="TCNTPmtHD" && has("FTAgnCode") && branch_has_agency>0 {
-                " WHERE COALESCE(FTAgnCode,'')='' OR FTAgnCode=COALESCE((SELECT NULLIF(TRIM(b.FTAgnCode),'') FROM master.TCNMBranch b JOIN main.ABStorage s ON s.branch=b.FTBchCode WHERE s.id=1),FTAgnCode)"
-            } else if has("FTBchCode") {" WHERE COALESCE(FTBchCode,'')='' OR FTBchCode=(SELECT branch FROM main.ABStorage WHERE id=1)"} else {""};
+                " WHERE COALESCE(FTAgnCode,'')='' OR FTAgnCode=COALESCE((SELECT NULLIF(TRIM(b.FTAgnCode),'') FROM master.TCNMBranch b JOIN main.TCNSLabelStorage s ON s.FTBchCode=b.FTBchCode WHERE s.FNLstID=1),FTAgnCode)"
+            } else if has("FTBchCode") {" WHERE COALESCE(FTBchCode,'')='' OR FTBchCode=(SELECT FTBchCode FROM main.TCNSLabelStorage WHERE FNLstID=1)"} else {""};
             sqlx::query(&format!("CREATE TEMP VIEW IF NOT EXISTS \"{table}\" AS SELECT {projection} FROM master.\"{table}\"{filter}")).execute(&mut *c).await?;
         }
     }
@@ -226,7 +263,7 @@ pub async fn validate(path: &str) -> Result<Value, String> {
 }
 
 pub async fn configured_branch(pool: &SqlitePool) -> String {
-    sqlx::query_scalar("SELECT branch FROM main.ABStorage WHERE id=1").fetch_optional(pool).await.ok().flatten().unwrap_or_default()
+    sqlx::query_scalar("SELECT FTBchCode FROM main.TCNSLabelStorage WHERE FNLstID=1").fetch_optional(pool).await.ok().flatten().unwrap_or_default()
 }
 
 pub async fn master_revision(pool: &SqlitePool) -> String {
@@ -235,7 +272,7 @@ pub async fn master_revision(pool: &SqlitePool) -> String {
 }
 
 pub async fn auto_ready(pool: &SqlitePool) -> bool {
-    let age:i64 = sqlx::query_scalar("SELECT max_age_minutes FROM main.ABStorage WHERE id=1").fetch_optional(pool).await.ok().flatten().unwrap_or(1440);
+    let age:i64 = sqlx::query_scalar("SELECT FNLstMaxAgeMin FROM main.TCNSLabelStorage WHERE FNLstID=1").fetch_optional(pool).await.ok().flatten().unwrap_or(1440);
     let rows:Vec<(String,String)> = sqlx::query_as("SELECT FTSynTable,FDSynLastSuccess FROM master.TSysSyncTaskDownload").fetch_all(pool).await.unwrap_or_default();
     // Missing checkpoint is unknown, not successful. StoreFront owns these records.
     ["TCNMPdt", "TCNTPdtPrice4PDT"].iter().all(|table| rows.iter().any(|(t,s)| {
@@ -247,7 +284,7 @@ pub async fn auto_ready(pool: &SqlitePool) -> bool {
 }
 
 pub async fn promo_ready(pool: &SqlitePool) -> bool {
-    let age:i64=sqlx::query_scalar("SELECT max_age_minutes FROM main.ABStorage WHERE id=1").fetch_optional(pool).await.ok().flatten().unwrap_or(1440);
+    let age:i64=sqlx::query_scalar("SELECT FNLstMaxAgeMin FROM main.TCNSLabelStorage WHERE FNLstID=1").fetch_optional(pool).await.ok().flatten().unwrap_or(1440);
     let rows:Vec<String>=sqlx::query_scalar("SELECT FDSynLastSuccess FROM master.TSysSyncTaskDownload WHERE FTSynTable IN ('TCNTPmtHD','TCNTPdtPmtHD')").fetch_all(pool).await.unwrap_or_default();
     rows.iter().any(|s| chrono::DateTime::parse_from_rfc3339(s).ok().map(|d|(chrono::Utc::now()-d.with_timezone(&chrono::Utc)).num_seconds())
         .or_else(||chrono::NaiveDateTime::parse_from_str(s,"%Y-%m-%d %H:%M:%S").ok().map(|d|(chrono::Local::now().naive_local()-d).num_seconds()))
@@ -309,16 +346,16 @@ mod tests {
     #[tokio::test]
     async fn master_is_readonly_and_print_tables_remain_local() {
         let (_root,master,pool)=fixture().await;
-        sqlx::query("INSERT INTO ABStorage VALUES(1,?,'00001',1440)").bind(master.to_str().unwrap()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNSLabelStorage VALUES(1,?,'00001',1440)").bind(master.to_str().unwrap()).execute(&pool).await.unwrap();
         crate::db::ensure_label_schema(&pool).await.unwrap();
         crate::print_center::ensure_schema(&pool).await.unwrap();
         let product:String=sqlx::query_scalar("SELECT FTPdtCode FROM TCNMPdt").fetch_one(&pool).await.unwrap();
         assert_eq!(product,"P1");
         assert!(sqlx::query("DELETE FROM TCNMPdt").execute(&pool).await.is_err());
         assert!(sqlx::query("CREATE TABLE master.Unwanted(x)").execute(&pool).await.is_err());
-        sqlx::query("INSERT INTO ABPrintSetting VALUES('test','ok')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNSLabelPrintSetting VALUES('test','ok')").execute(&pool).await.unwrap();
         let copied:i64=sqlx::query_scalar("SELECT COUNT(*) FROM main.sqlite_master WHERE name='TCNMPdt'").fetch_one(&pool).await.unwrap();
-        let leaked:i64=sqlx::query_scalar("SELECT COUNT(*) FROM master.sqlite_master WHERE name LIKE 'ABPrint%' OR name LIKE 'TCNMLabel%'").fetch_one(&pool).await.unwrap();
+        let leaked:i64=sqlx::query_scalar("SELECT COUNT(*) FROM master.sqlite_master WHERE name LIKE 'TCNTLabelQueue%' OR name LIKE 'TCNMLabel%'").fetch_one(&pool).await.unwrap();
         assert_eq!((copied,leaked),(0,0));
         assert!(!auto_ready(&pool).await,"No checkpoint must not authorize auto");
         pool.close().await;
@@ -327,8 +364,8 @@ mod tests {
     async fn missing_master_does_not_create_file_or_block_local_settings() {
         let (root,_master,pool)=fixture().await;
         let missing=root.join("missing.db");
-        sqlx::query("INSERT INTO ABStorage VALUES(1,?,'00001',1440)").bind(missing.to_str().unwrap()).execute(&pool).await.unwrap();
-        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM ABStorage").fetch_one(&pool).await.unwrap(),1);
+        sqlx::query("INSERT INTO TCNSLabelStorage VALUES(1,?,'00001',1440)").bind(missing.to_str().unwrap()).execute(&pool).await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNSLabelStorage").fetch_one(&pool).await.unwrap(),1);
         assert!(!missing.exists());
         assert!(validate(missing.to_str().unwrap()).await.is_err());
         pool.close().await;
@@ -342,7 +379,7 @@ mod tests {
     #[tokio::test]
     async fn print_connections_observe_storefront_updates_without_copying_master() {
         let (_root,master,pool)=fixture().await;
-        sqlx::query("INSERT INTO ABStorage VALUES(1,?,'00001',1440)").bind(master.to_str().unwrap()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNSLabelStorage VALUES(1,?,'00001',1440)").bind(master.to_str().unwrap()).execute(&pool).await.unwrap();
         assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNMPdt").fetch_one(&pool).await.unwrap(),1);
         let mut writer=SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&master)).await.unwrap();
         sqlx::query("INSERT INTO TCNMPdt VALUES('P2')").execute(&mut writer).await.unwrap();
@@ -354,7 +391,7 @@ mod tests {
         let (_root,master,pool)=fixture().await;
         let mut writer=SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&master)).await.unwrap();
         sqlx::raw_sql("ALTER TABLE TCNTPdtPrice4PDT ADD COLUMN FTBchCode TEXT; ALTER TABLE TCNTPdtPrice4PDT ADD COLUMN FCPgdPrice REAL; ALTER TABLE TCNTPdtPrice4PDT ADD COLUMN FDPghEffectiveStart TEXT; ALTER TABLE TCNTPdtPrice4PDT ADD COLUMN FDPghEffectiveStop TEXT; INSERT INTO TCNTPdtPrice4PDT VALUES('P1',10,'2020-01-01','2099-01-01','00001',12,'2026-11-20','2026-11-21'); INSERT INTO TCNTPdtPrice4PDT VALUES('P1',20,'2020-01-01','2099-01-01','00002',22,'2026-11-20','2026-11-21');").execute(&mut writer).await.unwrap();
-        sqlx::query("INSERT INTO ABStorage VALUES(1,?,'00001',1440)").bind(master.to_str().unwrap()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNSLabelStorage VALUES(1,?,'00001',1440)").bind(master.to_str().unwrap()).execute(&pool).await.unwrap();
         let rows:Vec<(f64,String)>=sqlx::query_as("SELECT FCPgdPriceRet,FDPghDStart FROM TCNTPdtPrice4PDT").fetch_all(&pool).await.unwrap();
         assert_eq!(rows,vec![(12.0,"2026-11-20".into())]);
         assert!(sqlx::query("UPDATE TCNTPdtPrice4PDT SET FCPgdPriceRet=99").execute(&pool).await.is_err());
@@ -372,10 +409,10 @@ mod tests {
         let config=|pin:&str|Config{operator_password:String::new(),mode:"POS_SHARED".into(),sync:None,path:master.to_string_lossy().into_owned(),branch:"00001".into(),max_age_minutes:1440,pin:pin.into(),new_pin:String::new()};
         let state=||State(AppState{pool:pool.clone()});
         assert_eq!(save_config(state(),Json(config("wrong"))).await.status(),StatusCode::UNAUTHORIZED);
-        sqlx::query("INSERT INTO ABPrintJob(id,source,name,status,created,config) VALUES('hold','MANUAL','hold','QUEUED','now','{}')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNTLabelQueueJob(FTLqjJobID,FTLqjSource,FTLqjName,FTLqjStatus,FDCreateOn,FTLqjConfigJson) VALUES('hold','MANUAL','hold','QUEUED','now','{}')").execute(&pool).await.unwrap();
         assert_eq!(save_config(state(),Json(config("test-pin"))).await.status(),StatusCode::BAD_REQUEST);
         assert!(configured_branch(&pool).await.is_empty());
-        sqlx::query("UPDATE ABPrintJob SET status='CANCELLED'").execute(&pool).await.unwrap();
+        sqlx::query("UPDATE TCNTLabelQueueJob SET FTLqjStatus='CANCELLED'").execute(&pool).await.unwrap();
         assert!(save_config(state(),Json(config("test-pin"))).await.status().is_success());
         assert_eq!(configured_branch(&pool).await,"00001");
         assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM master.TCNMPdt").fetch_one(&pool).await.unwrap(),1);
@@ -455,7 +492,7 @@ mod tests {
         crate::standalone::create_master(&master).await.unwrap();
         crate::db::ensure_label_schema(&pool).await.unwrap();
         crate::print_center::ensure_schema(&pool).await.unwrap();
-        sqlx::query("INSERT INTO ABStorage VALUES(1,?,'00001',1440)").bind(master.to_str().unwrap()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNSLabelStorage VALUES(1,?,'00001',1440)").bind(master.to_str().unwrap()).execute(&pool).await.unwrap();
         for source in ["PRICE_CHG","PROMO_START","PROMO_END_REVERT","NEW_PDT"] {
             let body=crate::print_center::ManualCandidates{source:source.into(),date:"2026-11-20".into(),size:"SH-100x38".into(),quantity:1};
             let response=crate::print_center::manual_candidates(State(AppState{pool:pool.clone()}),Json(body)).await;
@@ -463,8 +500,8 @@ mod tests {
             assert!(status.is_success(),"{source}: {}",String::from_utf8_lossy(&bytes));
             assert!(serde_json::from_slice::<Value>(&bytes).unwrap()["lines"].is_array());
         }
-        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM ABPrintJob").fetch_one(&pool).await.unwrap(),0);
-        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM ABPrintRule").fetch_one(&pool).await.unwrap(),0);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNTLabelQueueJob").fetch_one(&pool).await.unwrap(),0);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNMLabelPrintRule").fetch_one(&pool).await.unwrap(),0);
         pool.close().await;
     }
 
@@ -483,7 +520,7 @@ mod tests {
         crate::db::ensure_label_schema(&pool).await.unwrap();
         crate::print_center::ensure_schema(&pool).await.unwrap();
         crate::auth::ensure_auth_schema(&pool).await.unwrap();
-        sqlx::query("INSERT OR REPLACE INTO ABStorage VALUES(1,?,'00005',1440)").bind(master.to_str().unwrap()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT OR REPLACE INTO TCNSLabelStorage VALUES(1,?,'00005',1440)").bind(master.to_str().unwrap()).execute(&pool).await.unwrap();
         let router=crate::build_router(pool.clone());
         for path in ["/api/seed","/api/branches","/api/config/all","/api/templates","/api/products?limit=5","/api/promotions","/api/auth/login-options","/api/auth/users","/api/print-center"] {
             let response=router.clone().oneshot(axum::http::Request::builder().uri(path).body(axum::body::Body::empty()).unwrap()).await.unwrap();
@@ -502,18 +539,18 @@ mod tests {
         let response=router.clone().oneshot(axum::http::Request::builder().method("POST").uri("/api/print/build-line").header("content-type","application/json").body(axum::body::Body::from(request.to_string())).unwrap()).await.unwrap();
         let code=response.status();let bytes=axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
         assert!(code.is_success(),"manual preparation: {}",String::from_utf8_lossy(&bytes));
-        let raw:String=sqlx::query_scalar("SELECT config FROM ABPrintRule ORDER BY id LIMIT 1").fetch_one(&pool).await.unwrap();
+        let raw:String=sqlx::query_scalar("SELECT FTLprConfigJson FROM TCNMLabelPrintRule ORDER BY FTLprRuleID LIMIT 1").fetch_one(&pool).await.unwrap();
         let mut rule:Value=serde_json::from_str(&raw).unwrap();rule["branch"]=json!("00005");
         let response=router.clone().oneshot(axum::http::Request::builder().method("POST").uri("/api/print-center/preview").header("content-type","application/json").body(axum::body::Body::from(rule.to_string())).unwrap()).await.unwrap();
         let code=response.status();let bytes=axum::body::to_bytes(response.into_body(),16*1024*1024).await.unwrap();
         assert!(code.is_success(),"auto preview: {}",String::from_utf8_lossy(&bytes));
-        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM ABPrintJob").fetch_one(&pool).await.unwrap(),0,"read/preview tests must not enqueue jobs");
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNTLabelQueueJob").fetch_one(&pool).await.unwrap(),0,"read/preview tests must not enqueue jobs");
         pool.close().await;
     }
 }
 
 pub async fn status(pool: &SqlitePool) -> Value {
-    let cfg:Option<(String,String,i64)> = sqlx::query_as("SELECT path,branch,max_age_minutes FROM main.ABStorage WHERE id=1").fetch_optional(pool).await.ok().flatten();
+    let cfg:Option<(String,String,i64)> = sqlx::query_as("SELECT FTLstDbPath,FTBchCode,FNLstMaxAgeMin FROM main.TCNSLabelStorage WHERE FNLstID=1").fetch_optional(pool).await.ok().flatten();
     let default_path = default_local_master();
     let (path,branch,age)=cfg.clone().unwrap_or((default_path.to_string_lossy().into_owned(),String::new(),1440));
     let checked=validate(&path).await;
@@ -653,7 +690,7 @@ pub async fn save_config(State(st):State<AppState>,Json(mut cfg):Json<Config>) -
         }
         cfg.branch = sync.branch.clone();
         if sync.api_key.is_empty() {
-            let previous: String = sqlx::query_scalar("SELECT config FROM ABSource WHERE id=1")
+            let previous: String = sqlx::query_scalar("SELECT FTLsoConfigJson FROM TCNSLabelSource WHERE FNLsoID=1")
                 .fetch_optional(&st.pool)
                 .await
                 .ok()
@@ -745,9 +782,9 @@ pub async fn save_config(State(st):State<AppState>,Json(mut cfg):Json<Config>) -
     let canonical=match std::fs::canonicalize(cfg.path.trim()) { Ok(p)=>p.to_string_lossy().trim_start_matches("\\\\?\\").to_string(),Err(e)=>return error(e)};
     let result:Result<(),sqlx::Error>=async {
         let mut tx=st.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let pending:i64=sqlx::query_scalar("SELECT COUNT(*) FROM ABPrintJob WHERE status NOT IN ('SUBMITTED','EMPTY','NO_MATCH','ALREADY_SUBMITTED','FAILED','CANCELLED')").fetch_one(&mut *tx).await?;
+        let pending:i64=sqlx::query_scalar("SELECT COUNT(*) FROM TCNTLabelQueueJob WHERE FTLqjStatus NOT IN ('SUBMITTED','EMPTY','NO_MATCH','ALREADY_SUBMITTED','FAILED','CANCELLED')").fetch_one(&mut *tx).await?;
         if pending>0 { return Err(sqlx::Error::Protocol("ยังมีงานค้าง กรุณาจัดการคิวก่อนเปลี่ยนแหล่งข้อมูล".into())); }
-        let source:Option<(String,String,i64)>=sqlx::query_as("SELECT mode,config,lease_until FROM ABSource WHERE id=1").fetch_optional(&mut *tx).await?;
+        let source:Option<(String,String,i64)>=sqlx::query_as("SELECT FTLsoMode,FTLsoConfigJson,FNLsoLeaseUntilUnix FROM TCNSLabelSource WHERE FNLsoID=1").fetch_optional(&mut *tx).await?;
         if source.as_ref().map(|v|v.2>chrono::Utc::now().timestamp()).unwrap_or(false){return Err(sqlx::Error::Protocol("รอการดาวน์โหลดที่กำลังทำงานให้เสร็จก่อนเปลี่ยนแหล่งข้อมูล".into()));}
         // Connection credentials and polling frequency are not a new dataset.
         // Preserve schedules, sessions and deduplication when only those change.
@@ -756,22 +793,22 @@ pub async fn save_config(State(st):State<AppState>,Json(mut cfg):Json<Config>) -
             let after:Value=serde_json::from_str(&sync_json).unwrap_or(Value::Null);
             v.0!=effective_mode || ["baseUrl","agency","branch","pos","shop"].iter().any(|key|before[*key]!=after[*key])
         }).unwrap_or(true);
-        let old:Option<(String,String)>=sqlx::query_as("SELECT path,branch FROM ABStorage WHERE id=1").fetch_optional(&mut *tx).await?;
+        let old:Option<(String,String)>=sqlx::query_as("SELECT FTLstDbPath,FTBchCode FROM TCNSLabelStorage WHERE FNLstID=1").fetch_optional(&mut *tx).await?;
         source_changed |= old.as_ref().map(|v|v.0!=canonical || v.1!=cfg.branch.trim()).unwrap_or(true);
         if source_changed || old.as_ref().map(|v|v.0!=canonical || v.1!=cfg.branch.trim()).unwrap_or(true) {
             // Do not carry deduplication or enabled schedules across branch/database boundaries.
-            sqlx::query("UPDATE ABPrintRule SET config=json_set(config,'$.enabled',json('false'))").execute(&mut *tx).await?;
-            sqlx::query("DELETE FROM ABPrintWatermark").execute(&mut *tx).await?;
-            sqlx::query("DELETE FROM ABPrintSetting WHERE id LIKE 'ruleSince:%' OR id LIKE 'run:%'").execute(&mut *tx).await?;
+            sqlx::query("UPDATE TCNMLabelPrintRule SET FTLprConfigJson=json_set(FTLprConfigJson,'$.enabled',json('false'))").execute(&mut *tx).await?;
+            sqlx::query("DELETE FROM TCNTLabelPrintMark").execute(&mut *tx).await?;
+            sqlx::query("DELETE FROM TCNSLabelPrintSetting WHERE FTLpsCode LIKE 'ruleSince:%' OR FTLpsCode LIKE 'run:%'").execute(&mut *tx).await?;
             sqlx::query("DELETE FROM TCNTLabelAuthSession").execute(&mut *tx).await?;
         }
-        sqlx::query("INSERT INTO ABStorage(id,path,branch,max_age_minutes) VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET path=excluded.path,branch=excluded.branch,max_age_minutes=excluded.max_age_minutes")
+        sqlx::query("INSERT INTO TCNSLabelStorage(FNLstID,FTLstDbPath,FTBchCode,FNLstMaxAgeMin) VALUES(1,?,?,?) ON CONFLICT(FNLstID) DO UPDATE SET FTLstDbPath=excluded.FTLstDbPath,FTBchCode=excluded.FTBchCode,FNLstMaxAgeMin=excluded.FNLstMaxAgeMin")
             .bind(&canonical).bind(cfg.branch.trim()).bind(cfg.max_age_minutes).execute(&mut *tx).await?;
         sqlx::query("UPDATE TCNSSysOption SET FTSopValue=? WHERE FTSopCode='DefaultBranch'").bind(cfg.branch.trim()).execute(&mut *tx).await?;
         let next_last_success_sql = if has_api {
-            "CASE WHEN ? THEN '' ELSE last_success END"
+            "CASE WHEN ? THEN '' ELSE FDLsoLastSuccess END"
         } else {
-            "CASE WHEN NULLIF(last_success,'') IS NULL THEN datetime('now') ELSE last_success END"
+            "CASE WHEN NULLIF(FDLsoLastSuccess,'') IS NULL THEN datetime('now') ELSE FDLsoLastSuccess END"
         };
         let next_status = if has_api {
             "รอดาวน์โหลดครั้งแรก"
@@ -781,7 +818,7 @@ pub async fn save_config(State(st):State<AppState>,Json(mut cfg):Json<Config>) -
             "พร้อมใช้งานฐานข้อมูลภายในเครื่อง (Manual / Import)"
         };
         let query_sql = format!(
-            "INSERT INTO ABSource(id,mode,config,status,last_success) VALUES(1,?,?,?,{}) ON CONFLICT(id) DO UPDATE SET mode=excluded.mode,config=excluded.config,last_success={},status=CASE WHEN ? OR ?='' THEN ? ELSE status END",
+            "INSERT INTO TCNSLabelSource(FNLsoID,FTLsoMode,FTLsoConfigJson,FTLsoStatus,FDLsoLastSuccess) VALUES(1,?,?,?,{}) ON CONFLICT(FNLsoID) DO UPDATE SET FTLsoMode=excluded.FTLsoMode,FTLsoConfigJson=excluded.FTLsoConfigJson,FDLsoLastSuccess={},FTLsoStatus=CASE WHEN ? OR ?='' THEN ? ELSE FTLsoStatus END",
             if has_api { "''" } else { "datetime('now')" },
             next_last_success_sql
         );

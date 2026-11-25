@@ -165,35 +165,35 @@ pub struct QueueJob {
 }
 
 pub async fn ensure_schema(pool: &SqlitePool) -> std::result::Result<(), sqlx::Error> {
-    sqlx::raw_sql("CREATE TABLE IF NOT EXISTS ABPrintRule(id TEXT PRIMARY KEY, config TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS ABPrintSetting(id TEXT PRIMARY KEY, value TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS ABPrintJob(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE NOT NULL,
-        dedup TEXT UNIQUE,source TEXT NOT NULL,name TEXT NOT NULL,status TEXT NOT NULL,created TEXT NOT NULL,
-        config TEXT NOT NULL,error TEXT,completed INTEGER NOT NULL DEFAULT 0,total INTEGER NOT NULL DEFAULT 0);
-      CREATE TABLE IF NOT EXISTS ABPrintUnit(job TEXT NOT NULL,seq INTEGER NOT NULL,kind TEXT NOT NULL,
-        payload TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'READY',error TEXT,PRIMARY KEY(job,seq));
-      CREATE TABLE IF NOT EXISTS ABPrintWatermark(rule TEXT NOT NULL,barcode TEXT NOT NULL,hash TEXT NOT NULL,
-        PRIMARY KEY(rule,barcode));
-      CREATE TABLE IF NOT EXISTS ABPrintAudit(id INTEGER PRIMARY KEY AUTOINCREMENT,job TEXT,action TEXT,created TEXT);
-        CREATE TABLE IF NOT EXISTS ABPrintHistory(job TEXT PRIMARY KEY, finished TEXT NOT NULL, destinations TEXT);
-        CREATE INDEX IF NOT EXISTS ABPrintHistoryDue ON ABPrintHistory(finished) WHERE destinations IS NULL;
-        CREATE TRIGGER IF NOT EXISTS ABPrintHistoryFinished AFTER UPDATE OF status ON ABPrintJob
-        WHEN NEW.status IN ('SUBMITTED','FAILED','CANCELLED') AND NEW.status <> OLD.status
-          AND EXISTS (SELECT 1 FROM ABPrintUnit WHERE job=NEW.id)
+    sqlx::raw_sql("CREATE TABLE IF NOT EXISTS TCNMLabelPrintRule(FTLprRuleID TEXT PRIMARY KEY, FTLprConfigJson TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS TCNSLabelPrintSetting(FTLpsCode TEXT PRIMARY KEY, FTLpsValue TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS TCNTLabelQueueJob(FNLqjSeq INTEGER PRIMARY KEY AUTOINCREMENT,FTLqjJobID TEXT UNIQUE NOT NULL,
+        FTLqjDedupKey TEXT UNIQUE,FTLqjSource TEXT NOT NULL,FTLqjName TEXT NOT NULL,FTLqjStatus TEXT NOT NULL,FDCreateOn TEXT NOT NULL,
+        FTLqjConfigJson TEXT NOT NULL,FTLqjError TEXT,FNLqjQtySent INTEGER NOT NULL DEFAULT 0,FNLqjQtyTotal INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS TCNTLabelQueueUnit(FTLqjJobID TEXT NOT NULL,FNLquSeq INTEGER NOT NULL,FTLquKind TEXT NOT NULL,
+        FTLquPayloadJson TEXT NOT NULL,FTLquStatus TEXT NOT NULL DEFAULT 'READY',FTLquError TEXT,PRIMARY KEY(FTLqjJobID,FNLquSeq));
+      CREATE TABLE IF NOT EXISTS TCNTLabelPrintMark(FTLpmRuleScope TEXT NOT NULL,FTLpmItemKey TEXT NOT NULL,FTLpmPrintHash TEXT NOT NULL,
+        PRIMARY KEY(FTLpmRuleScope,FTLpmItemKey));
+      CREATE TABLE IF NOT EXISTS TCNTLabelQueueAudit(FNLqaSeq INTEGER PRIMARY KEY AUTOINCREMENT,FTLqjJobID TEXT,FTLqaAction TEXT,FDCreateOn TEXT);
+        CREATE TABLE IF NOT EXISTS TCNTLabelQueueHistory(FTLqjJobID TEXT PRIMARY KEY, FDLqhFinishedOn TEXT NOT NULL, FTLqhDestJson TEXT);
+        CREATE INDEX IF NOT EXISTS TCNTLabelQueueHistoryDue ON TCNTLabelQueueHistory(FDLqhFinishedOn) WHERE FTLqhDestJson IS NULL;
+        CREATE TRIGGER IF NOT EXISTS TCNTLabelQueueHistoryFinished AFTER UPDATE OF FTLqjStatus ON TCNTLabelQueueJob
+        WHEN NEW.FTLqjStatus IN ('SUBMITTED','FAILED','CANCELLED') AND NEW.FTLqjStatus <> OLD.FTLqjStatus
+          AND EXISTS (SELECT 1 FROM TCNTLabelQueueUnit WHERE FTLqjJobID=NEW.FTLqjJobID)
         BEGIN
-            INSERT OR REPLACE INTO ABPrintHistory(job,finished) VALUES(NEW.id,datetime('now','localtime'));
+            INSERT OR REPLACE INTO TCNTLabelQueueHistory(FTLqjJobID,FDLqhFinishedOn) VALUES(NEW.FTLqjJobID,datetime('now','localtime'));
         END;").execute(pool).await?;
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     // Older releases recorded creation time only. Allow a full retention period after upgrade.
-    let seeded = sqlx::query("INSERT OR IGNORE INTO ABPrintSetting VALUES('historyRetentionMigrated','1')")
+    let seeded = sqlx::query("INSERT OR IGNORE INTO TCNSLabelPrintSetting VALUES('historyRetentionMigrated','1')")
         .execute(&mut *tx).await?.rows_affected();
     if seeded > 0 {
-        sqlx::query("INSERT OR IGNORE INTO ABPrintHistory(job,finished)
-            SELECT id,datetime('now','localtime') FROM ABPrintJob
-            WHERE status IN ('SUBMITTED','FAILED','CANCELLED') AND EXISTS (SELECT 1 FROM ABPrintUnit WHERE job=id)")
+        sqlx::query("INSERT OR IGNORE INTO TCNTLabelQueueHistory(FTLqjJobID,FDLqhFinishedOn)
+            SELECT FTLqjJobID,datetime('now','localtime') FROM TCNTLabelQueueJob
+            WHERE FTLqjStatus IN ('SUBMITTED','FAILED','CANCELLED') AND EXISTS (SELECT 1 FROM TCNTLabelQueueUnit WHERE TCNTLabelQueueUnit.FTLqjJobID=TCNTLabelQueueJob.FTLqjJobID)")
             .execute(&mut *tx).await?;
     }
-    let rows: Vec<(String,String)> = sqlx::query_as("SELECT id,trim(coalesce(json_extract(config,'$.code'),'')) FROM ABPrintRule ORDER BY id").fetch_all(&mut *tx).await?;
+    let rows: Vec<(String,String)> = sqlx::query_as("SELECT FTLprRuleID,trim(coalesce(json_extract(FTLprConfigJson,'$.code'),'')) FROM TCNMLabelPrintRule ORDER BY FTLprRuleID").fetch_all(&mut *tx).await?;
     let mut used: std::collections::HashSet<_> = rows.iter().map(|(_,code)|code.to_ascii_uppercase()).collect();
     let mut next = 1;
     for (id,code) in rows {
@@ -202,18 +202,18 @@ pub async fn ensure_schema(pool: &SqlitePool) -> std::result::Result<(), sqlx::E
             let candidate = format!("{next:03}");
             next += 1;
             if used.insert(candidate.clone()) {
-                sqlx::query("UPDATE ABPrintRule SET config=json_set(config,'$.code',?) WHERE id=?")
+                sqlx::query("UPDATE TCNMLabelPrintRule SET FTLprConfigJson=json_set(FTLprConfigJson,'$.code',?) WHERE FTLprRuleID=?")
                     .bind(candidate).bind(id).execute(&mut *tx).await?;
                 break;
             }
         }
     }
-    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS ABPrintRuleCode ON ABPrintRule(upper(trim(json_extract(config,'$.code')))) WHERE trim(coalesce(json_extract(config,'$.code'),''))<>''")
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS TCNMLabelPrintRuleCode ON TCNMLabelPrintRule(upper(trim(json_extract(FTLprConfigJson,'$.code')))) WHERE trim(coalesce(json_extract(FTLprConfigJson,'$.code'),''))<>''")
         .execute(&mut *tx).await?;
     tx.commit().await
 }
 async fn setting(pool: &SqlitePool, id: &str) -> String {
-    sqlx::query_scalar("SELECT value FROM ABPrintSetting WHERE id=?")
+    sqlx::query_scalar("SELECT FTLpsValue FROM TCNSLabelPrintSetting WHERE FTLpsCode=?")
         .bind(id)
         .fetch_optional(pool)
         .await
@@ -222,12 +222,12 @@ async fn setting(pool: &SqlitePool, id: &str) -> String {
         .unwrap_or_default()
 }
 async fn put(pool: &SqlitePool, id: &str, value: &str) -> Result<()> {
-    sqlx::query("INSERT INTO ABPrintSetting(id,value) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value")
+    sqlx::query("INSERT INTO TCNSLabelPrintSetting(FTLpsCode,FTLpsValue) VALUES(?,?) ON CONFLICT(FTLpsCode) DO UPDATE SET FTLpsValue=excluded.FTLpsValue")
       .bind(id).bind(value).execute(pool).await.map_err(|e|e.to_string())?;
     Ok(())
 }
 async fn rules(pool: &SqlitePool) -> Result<Vec<PrintRule>> {
-    let rows: Vec<String> = sqlx::query_scalar("SELECT config FROM ABPrintRule ORDER BY id")
+    let rows: Vec<String> = sqlx::query_scalar("SELECT FTLprConfigJson FROM TCNMLabelPrintRule ORDER BY FTLprRuleID")
         .fetch_all(pool)
         .await
         .map_err(|e| e.to_string())?;
@@ -251,7 +251,7 @@ pub struct JobDestination {
 pub async fn job_details(State(st): State<AppState>, axum::extract::Path(id): axum::extract::Path<String>) -> Response {
     let result = async {
         let mut tx = st.pool.begin().await?;
-        let archive: Option<String> = sqlx::query_scalar("SELECT destinations FROM ABPrintHistory WHERE job=? AND destinations IS NOT NULL")
+        let archive: Option<String> = sqlx::query_scalar("SELECT FTLqhDestJson FROM TCNTLabelQueueHistory WHERE FTLqjJobID=? AND FTLqhDestJson IS NOT NULL")
             .bind(&id).fetch_optional(&mut *tx).await?;
         if let Some(data) = archive {
             return serde_json::from_str::<Value>(&data).map_err(|e| sqlx::Error::Protocol(e.to_string()));
@@ -267,21 +267,21 @@ pub async fn job_details(State(st): State<AppState>, axum::extract::Path(id): ax
 
 const DESTINATIONS: &str = r#"
         WITH units AS (
-            SELECT u.seq, u.payload, j.config, u.kind,
-                   json_extract(u.payload,'$.marks[0].rule') AS scope
-            FROM ABPrintUnit u JOIN ABPrintJob j ON j.id=u.job WHERE u.job=?
+            SELECT u.FNLquSeq, u.FTLquPayloadJson, j.FTLqjConfigJson, u.FTLquKind,
+                   json_extract(u.FTLquPayloadJson,'$.marks[0].rule') AS scope
+            FROM TCNTLabelQueueUnit u JOIN TCNTLabelQueueJob j ON j.FTLqjJobID=u.FTLqjJobID WHERE u.FTLqjJobID=?
         )
-        SELECT coalesce(nullif(json_extract(payload,'$.route.printer_name'),''),
-                        json_extract(payload,'$.printerName'), json_extract(payload,'$.route.lan_ip'), json_extract(payload,'$.ip')) AS printer,
-               coalesce(nullif(json_extract(payload,'$.size.FTLbsName'),''),
-                        nullif(json_extract(payload,'$.lbsName'),''), json_extract(payload,'$.lbsCode'),
-                        json_extract(payload,'$.route.lbs_code')) AS label,
-               coalesce(json_extract(payload,'$.template'), CASE WHEN kind='AUTO' THEN
-                   CASE WHEN json_valid(scope) AND json_type(config,'$.targets')='array'
-                        THEN json_extract(config,'$.targets[' || json_extract(scope,'$[2]') || '].template')
-                        ELSE json_extract(config,'$.template') END END) AS template,
+        SELECT coalesce(nullif(json_extract(FTLquPayloadJson,'$.route.printer_name'),''),
+                        json_extract(FTLquPayloadJson,'$.printerName'), json_extract(FTLquPayloadJson,'$.route.lan_ip'), json_extract(FTLquPayloadJson,'$.ip')) AS printer,
+               coalesce(nullif(json_extract(FTLquPayloadJson,'$.size.FTLbsName'),''),
+                        nullif(json_extract(FTLquPayloadJson,'$.lbsName'),''), json_extract(FTLquPayloadJson,'$.lbsCode'),
+                        json_extract(FTLquPayloadJson,'$.route.lbs_code')) AS label,
+               coalesce(json_extract(FTLquPayloadJson,'$.template'), CASE WHEN FTLquKind='AUTO' THEN
+                   CASE WHEN json_valid(scope) AND json_type(FTLqjConfigJson,'$.targets')='array'
+                        THEN json_extract(FTLqjConfigJson,'$.targets[' || json_extract(scope,'$[2]') || '].template')
+                        ELSE json_extract(FTLqjConfigJson,'$.template') END END) AS template,
                count(*) AS units
-        FROM units GROUP BY printer,label,template ORDER BY min(seq)
+        FROM units GROUP BY printer,label,template ORDER BY min(FNLquSeq)
     "#;
 
 pub(crate) async fn archive_finished_jobs(pool: &SqlitePool) -> std::result::Result<usize, sqlx::Error> {
@@ -289,22 +289,22 @@ pub(crate) async fn archive_finished_jobs(pool: &SqlitePool) -> std::result::Res
         .fetch_optional(pool).await?;
     let days = days.and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(60).max(7);
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-    let jobs: Vec<String> = sqlx::query_scalar("SELECT h.job FROM ABPrintHistory h JOIN ABPrintJob j ON j.id=h.job
-        WHERE h.destinations IS NULL AND h.finished < datetime('now','localtime',?)
-          AND j.status IN ('SUBMITTED','FAILED','CANCELLED') ORDER BY h.finished LIMIT 10")
+    let jobs: Vec<String> = sqlx::query_scalar("SELECT h.FTLqjJobID FROM TCNTLabelQueueHistory h JOIN TCNTLabelQueueJob j ON j.FTLqjJobID=h.FTLqjJobID
+        WHERE h.FTLqhDestJson IS NULL AND h.FDLqhFinishedOn < datetime('now','localtime',?)
+          AND j.FTLqjStatus IN ('SUBMITTED','FAILED','CANCELLED') ORDER BY h.FDLqhFinishedOn LIMIT 10")
         .bind(format!("-{days} days")).fetch_all(&mut *tx).await?;
     for job in &jobs {
         let summary = sqlx::query_as::<_, JobDestination>(DESTINATIONS).bind(job).fetch_all(&mut *tx).await?;
-        sqlx::query("UPDATE ABPrintHistory SET destinations=? WHERE job=?")
+        sqlx::query("UPDATE TCNTLabelQueueHistory SET FTLqhDestJson=? WHERE FTLqjJobID=?")
             .bind(json!(summary).to_string()).bind(job).execute(&mut *tx).await?;
-        sqlx::query("DELETE FROM ABPrintUnit WHERE job=?").bind(job).execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM TCNTLabelQueueUnit WHERE FTLqjJobID=?").bind(job).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     Ok(jobs.len())
 }
 
 pub async fn get_center(State(st): State<AppState>) -> Response {
-    let jobs=sqlx::query_as::<_,QueueJob>("SELECT id,seq,source,name,status,created,json_extract(config,'$.targetDate') AS target_date,error,completed,total FROM ABPrintJob WHERE status NOT IN ('SUBMITTED','EMPTY','NO_MATCH','ALREADY_SUBMITTED','FAILED','CANCELLED') OR id IN (SELECT id FROM ABPrintJob WHERE status IN ('SUBMITTED','EMPTY','NO_MATCH','ALREADY_SUBMITTED','FAILED','CANCELLED') ORDER BY seq DESC LIMIT 100) ORDER BY seq DESC").fetch_all(&st.pool).await;
+    let jobs=sqlx::query_as::<_,QueueJob>("SELECT FTLqjJobID AS id,FNLqjSeq AS seq,FTLqjSource AS source,FTLqjName AS name,FTLqjStatus AS status,FDCreateOn AS created,json_extract(FTLqjConfigJson,'$.targetDate') AS target_date,FTLqjError AS error,FNLqjQtySent AS completed,FNLqjQtyTotal AS total FROM TCNTLabelQueueJob WHERE FTLqjStatus NOT IN ('SUBMITTED','EMPTY','NO_MATCH','ALREADY_SUBMITTED','FAILED','CANCELLED') OR FTLqjJobID IN (SELECT FTLqjJobID FROM TCNTLabelQueueJob WHERE FTLqjStatus IN ('SUBMITTED','EMPTY','NO_MATCH','ALREADY_SUBMITTED','FAILED','CANCELLED') ORDER BY FNLqjSeq DESC LIMIT 100) ORDER BY FNLqjSeq DESC").fetch_all(&st.pool).await;
     match (rules(&st.pool).await,jobs) {
       (Ok(r),Ok(j))=>Json(json!({"rules":r,"jobs":j,
         "master":crate::storage::status(&st.pool).await,"heartbeat":setting(&st.pool,"heartbeat").await,
@@ -468,12 +468,12 @@ async fn persist_bulk(pool: &SqlitePool, mut body: BulkRules) -> Result<()> {
     }
     let mut tx=pool.begin().await.map_err(|e|e.to_string())?;
     for r in &body.rules {
-        sqlx::query("INSERT INTO ABPrintRule(id,config) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config")
+        sqlx::query("INSERT INTO TCNMLabelPrintRule(FTLprRuleID,FTLprConfigJson) VALUES(?,?) ON CONFLICT(FTLprRuleID) DO UPDATE SET FTLprConfigJson=excluded.FTLprConfigJson")
             .bind(&r.id).bind(serde_json::to_string(r).map_err(|e|e.to_string())?).execute(&mut *tx).await.map_err(|e|e.to_string())?;
-        sqlx::query("INSERT OR IGNORE INTO ABPrintSetting(id,value) VALUES(?,?)")
+        sqlx::query("INSERT OR IGNORE INTO TCNSLabelPrintSetting(FTLpsCode,FTLpsValue) VALUES(?,?)")
             .bind(format!("ruleSince:{}",r.id)).bind(Local::now().format("%Y-%m-%d").to_string()).execute(&mut *tx).await.map_err(|e|e.to_string())?;
     }
-    sqlx::query("INSERT INTO ABPrintSetting(id,value) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value")
+    sqlx::query("INSERT INTO TCNSLabelPrintSetting(FTLpsCode,FTLpsValue) VALUES(?,?) ON CONFLICT(FTLpsCode) DO UPDATE SET FTLpsValue=excluded.FTLpsValue")
         .bind(format!("bulk:{}",branch)).bind(body.preferences.to_string()).execute(&mut *tx).await.map_err(|e|e.to_string())?;
     tx.commit().await.map_err(|e|e.to_string())?;
     Ok(())
@@ -505,7 +505,7 @@ pub async fn save_rule(State(st): State<AppState>, Json(mut r): Json<PrintRule>)
             return err(format!("รหัส Profile \"{}\" ถูกใช้งานแล้ว กรุณาใช้รหัสอื่น", r.code));
         }
     }
-    match sqlx::query("INSERT INTO ABPrintRule(id,config) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config")
+    match sqlx::query("INSERT INTO TCNMLabelPrintRule(FTLprRuleID,FTLprConfigJson) VALUES(?,?) ON CONFLICT(FTLprRuleID) DO UPDATE SET FTLprConfigJson=excluded.FTLprConfigJson")
       .bind(&r.id).bind(serde_json::to_string(&r).unwrap()).execute(&st.pool).await {
         Ok(_)=>{
           let key=format!("ruleSince:{}",r.id);
@@ -520,7 +520,7 @@ pub async fn delete_rule(State(st): State<AppState>, Json(body): Json<Value>) ->
     if id.is_empty() {
         return err("ไม่พบรหัส Profile ที่ต้องการลบ");
     }
-    match sqlx::query("DELETE FROM ABPrintRule WHERE id=?")
+    match sqlx::query("DELETE FROM TCNMLabelPrintRule WHERE FTLprRuleID=?")
         .bind(id)
         .execute(&st.pool)
         .await
@@ -757,7 +757,7 @@ async fn insert_job_rows(conn: &mut sqlx::SqliteConnection, source: &str, name: 
     let id = uid();
     // An overlapping invocation of the same Profile must not create a second
     // active job. Terminal jobs do not block a deliberate later reprint.
-    let inserted=sqlx::query("INSERT OR IGNORE INTO ABPrintJob(id,dedup,source,name,status,created,config,total) SELECT ?,?,?,?,?,?,?,? WHERE ? != 'PROFILE' OR NOT EXISTS (SELECT 1 FROM ABPrintJob WHERE source='PROFILE' AND upper(json_extract(config,'$.code'))=upper(?) AND status NOT IN ('SUBMITTED','EMPTY','NO_MATCH','ALREADY_SUBMITTED','FAILED','CANCELLED'))")
+    let inserted=sqlx::query("INSERT OR IGNORE INTO TCNTLabelQueueJob(FTLqjJobID,FTLqjDedupKey,FTLqjSource,FTLqjName,FTLqjStatus,FDCreateOn,FTLqjConfigJson,FNLqjQtyTotal) SELECT ?,?,?,?,?,?,?,? WHERE ? != 'PROFILE' OR NOT EXISTS (SELECT 1 FROM TCNTLabelQueueJob WHERE FTLqjSource='PROFILE' AND upper(json_extract(FTLqjConfigJson,'$.code'))=upper(?) AND FTLqjStatus NOT IN ('SUBMITTED','EMPTY','NO_MATCH','ALREADY_SUBMITTED','FAILED','CANCELLED'))")
       .bind(&id).bind(dedup).bind(source).bind(name).bind(status).bind(now()).bind(config.to_string()).bind(units.len() as i64)
       .bind(source).bind(config["code"].as_str().unwrap_or(""))
       .execute(&mut *conn).await.map_err(|e|e.to_string())?;
@@ -765,7 +765,7 @@ async fn insert_job_rows(conn: &mut sqlx::SqliteConnection, source: &str, name: 
         return Err("งานนี้มีอยู่ในคิวแล้ว กรุณาตรวจสถานะงานเดิมก่อนเรียกซ้ำ".into());
     }
     for (n, (kind, payload)) in units.into_iter().enumerate() {
-        sqlx::query("INSERT INTO ABPrintUnit(job,seq,kind,payload) VALUES(?,?,?,?)")
+        sqlx::query("INSERT INTO TCNTLabelQueueUnit(FTLqjJobID,FNLquSeq,FTLquKind,FTLquPayloadJson) VALUES(?,?,?,?)")
             .bind(&id)
             .bind(n as i64)
             .bind(kind)
@@ -898,27 +898,27 @@ pub async fn queue_action(State(st): State<AppState>, Json(b): Json<Value>) -> R
     let result:Result<()>=async {
       let id=b["id"].as_str().ok_or("ไม่พบงาน")?;let action=b["action"].as_str().unwrap_or("");
       let mut tx=st.pool.begin().await.map_err(|e|e.to_string())?;
-      let status:String=sqlx::query_scalar("SELECT status FROM ABPrintJob WHERE id=?").bind(id).fetch_one(&mut *tx).await.map_err(|e|e.to_string())?;
+      let status:String=sqlx::query_scalar("SELECT FTLqjStatus FROM TCNTLabelQueueJob WHERE FTLqjJobID=?").bind(id).fetch_one(&mut *tx).await.map_err(|e|e.to_string())?;
       if ["PREPARING","SENDING"].contains(&status.as_str()){return Err("งานกำลังทำงาน รอจบหน้าปัจจุบันก่อน".into())}
       match action {
-        "CANCEL"=>{sqlx::query("UPDATE ABPrintJob SET status='CANCELLED' WHERE id=? AND status NOT IN ('SUBMITTED','EMPTY','NO_MATCH','ALREADY_SUBMITTED','FAILED')").bind(id).execute(&mut *tx).await.map_err(|e|e.to_string())?;},
+        "CANCEL"=>{sqlx::query("UPDATE TCNTLabelQueueJob SET FTLqjStatus='CANCELLED' WHERE FTLqjJobID=? AND FTLqjStatus NOT IN ('SUBMITTED','EMPTY','NO_MATCH','ALREADY_SUBMITTED','FAILED')").bind(id).execute(&mut *tx).await.map_err(|e|e.to_string())?;},
         "RETRY"|"CONFIRM_SENT"=>{
           if !["BLOCKED","NEEDS_REVIEW"].contains(&status.as_str()){return Err("งานนี้ไม่อยู่ในสถานะรอตรวจสอบ".into())}
           if action=="CONFIRM_SENT" && status!="NEEDS_REVIEW"{return Err("ยืนยันได้เฉพาะหน้าที่ไม่ทราบผล".into())}
           if action=="CONFIRM_SENT" {
-            let payloads:Vec<String>=sqlx::query_scalar("SELECT payload FROM ABPrintUnit WHERE job=? AND status='UNKNOWN'").bind(id).fetch_all(&mut *tx).await.map_err(|e|e.to_string())?;
+            let payloads:Vec<String>=sqlx::query_scalar("SELECT FTLquPayloadJson FROM TCNTLabelQueueUnit WHERE FTLqjJobID=? AND FTLquStatus='UNKNOWN'").bind(id).fetch_all(&mut *tx).await.map_err(|e|e.to_string())?;
             for payload in payloads {let v:Value=serde_json::from_str(&payload).map_err(|e|e.to_string())?;if let Some(marks)=v["marks"].as_array(){for m in marks {
-              sqlx::query("INSERT INTO ABPrintWatermark(rule,barcode,hash) VALUES(?,?,?) ON CONFLICT(rule,barcode) DO UPDATE SET hash=excluded.hash")
+              sqlx::query("INSERT INTO TCNTLabelPrintMark(FTLpmRuleScope,FTLpmItemKey,FTLpmPrintHash) VALUES(?,?,?) ON CONFLICT(FTLpmRuleScope,FTLpmItemKey) DO UPDATE SET FTLpmPrintHash=excluded.FTLpmPrintHash")
                 .bind(m["rule"].as_str()).bind(m["barcode"].as_str()).bind(m["hash"].as_str()).execute(&mut *tx).await.map_err(|e|e.to_string())?;
             }}}
           }
-          sqlx::query("UPDATE ABPrintUnit SET status=?,error=NULL WHERE job=? AND status IN ('UNKNOWN','SENDING')")
+          sqlx::query("UPDATE TCNTLabelQueueUnit SET FTLquStatus=?,FTLquError=NULL WHERE FTLqjJobID=? AND FTLquStatus IN ('UNKNOWN','SENDING')")
             .bind(if action=="RETRY"{"READY"}else{"SUBMITTED"}).bind(id).execute(&mut *tx).await.map_err(|e|e.to_string())?;
-          let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM ABPrintUnit WHERE job=?").bind(id).fetch_one(&mut *tx).await.map_err(|e|e.to_string())?;
-          sqlx::query("UPDATE ABPrintJob SET status=?,error=NULL WHERE id=?").bind(if count==0{"WAIT_DATA"}else{"QUEUED"}).bind(id).execute(&mut *tx).await.map_err(|e|e.to_string())?;
+          let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM TCNTLabelQueueUnit WHERE FTLqjJobID=?").bind(id).fetch_one(&mut *tx).await.map_err(|e|e.to_string())?;
+          sqlx::query("UPDATE TCNTLabelQueueJob SET FTLqjStatus=?,FTLqjError=NULL WHERE FTLqjJobID=?").bind(if count==0{"WAIT_DATA"}else{"QUEUED"}).bind(id).execute(&mut *tx).await.map_err(|e|e.to_string())?;
         }, _=>return Err("คำสั่งไม่ถูกต้อง".into())
       }
-      sqlx::query("INSERT INTO ABPrintAudit(job,action,created) VALUES(?,?,?)").bind(id).bind(action).bind(now()).execute(&mut *tx).await.map_err(|e|e.to_string())?;
+      sqlx::query("INSERT INTO TCNTLabelQueueAudit(FTLqjJobID,FTLqaAction,FDCreateOn) VALUES(?,?,?)").bind(id).bind(action).bind(now()).execute(&mut *tx).await.map_err(|e|e.to_string())?;
       tx.commit().await.map_err(|e|e.to_string())?;Ok(())
     }.await;
     match result {
@@ -991,7 +991,7 @@ async fn prepare_auto(pool: &SqlitePool, id: &str, config: &str) -> Result<()> {
     for (n, chunk) in pages.chunks(page_size).enumerate() {
         let payload = json!({"design":design,"route":route,"template":r.template,"size":lbs,"elements":elements,"legacy":r.template.starts_with("legacy:"),"contexts":chunk.iter().map(|(c,_)|c).collect::<Vec<_>>(),
         "marks":chunk.iter().map(|(_,m)|m).filter(|m|!m.is_null()).collect::<Vec<_>>(),"date":date});
-        sqlx::query("INSERT INTO ABPrintUnit(job,seq,kind,payload) VALUES(?,?,'AUTO',?)")
+        sqlx::query("INSERT INTO TCNTLabelQueueUnit(FTLqjJobID,FNLquSeq,FTLquKind,FTLquPayloadJson) VALUES(?,?,'AUTO',?)")
             .bind(id)
             .bind(n as i64)
             .bind(payload.to_string())
@@ -999,7 +999,7 @@ async fn prepare_auto(pool: &SqlitePool, id: &str, config: &str) -> Result<()> {
             .await
             .map_err(|e| e.to_string())?;
     }
-    sqlx::query("UPDATE ABPrintJob SET status=?,total=? WHERE id=?")
+    sqlx::query("UPDATE TCNTLabelQueueJob SET FTLqjStatus=?,FNLqjQtyTotal=? WHERE FTLqjJobID=?")
         .bind(if pages.is_empty() { "EMPTY" } else { "QUEUED" })
         .bind(pages.chunks(page_size).len() as i64)
         .bind(id)
@@ -1119,14 +1119,14 @@ async fn send_unit(pool: &SqlitePool, kind: &str, p: Value, id: &str, seq: i64) 
 
 pub async fn recover(pool: &SqlitePool) -> Result<()> {
     // Called only by the exclusive OS-lock owner, never by a second UI instance.
-    sqlx::raw_sql("UPDATE ABPrintUnit SET status='UNKNOWN' WHERE status='SENDING';
-      UPDATE ABPrintJob SET status='NEEDS_REVIEW',error='โปรแกรมหยุดขณะส่งพิมพ์ ต้องตรวจหน้าที่ออกแล้วก่อนทำต่อ' WHERE status='SENDING';
-      UPDATE ABPrintJob SET status='WAIT_DATA' WHERE status='PREPARING';")
+    sqlx::raw_sql("UPDATE TCNTLabelQueueUnit SET FTLquStatus='UNKNOWN' WHERE FTLquStatus='SENDING';
+      UPDATE TCNTLabelQueueJob SET FTLqjStatus='NEEDS_REVIEW',FTLqjError='โปรแกรมหยุดขณะส่งพิมพ์ ต้องตรวจหน้าที่ออกแล้วก่อนทำต่อ' WHERE FTLqjStatus='SENDING';
+      UPDATE TCNTLabelQueueJob SET FTLqjStatus='WAIT_DATA' WHERE FTLqjStatus='PREPARING';")
       .execute(pool).await.map_err(|e|e.to_string())?;
     Ok(())
 }
 async fn worker_tick(pool: &SqlitePool) -> Result<()> {
-    let head:Option<(String,String,String,String)>=sqlx::query_as("SELECT id,status,config,source FROM ABPrintJob WHERE status NOT IN ('SUBMITTED','EMPTY','NO_MATCH','ALREADY_SUBMITTED','FAILED','CANCELLED') ORDER BY seq LIMIT 1")
+    let head:Option<(String,String,String,String)>=sqlx::query_as("SELECT FTLqjJobID,FTLqjStatus,FTLqjConfigJson,FTLqjSource FROM TCNTLabelQueueJob WHERE FTLqjStatus NOT IN ('SUBMITTED','EMPTY','NO_MATCH','ALREADY_SUBMITTED','FAILED','CANCELLED') ORDER BY FNLqjSeq LIMIT 1")
       .fetch_optional(pool).await.map_err(|e|e.to_string())?;
     let Some((id, status, config, source)) = head else {
         return Ok(());
@@ -1139,7 +1139,7 @@ async fn worker_tick(pool: &SqlitePool) -> Result<()> {
             return Ok(());
         }
         let claim = sqlx::query(
-            "UPDATE ABPrintJob SET status='PREPARING' WHERE id=? AND status='WAIT_DATA'",
+            "UPDATE TCNTLabelQueueJob SET FTLqjStatus='PREPARING' WHERE FTLqjJobID=? AND FTLqjStatus='WAIT_DATA'",
         )
         .bind(&id)
         .execute(pool)
@@ -1149,7 +1149,7 @@ async fn worker_tick(pool: &SqlitePool) -> Result<()> {
             return Ok(());
         }
         if let Err(e) = prepare_auto(pool, &id, &config).await {
-            sqlx::query("UPDATE ABPrintJob SET status='BLOCKED',error=? WHERE id=?")
+            sqlx::query("UPDATE TCNTLabelQueueJob SET FTLqjStatus='BLOCKED',FTLqjError=? WHERE FTLqjJobID=?")
                 .bind(e)
                 .bind(&id)
                 .execute(pool)
@@ -1161,11 +1161,11 @@ async fn worker_tick(pool: &SqlitePool) -> Result<()> {
     if status != "QUEUED" {
         return Ok(());
     }
-    let unit:Option<(i64,String,String)>=sqlx::query_as("SELECT seq,kind,payload FROM ABPrintUnit WHERE job=? AND status='READY' ORDER BY seq LIMIT 1")
+    let unit:Option<(i64,String,String)>=sqlx::query_as("SELECT FNLquSeq,FTLquKind,FTLquPayloadJson FROM TCNTLabelQueueUnit WHERE FTLqjJobID=? AND FTLquStatus='READY' ORDER BY FNLquSeq LIMIT 1")
       .bind(&id).fetch_optional(pool).await.map_err(|e|e.to_string())?;
     let Some((seq, kind, payload)) = unit else {
         let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-        sqlx::query("UPDATE ABPrintJob SET status='SUBMITTED',completed=total WHERE id=? AND status='QUEUED'").bind(&id).execute(&mut *tx).await.map_err(|e|e.to_string())?;
+        sqlx::query("UPDATE TCNTLabelQueueJob SET FTLqjStatus='SUBMITTED',FNLqjQtySent=FNLqjQtyTotal WHERE FTLqjJobID=? AND FTLqjStatus='QUEUED'").bind(&id).execute(&mut *tx).await.map_err(|e|e.to_string())?;
         if source == "MANUAL" {
             if let Some(old_id) = serde_json::from_str::<Value>(&config)
                 .ok()
@@ -1199,12 +1199,12 @@ async fn worker_tick(pool: &SqlitePool) -> Result<()> {
     let p: Value = serde_json::from_str(&payload).map_err(|e| e.to_string())?;
     if source == "AUTO" && p["date"].as_str() != Some(&Local::now().format("%Y-%m-%d").to_string())
     {
-        sqlx::query("UPDATE ABPrintJob SET status='BLOCKED',error='งานข้ามวัน ต้องยกเลิกและสร้างใหม่เพื่อใช้ราคาปัจจุบัน' WHERE id=?").bind(&id).execute(pool).await.map_err(|e|e.to_string())?;
+        sqlx::query("UPDATE TCNTLabelQueueJob SET FTLqjStatus='BLOCKED',FTLqjError='งานข้ามวัน ต้องยกเลิกและสร้างใหม่เพื่อใช้ราคาปัจจุบัน' WHERE FTLqjJobID=?").bind(&id).execute(pool).await.map_err(|e|e.to_string())?;
         return Ok(());
     }
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     let claim =
-        sqlx::query("UPDATE ABPrintJob SET status='SENDING' WHERE id=? AND status='QUEUED'")
+        sqlx::query("UPDATE TCNTLabelQueueJob SET FTLqjStatus='SENDING' WHERE FTLqjJobID=? AND FTLqjStatus='QUEUED'")
             .bind(&id)
             .execute(&mut *tx)
             .await
@@ -1212,7 +1212,7 @@ async fn worker_tick(pool: &SqlitePool) -> Result<()> {
     if claim.rows_affected() != 1 {
         return Ok(());
     }
-    sqlx::query("UPDATE ABPrintUnit SET status='SENDING' WHERE job=? AND seq=? AND status='READY'")
+    sqlx::query("UPDATE TCNTLabelQueueUnit SET FTLquStatus='SENDING' WHERE FTLqjJobID=? AND FNLquSeq=? AND FTLquStatus='READY'")
         .bind(&id)
         .bind(seq)
         .execute(&mut *tx)
@@ -1227,7 +1227,7 @@ async fn worker_tick(pool: &SqlitePool) -> Result<()> {
     .unwrap_or_else(|_| Err("หมดเวลารอผล อาจส่งข้อมูลบางส่วนแล้ว".into()));
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     if result.is_ok() {
-        sqlx::query("UPDATE ABPrintUnit SET status='SUBMITTED' WHERE job=? AND seq=?")
+        sqlx::query("UPDATE TCNTLabelQueueUnit SET FTLquStatus='SUBMITTED' WHERE FTLqjJobID=? AND FNLquSeq=?")
             .bind(&id)
             .bind(seq)
             .execute(&mut *tx)
@@ -1235,22 +1235,22 @@ async fn worker_tick(pool: &SqlitePool) -> Result<()> {
             .map_err(|e| e.to_string())?;
         if let Some(marks) = p["marks"].as_array() {
             for m in marks {
-                sqlx::query("INSERT INTO ABPrintWatermark(rule,barcode,hash) VALUES(?,?,?) ON CONFLICT(rule,barcode) DO UPDATE SET hash=excluded.hash")
+                sqlx::query("INSERT INTO TCNTLabelPrintMark(FTLpmRuleScope,FTLpmItemKey,FTLpmPrintHash) VALUES(?,?,?) ON CONFLICT(FTLpmRuleScope,FTLpmItemKey) DO UPDATE SET FTLpmPrintHash=excluded.FTLpmPrintHash")
           .bind(m["rule"].as_str()).bind(m["barcode"].as_str()).bind(m["hash"].as_str()).execute(&mut *tx).await.map_err(|e|e.to_string())?;
             }
         }
-        sqlx::query("UPDATE ABPrintJob SET status='QUEUED',completed=(SELECT COUNT(*) FROM ABPrintUnit WHERE job=? AND status='SUBMITTED') WHERE id=?")
+        sqlx::query("UPDATE TCNTLabelQueueJob SET FTLqjStatus='QUEUED',FNLqjQtySent=(SELECT COUNT(*) FROM TCNTLabelQueueUnit WHERE FTLqjJobID=? AND FTLquStatus='SUBMITTED') WHERE FTLqjJobID=?")
         .bind(&id).bind(&id).execute(&mut *tx).await.map_err(|e|e.to_string())?;
     } else {
         let e = result.unwrap_err();
-        sqlx::query("UPDATE ABPrintUnit SET status='UNKNOWN',error=? WHERE job=? AND seq=?")
+        sqlx::query("UPDATE TCNTLabelQueueUnit SET FTLquStatus='UNKNOWN',FTLquError=? WHERE FTLqjJobID=? AND FNLquSeq=?")
             .bind(&e)
             .bind(&id)
             .bind(seq)
             .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
-        sqlx::query("UPDATE ABPrintJob SET status='NEEDS_REVIEW',error=? WHERE id=?")
+        sqlx::query("UPDATE TCNTLabelQueueJob SET FTLqjStatus='NEEDS_REVIEW',FTLqjError=? WHERE FTLqjJobID=?")
             .bind(&e)
             .bind(&id)
             .execute(&mut *tx)
@@ -1282,7 +1282,7 @@ async fn scheduler_tick_at(pool: &SqlitePool, n: chrono::DateTime<Local>) -> Res
             continue;
         }
         let dedup = format!("{}:{}", r.id, n.format("%Y-%m-%d"));
-        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ABPrintJob WHERE dedup=?")
+        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM TCNTLabelQueueJob WHERE FTLqjDedupKey=?")
             .bind(&dedup)
             .fetch_one(pool)
             .await
@@ -1346,12 +1346,12 @@ mod tests {
     }
     async fn bulk_fixture() -> (SqlitePool, Vec<PrintRule>) {
         let p=fixture().await;
-        sqlx::raw_sql("CREATE TABLE ABStorage(id INTEGER PRIMARY KEY,branch TEXT);INSERT INTO ABStorage VALUES(1,'B1');").execute(&p).await.unwrap();
+        sqlx::raw_sql("CREATE TABLE TCNSLabelStorage(FNLstID INTEGER PRIMARY KEY,FTBchCode TEXT);INSERT INTO TCNSLabelStorage VALUES(1,'B1');").execute(&p).await.unwrap();
         let mut rs=Vec::new();
         for id in ["a","b"] {
             let r:PrintRule=serde_json::from_value(json!({"id":id,"name":id,"enabled":true,"branch":"B1","source":"PRICE_CHG","time":"01:00","days":"1111111","size":"old","template":"old","printer":"old","tray":"","protocol":"WINDOWS","ip":"","port":9100,"dpi":203,"quantity":1,"catchUp":true})).unwrap();
-            sqlx::query("INSERT INTO ABPrintRule VALUES(?,?)").bind(id).bind(serde_json::to_string(&r).unwrap()).execute(&p).await.unwrap();
-            sqlx::query("INSERT INTO ABPrintWatermark VALUES(?,'barcode','sent-hash')").bind(id).execute(&p).await.unwrap();
+            sqlx::query("INSERT INTO TCNMLabelPrintRule VALUES(?,?)").bind(id).bind(serde_json::to_string(&r).unwrap()).execute(&p).await.unwrap();
+            sqlx::query("INSERT INTO TCNTLabelPrintMark VALUES(?,'barcode','sent-hash')").bind(id).execute(&p).await.unwrap();
             put(&p,&format!("ruleSince:{}",id),"2020-01-01").await.unwrap();
             let mut stopped=r;stopped.enabled=false;rs.push(stopped);
         }
@@ -1361,10 +1361,10 @@ mod tests {
     #[tokio::test]
     async fn legacy_profile_codes_survive_insertion_deletion_and_restart() {
         let (pool,_) = bulk_fixture().await;
-        let codes = || sqlx::query_as::<_,(String,String)>("SELECT id,json_extract(config,'$.code') FROM ABPrintRule ORDER BY id");
+        let codes = || sqlx::query_as::<_,(String,String)>("SELECT FTLprRuleID,json_extract(FTLprConfigJson,'$.code') FROM TCNMLabelPrintRule ORDER BY FTLprRuleID");
         assert_eq!(codes().fetch_all(&pool).await.unwrap(),[("a".into(),"001".into()),("b".into(),"002".into())]);
-        sqlx::query("DELETE FROM ABPrintRule WHERE id='a'").execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO ABPrintRule SELECT '0',json_remove(json_set(config,'$.id','0'),'$.code') FROM ABPrintRule WHERE id='b'")
+        sqlx::query("DELETE FROM TCNMLabelPrintRule WHERE FTLprRuleID='a'").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNMLabelPrintRule SELECT '0',json_remove(json_set(FTLprConfigJson,'$.id','0'),'$.code') FROM TCNMLabelPrintRule WHERE FTLprRuleID='b'")
             .execute(&pool).await.unwrap();
         ensure_schema(&pool).await.unwrap();
         ensure_schema(&pool).await.unwrap();
@@ -1380,7 +1380,7 @@ mod tests {
         }
         let after = serde_json::to_value(rules(&p).await.unwrap()).unwrap();
         assert_eq!(before, after);
-        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM ABPrintJob").fetch_one(&p).await.unwrap(),0);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNTLabelQueueJob").fetch_one(&p).await.unwrap(),0);
     }
     #[tokio::test]
     async fn bulk_save_keeps_ids_watermarks_and_does_not_enqueue() {
@@ -1388,13 +1388,13 @@ mod tests {
         persist_bulk(&p,BulkRules{branch:"B1".into(),rules:rs,preferences:json!({"branch":"B1","enabled":false})}).await.unwrap();
         assert!(rules(&p).await.unwrap().iter().all(|r|!r.enabled));
         assert_eq!(setting(&p,"ruleSince:a").await,"2020-01-01");
-        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM ABPrintWatermark").fetch_one(&p).await.unwrap(),2);
-        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM ABPrintJob").fetch_one(&p).await.unwrap(),0);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNTLabelPrintMark").fetch_one(&p).await.unwrap(),2);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNTLabelQueueJob").fetch_one(&p).await.unwrap(),0);
     }
     #[tokio::test]
     async fn bulk_write_failure_rolls_back_all_rows_and_preferences() {
         let (p,rs)=bulk_fixture().await;
-        sqlx::raw_sql("CREATE TRIGGER fail_second BEFORE UPDATE ON ABPrintRule WHEN NEW.id='b' BEGIN SELECT RAISE(ABORT,'test failure'); END;").execute(&p).await.unwrap();
+        sqlx::raw_sql("CREATE TRIGGER fail_second BEFORE UPDATE ON TCNMLabelPrintRule WHEN NEW.FTLprRuleID='b' BEGIN SELECT RAISE(ABORT,'test failure'); END;").execute(&p).await.unwrap();
         assert!(persist_bulk(&p,BulkRules{branch:"B1".into(),rules:rs,preferences:json!({"branch":"B1"})}).await.is_err());
         assert!(rules(&p).await.unwrap().iter().all(|r|r.enabled));
         assert!(setting(&p,"bulk:B1").await.is_empty());
@@ -1406,7 +1406,7 @@ mod tests {
         assert!(rules(&p).await.unwrap().iter().all(|r|r.enabled));
     }
     async fn status(p: &SqlitePool, id: &str) -> String {
-        sqlx::query_scalar("SELECT status FROM ABPrintJob WHERE id=?")
+        sqlx::query_scalar("SELECT FTLqjStatus FROM TCNTLabelQueueJob WHERE FTLqjJobID=?")
             .bind(id)
             .fetch_one(p)
             .await
@@ -1450,11 +1450,11 @@ mod tests {
         )
         .await
         .unwrap();
-        sqlx::query("UPDATE ABPrintUnit SET status=CASE seq WHEN 0 THEN 'SUBMITTED' WHEN 1 THEN 'SENDING' ELSE 'READY' END WHERE job=?").bind(&id).execute(&p).await.unwrap();
+        sqlx::query("UPDATE TCNTLabelQueueUnit SET FTLquStatus=CASE FNLquSeq WHEN 0 THEN 'SUBMITTED' WHEN 1 THEN 'SENDING' ELSE 'READY' END WHERE FTLqjJobID=?").bind(&id).execute(&p).await.unwrap();
         recover(&p).await.unwrap();
         assert_eq!(status(&p, &id).await, "NEEDS_REVIEW");
         let rows: Vec<String> =
-            sqlx::query_scalar("SELECT status FROM ABPrintUnit WHERE job=? ORDER BY seq")
+            sqlx::query_scalar("SELECT FTLquStatus FROM TCNTLabelQueueUnit WHERE FTLqjJobID=? ORDER BY FNLquSeq")
                 .bind(&id)
                 .fetch_all(&p)
                 .await
@@ -1467,7 +1467,7 @@ mod tests {
         .await;
         assert!(res.status().is_success());
         let rows: Vec<String> =
-            sqlx::query_scalar("SELECT status FROM ABPrintUnit WHERE job=? ORDER BY seq")
+            sqlx::query_scalar("SELECT FTLquStatus FROM TCNTLabelQueueUnit WHERE FTLqjJobID=? ORDER BY FNLquSeq")
                 .bind(&id)
                 .fetch_all(&p)
                 .await
@@ -1500,7 +1500,7 @@ mod tests {
         .await
         .is_err());
         assert_eq!(status(&p, &id).await, "WAIT_DATA");
-        sqlx::query("CREATE TRIGGER fail_unit BEFORE INSERT ON ABPrintUnit BEGIN SELECT RAISE(ABORT,'test'); END").execute(&p).await.unwrap();
+        sqlx::query("CREATE TRIGGER fail_unit BEFORE INSERT ON TCNTLabelQueueUnit BEGIN SELECT RAISE(ABORT,'test'); END").execute(&p).await.unwrap();
         assert!(insert_job(
             &p,
             "MANUAL",
@@ -1512,7 +1512,7 @@ mod tests {
         )
         .await
         .is_err());
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ABPrintJob")
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM TCNTLabelQueueJob")
             .fetch_one(&p)
             .await
             .unwrap();
@@ -1580,7 +1580,7 @@ mod tests {
                 offset_days: 0,
                 targets: vec![],
             };
-            sqlx::query("INSERT INTO ABPrintRule(id,config) VALUES(?,?)")
+            sqlx::query("INSERT INTO TCNMLabelPrintRule(FTLprRuleID,FTLprConfigJson) VALUES(?,?)")
                 .bind(id)
                 .bind(serde_json::to_string(&r).unwrap())
                 .execute(&p)
@@ -1590,7 +1590,7 @@ mod tests {
         let morning = Local.with_ymd_and_hms(2026, 11, 20, 8, 0, 0).unwrap();
         scheduler_tick_at(&p, morning).await.unwrap();
         scheduler_tick_at(&p, morning).await.unwrap();
-        let names: Vec<String> = sqlx::query_scalar("SELECT name FROM ABPrintJob ORDER BY seq")
+        let names: Vec<String> = sqlx::query_scalar("SELECT FTLqjName FROM TCNTLabelQueueJob ORDER BY FNLqjSeq")
             .fetch_all(&p)
             .await
             .unwrap();
@@ -1602,8 +1602,8 @@ mod tests {
     async fn multi_target_profile_validates_and_normalizes_targets() {
         let p = fixture().await;
         sqlx::raw_sql(
-            "CREATE TABLE ABStorage(id INTEGER PRIMARY KEY,branch TEXT);
-             INSERT INTO ABStorage VALUES(1,'B01');
+            "CREATE TABLE TCNSLabelStorage(FNLstID INTEGER PRIMARY KEY,FTBchCode TEXT);
+             INSERT INTO TCNSLabelStorage VALUES(1,'B01');
              CREATE TABLE TCNMLabelSize(FTLbsCode TEXT PRIMARY KEY, FTLbsGroup TEXT, FTLbsName TEXT, FCLbsWidth REAL, FCLbsHeight REAL, FNLbsCol INTEGER, FNLbsRow INTEGER, FCLbsMagTop REAL, FCLbsMagLeft REAL, FCLbsMagBottom REAL, FCLbsMagRight REAL, FCLbsGapH REAL, FCLbsGapV REAL, FNLbsQtyPageNor INTEGER, FNLbsQtyPagePmt INTEGER, FTLbsTmplNor TEXT, FTLbsTmplPmt TEXT, FTLbsHhtCode TEXT, FTLbsStaUse TEXT, FTLbsPaperSize TEXT, FCLbsPaperWidth REAL, FCLbsPaperHeight REAL, FCLbsOffsetX REAL, FCLbsOffsetY REAL, FTPprCode TEXT, FTLbsStdTmplNor TEXT, FTLbsStdTmplPmt TEXT, FTLbsRmk TEXT, FDCreateOn TEXT, FTCreateBy TEXT, FDLastUpdOn TEXT, FTLastUpdBy TEXT);
              CREATE TABLE TCNMLabelTmpl(FTLtmCode TEXT PRIMARY KEY, FTLtmName TEXT, FTLbsCode TEXT, FTLtmPriType TEXT, FTLtmLayout TEXT, FTLtmStaUse TEXT, FTLtmMode TEXT, FTPprCode TEXT);
              INSERT INTO TCNMLabelSize(FTLbsCode,FTLbsGroup,FTLbsName,FCLbsWidth,FCLbsHeight,FTLbsStaUse) VALUES('S1','1','25x30',25,30,'1'),('S2','1','Small',40,20,'1');
@@ -1732,7 +1732,7 @@ async fn prepare_profile_job(pool: &SqlitePool, profile_code_or_id: &str, reprin
         Ok(prepared) => prepared,
         Err(e) => {
             let message = format!("เตรียมข้อมูลป้ายวันที่ {target_date} ไม่สำเร็จ: {e}");
-            sqlx::query("INSERT INTO ABPrintJob(id,source,name,status,created,config,total,error) VALUES(?,'PROFILE',?,'FAILED',?,?,0,?)")
+            sqlx::query("INSERT INTO TCNTLabelQueueJob(FTLqjJobID,FTLqjSource,FTLqjName,FTLqjStatus,FDCreateOn,FTLqjConfigJson,FNLqjQtyTotal,FTLqjError) VALUES(?,'PROFILE',?,'FAILED',?,?,0,?)")
                 .bind(uid()).bind(&job_name).bind(now()).bind(config.to_string()).bind(&message)
                 .execute(pool).await.map_err(|log_error| format!("{message} (บันทึกประวัติไม่ได้: {log_error})"))?;
             return Err(message);
@@ -1747,7 +1747,7 @@ async fn prepare_profile_job(pool: &SqlitePool, profile_code_or_id: &str, reprin
         // Limit the lookup to labels eligible on the target date, even after years of printing.
         let keys: Vec<String> = items.iter().map(|it| json!([it.pdt_code,it.bar_code]).to_string()).collect();
         let previous: std::collections::HashMap<String,String> = sqlx::query_as::<_,(String,String)>(
-            "SELECT barcode,hash FROM ABPrintWatermark WHERE rule=? AND barcode IN (SELECT value FROM json_each(?))")
+            "SELECT FTLpmItemKey,FTLpmPrintHash FROM TCNTLabelPrintMark WHERE FTLpmRuleScope=? AND FTLpmItemKey IN (SELECT value FROM json_each(?))")
             .bind(&scope).bind(json!(keys).to_string()).fetch_all(&mut *tx).await
             .map_err(|e|e.to_string())?.into_iter().collect();
         let route = ResolvedPrinterRoute {
@@ -1790,7 +1790,7 @@ async fn prepare_profile_job(pool: &SqlitePool, profile_code_or_id: &str, reprin
             };
             if let Some(message) = warning {
                 let message = format!("{}: {message}", target.printer);
-                sqlx::query("INSERT INTO ABPrintJob(id,source,name,status,created,config,total,error) VALUES(?,'PROFILE',?,'FAILED',?,?,0,?)")
+                sqlx::query("INSERT INTO TCNTLabelQueueJob(FTLqjJobID,FTLqjSource,FTLqjName,FTLqjStatus,FDCreateOn,FTLqjConfigJson,FNLqjQtyTotal,FTLqjError) VALUES(?,'PROFILE',?,'FAILED',?,?,0,?)")
                     .bind(uid()).bind(&job_name).bind(now()).bind(config.to_string()).bind(&message)
                     .execute(&mut *tx).await.map_err(|e| format!("{message} ({e})"))?;
                 tx.commit().await.map_err(|e| e.to_string())?;
@@ -1854,7 +1854,7 @@ pub async fn execute_profile_cli(pool: &SqlitePool, profile_code_or_id: &str) ->
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3600);
     loop {
         let (status, completed, error): (String, i64, Option<String>) =
-            sqlx::query_as("SELECT status,completed,error FROM ABPrintJob WHERE id=?")
+            sqlx::query_as("SELECT FTLqjStatus,FNLqjQtySent,FTLqjError FROM TCNTLabelQueueJob WHERE FTLqjJobID=?")
                 .bind(&job).fetch_one(pool).await.map_err(|e|e.to_string())?;
         match status.as_str() {
             "SUBMITTED" => {
@@ -1866,7 +1866,7 @@ pub async fn execute_profile_cli(pool: &SqlitePool, profile_code_or_id: &str) ->
                 return Err(format!("งาน {job}: {status}: {}", error.unwrap_or_default())),
             _ => {}
         }
-        let blocker: Option<String> = sqlx::query_scalar("SELECT id FROM ABPrintJob WHERE seq < (SELECT seq FROM ABPrintJob WHERE id=?) AND status IN ('BLOCKED','NEEDS_REVIEW') ORDER BY seq LIMIT 1")
+        let blocker: Option<String> = sqlx::query_scalar("SELECT FTLqjJobID FROM TCNTLabelQueueJob WHERE FNLqjSeq < (SELECT FNLqjSeq FROM TCNTLabelQueueJob WHERE FTLqjJobID=?) AND FTLqjStatus IN ('BLOCKED','NEEDS_REVIEW') ORDER BY FNLqjSeq LIMIT 1")
             .bind(&job).fetch_optional(pool).await.map_err(|e|e.to_string())?;
         if let Some(blocker) = blocker {
             return Err(format!("งาน {job} อยู่ในคิวแล้ว แต่รอตรวจสอบงานก่อนหน้า {blocker}; อย่าเรียกซ้ำ ให้จัดการในคิวงานพิมพ์"));

@@ -118,7 +118,7 @@ pub async fn ensure_auth_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .execute(pool)
     .await?;
-    sqlx::query("CREATE TABLE IF NOT EXISTS ABAdminGrant(token_hash TEXT PRIMARY KEY, expires INTEGER NOT NULL)").execute(pool).await?;
+    sqlx::query("CREATE TABLE IF NOT EXISTS TCNTLabelAdminGrant(FTLagTokenHash TEXT PRIMARY KEY, FNLagExpiresUnix INTEGER NOT NULL)").execute(pool).await?;
     Ok(())
 }
 
@@ -135,7 +135,7 @@ pub async fn get_admin_status(State(st): State<AppState>, headers: HeaderMap) ->
         if let Ok(session) = load_valid_session(&st.pool, &token).await {
             if session.FTSesLocked == 0 {
                 sqlx::query_scalar::<_, i64>(
-                    "SELECT COUNT(*) FROM ABAdminGrant WHERE token_hash=? AND expires>unixepoch()",
+                    "SELECT COUNT(*) FROM TCNTLabelAdminGrant WHERE FTLagTokenHash=? AND FNLagExpiresUnix>unixepoch()",
                 )
                 .bind(&session.FTSesTokenHash)
                 .fetch_one(&st.pool)
@@ -162,8 +162,8 @@ pub async fn grant_admin(pool: &SqlitePool, headers: &HeaderMap) -> Result<(), S
     let token=bearer_token(headers).ok_or("กรุณาเข้าสู่ระบบก่อนยืนยันสิทธิ์ผู้ดูแล")?;
     let session=load_valid_session(pool,&token).await.map_err(|(_,m)|m)?;
     if session.FTSesLocked!=0 {return Err("กรุณาปลดล็อกก่อนยืนยันสิทธิ์ผู้ดูแล".into());}
-    sqlx::query("DELETE FROM ABAdminGrant WHERE expires < unixepoch()").execute(pool).await.map_err(|e|e.to_string())?;
-    sqlx::query("INSERT INTO ABAdminGrant(token_hash,expires) VALUES(?,unixepoch()+600) ON CONFLICT(token_hash) DO UPDATE SET expires=excluded.expires")
+    sqlx::query("DELETE FROM TCNTLabelAdminGrant WHERE FNLagExpiresUnix < unixepoch()").execute(pool).await.map_err(|e|e.to_string())?;
+    sqlx::query("INSERT INTO TCNTLabelAdminGrant(FTLagTokenHash,FNLagExpiresUnix) VALUES(?,unixepoch()+600) ON CONFLICT(FTLagTokenHash) DO UPDATE SET FNLagExpiresUnix=excluded.FNLagExpiresUnix")
         .bind(session.FTSesTokenHash).execute(pool).await.map_err(|e|e.to_string())?;
     Ok(())
 }
@@ -171,7 +171,7 @@ pub async fn grant_admin(pool: &SqlitePool, headers: &HeaderMap) -> Result<(), S
 pub async fn revoke_admin(State(st): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(token) = bearer_token(&headers) {
         let token_hash = hash_token(&token);
-        let _ = sqlx::query("DELETE FROM ABAdminGrant WHERE token_hash = ?")
+        let _ = sqlx::query("DELETE FROM TCNTLabelAdminGrant WHERE FTLagTokenHash = ?")
             .bind(&token_hash)
             .execute(&st.pool)
             .await;
@@ -326,7 +326,7 @@ pub async fn require_api_session(
                     || ["/api/paper-sizes/","/api/preprints/","/api/lan-printers/","/api/label-sizes/","/api/templates/","/api/schedules/"].iter().any(|prefix|path.starts_with(prefix))
                     || matches!(path,"/api/seed"|"/api/printers"|"/api/label-printers"|"/api/agent/register"|"/api/print-center/rule"|"/api/print-center/rules"|"/api/print-center/profile/delete"|"/api/print-center/sync"|"/api/print-center/action"));
                 if changes_settings {
-                    let granted=sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM ABAdminGrant WHERE token_hash=? AND expires>unixepoch()")
+                    let granted=sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNTLabelAdminGrant WHERE FTLagTokenHash=? AND FNLagExpiresUnix>unixepoch()")
                         .bind(&session.FTSesTokenHash).fetch_one(&pool).await.unwrap_or(0)>0;
                     if !granted {return (StatusCode::FORBIDDEN,Json(json!({"code":"ADMIN_REQUIRED","error":"กรุณายืนยัน PIN ผู้ดูแลก่อนแก้ไขการตั้งค่า"}))).into_response();}
                 }
@@ -740,7 +740,7 @@ pub async fn post_auth_lock(State(st): State<AppState>, headers: HeaderMap) -> R
         Ok(s) => s,
         Err((status, msg)) => return err_json(status, msg),
     };
-    if let Err(e)=sqlx::query("DELETE FROM ABAdminGrant WHERE token_hash=?").bind(&session.FTSesTokenHash).execute(&st.pool).await {
+    if let Err(e)=sqlx::query("DELETE FROM TCNTLabelAdminGrant WHERE FTLagTokenHash=?").bind(&session.FTSesTokenHash).execute(&st.pool).await {
         return err_json(StatusCode::INTERNAL_SERVER_ERROR,e.to_string());
     }
 
@@ -805,7 +805,7 @@ pub async fn post_auth_unlock(
 pub async fn post_auth_logout(State(st): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(token) = bearer_token(&headers) {
         let token_hash = hash_token(&token);
-        let _ = sqlx::query("DELETE FROM ABAdminGrant WHERE token_hash = ?")
+        let _ = sqlx::query("DELETE FROM TCNTLabelAdminGrant WHERE FTLagTokenHash = ?")
             .bind(&token_hash)
             .execute(&st.pool)
             .await;
@@ -897,7 +897,7 @@ mod tests {
     #[tokio::test]
     async fn settings_require_admin_grant_and_lock_revokes_it() {
         let pool=setup_auth_test_db().await;
-        sqlx::raw_sql("CREATE TABLE ABStorage(id INTEGER PRIMARY KEY,branch TEXT); INSERT INTO ABStorage VALUES(1,'00001')").execute(&pool).await.unwrap();
+        sqlx::raw_sql("CREATE TABLE TCNSLabelStorage(FNLstID INTEGER PRIMARY KEY,FTBchCode TEXT); INSERT INTO TCNSLabelStorage VALUES(1,'00001')").execute(&pool).await.unwrap();
         let app=Router::new()
             .route("/api/auth/login",post(post_auth_login))
             .route("/api/auth/lock",post(post_auth_lock))
@@ -919,7 +919,7 @@ mod tests {
         assert_eq!(app.clone().oneshot(request("/api/config/options")).await.unwrap().status(),StatusCode::OK);
         assert_eq!(app.clone().oneshot(request("/api/auth/lock")).await.unwrap().status(),StatusCode::OK);
         assert_eq!(app.oneshot(request("/api/config/options")).await.unwrap().status(),StatusCode::LOCKED);
-        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM ABAdminGrant").fetch_one(&pool).await.unwrap(),0);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNTLabelAdminGrant").fetch_one(&pool).await.unwrap(),0);
         pool.close().await;
     }
 

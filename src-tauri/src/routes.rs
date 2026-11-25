@@ -1464,8 +1464,8 @@ pub async fn get_label_printers(State(st): State<AppState>) -> Response {
     .await
     .unwrap_or_default();
 
-    let template_rows:Vec<(String,String)>=sqlx::query_as("SELECT id,value FROM ABPrintSetting WHERE id LIKE 'templateRoutes:%'").fetch_all(&st.pool).await.unwrap_or_default();
-    let event_rows:Vec<(String,String)>=sqlx::query_as("SELECT id,value FROM ABPrintSetting WHERE id LIKE 'eventRoutes:%'").fetch_all(&st.pool).await.unwrap_or_default();
+    let template_rows:Vec<(String,String)>=sqlx::query_as("SELECT FTLpsCode,FTLpsValue FROM TCNSLabelPrintSetting WHERE FTLpsCode LIKE 'templateRoutes:%'").fetch_all(&st.pool).await.unwrap_or_default();
+    let event_rows:Vec<(String,String)>=sqlx::query_as("SELECT FTLpsCode,FTLpsValue FROM TCNSLabelPrintSetting WHERE FTLpsCode LIKE 'eventRoutes:%'").fetch_all(&st.pool).await.unwrap_or_default();
     let mappings: Vec<Value> = sizes
         .into_iter()
         .map(|(code, name, grp)| {
@@ -1556,13 +1556,13 @@ pub async fn post_label_printers(
     }
 
     if let Some(events)=body.event_routes {
-        if let Err(e)=sqlx::query("INSERT INTO ABPrintSetting(id,value) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value")
+        if let Err(e)=sqlx::query("INSERT INTO TCNSLabelPrintSetting(FTLpsCode,FTLpsValue) VALUES(?,?) ON CONFLICT(FTLpsCode) DO UPDATE SET FTLpsValue=excluded.FTLpsValue")
             .bind(format!("eventRoutes:{}:{}",server_code,body.lbs_code)).bind(serde_json::to_string(&events).unwrap()).execute(&mut *tx).await {
             return err_json(StatusCode::INTERNAL_SERVER_ERROR,e.to_string());
         }
     }
     if let Some(routes)=body.template_routes {
-        if let Err(e)=sqlx::query("INSERT INTO ABPrintSetting(id,value) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value")
+        if let Err(e)=sqlx::query("INSERT INTO TCNSLabelPrintSetting(FTLpsCode,FTLpsValue) VALUES(?,?) ON CONFLICT(FTLpsCode) DO UPDATE SET FTLpsValue=excluded.FTLpsValue")
             .bind(format!("templateRoutes:{}:{}",server_code,body.lbs_code)).bind(serde_json::to_string(&routes).unwrap()).execute(&mut *tx).await {
             return err_json(StatusCode::INTERNAL_SERVER_ERROR,e.to_string());
         }
@@ -3665,7 +3665,7 @@ pub async fn post_import_master(
     }
 
     let mode = crate::standalone::mode(&st.pool).await;
-    let configured: Option<(String, String)> = sqlx::query_as("SELECT path, branch FROM main.ABStorage WHERE id=1")
+    let configured: Option<(String, String)> = sqlx::query_as("SELECT FTLstDbPath, FTBchCode FROM main.TCNSLabelStorage WHERE FNLstID=1")
         .fetch_optional(&st.pool)
         .await
         .ok()
@@ -3814,9 +3814,9 @@ pub async fn post_import_master(
     let path_str = target_path.to_string_lossy().to_string();
     let status_write: Result<(), sqlx::Error> = async {
         let mut tx=st.pool.begin().await?;
-        sqlx::query("INSERT INTO ABStorage(id,path,branch,max_age_minutes) VALUES(1,?,?,1440) ON CONFLICT(id) DO UPDATE SET path=excluded.path,branch=excluded.branch")
+        sqlx::query("INSERT INTO TCNSLabelStorage(FNLstID,FTLstDbPath,FTBchCode,FNLstMaxAgeMin) VALUES(1,?,?,1440) ON CONFLICT(FNLstID) DO UPDATE SET FTLstDbPath=excluded.FTLstDbPath,FTBchCode=excluded.FTBchCode")
         .bind(&path_str).bind(&branch).execute(&mut *tx).await?;
-        sqlx::query("INSERT INTO ABSource(id,mode,config,status,last_success) VALUES(1,'STANDALONE','{}','นำเข้าไฟล์ Master สำเร็จ',datetime('now')) ON CONFLICT(id) DO UPDATE SET mode='STANDALONE',status='นำเข้าไฟล์ Master สำเร็จ',last_success=datetime('now')")
+        sqlx::query("INSERT INTO TCNSLabelSource(FNLsoID,FTLsoMode,FTLsoConfigJson,FTLsoStatus,FDLsoLastSuccess) VALUES(1,'STANDALONE','{}','นำเข้าไฟล์ Master สำเร็จ',datetime('now')) ON CONFLICT(FNLsoID) DO UPDATE SET FTLsoMode='STANDALONE',FTLsoStatus='นำเข้าไฟล์ Master สำเร็จ',FDLsoLastSuccess=datetime('now')")
         .execute(&mut *tx).await?;
         sqlx::query("UPDATE TCNSSysOption SET FTSopValue=? WHERE FTSopCode='DefaultBranch'")
         .bind(&branch).execute(&mut *tx).await?;
@@ -4753,7 +4753,7 @@ mod event_printer_mapping_tests {
         let body:SaveLabelPrinterBody=serde_json::from_value(json!({"lbsCode":"L1","normalPrinter":"Normal","promoPrinter":"Promo","templateRoutes":{"BAR":{"printer":"Sticker","tray":"Roll","protocol":"TSPL"},"PRICE":{"printer":"Laser","tray":"Tray 2","protocol":"WINDOWS"}}})).unwrap();
         assert!(post_label_printers(State(AppState{pool:p.clone()}),Json(body)).await.status().is_success());
         assert!(post_label_printers(State(AppState{pool:p.clone()}),Json(payload(false))).await.status().is_success());
-        let saved:String=sqlx::query_scalar("SELECT value FROM ABPrintSetting WHERE id='templateRoutes:LOCAL:L1'").fetch_one(&p).await.unwrap();
+        let saved:String=sqlx::query_scalar("SELECT FTLpsValue FROM TCNSLabelPrintSetting WHERE FTLpsCode='templateRoutes:LOCAL:L1'").fetch_one(&p).await.unwrap();
         let v:Value=serde_json::from_str(&saved).unwrap();
         assert_eq!(v["BAR"]["printer"],"Sticker");assert_eq!(v["PRICE"]["tray"],"Tray 2");
         let invalid:SaveLabelPrinterBody=serde_json::from_value(json!({"lbsCode":"L1","templateRoutes":{"OTHER":{"printer":"Wrong","tray":"","protocol":"WINDOWS"}}})).unwrap();
@@ -4765,7 +4765,7 @@ mod event_printer_mapping_tests {
         let p=fixture().await;
         assert!(post_label_printers(State(AppState{pool:p.clone()}),Json(payload(true))).await.status().is_success());
         assert!(post_label_printers(State(AppState{pool:p.clone()}),Json(payload(false))).await.status().is_success());
-        let saved:String=sqlx::query_scalar("SELECT value FROM ABPrintSetting WHERE id='eventRoutes:LOCAL:L1'").fetch_one(&p).await.unwrap();
+        let saved:String=sqlx::query_scalar("SELECT FTLpsValue FROM TCNSLabelPrintSetting WHERE FTLpsCode='eventRoutes:LOCAL:L1'").fetch_one(&p).await.unwrap();
         let v:Value=serde_json::from_str(&saved).unwrap();
         assert_eq!(v["NEW_PDT"]["printer"],"New");
         assert_eq!(v["PROMO_END_REVERT"]["tray"],"Tray 1");
@@ -4774,7 +4774,7 @@ mod event_printer_mapping_tests {
     #[tokio::test]
     async fn event_routes_failure_rolls_back_manual_mappings_too() {
         let p=fixture().await;
-        sqlx::raw_sql("CREATE TRIGGER fail_routes BEFORE INSERT ON ABPrintSetting BEGIN SELECT RAISE(ABORT,'test'); END;").execute(&p).await.unwrap();
+        sqlx::raw_sql("CREATE TRIGGER fail_routes BEFORE INSERT ON TCNSLabelPrintSetting BEGIN SELECT RAISE(ABORT,'test'); END;").execute(&p).await.unwrap();
         assert!(!post_label_printers(State(AppState{pool:p.clone()}),Json(payload(true))).await.status().is_success());
         assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNMLabelPrinter").fetch_one(&p).await.unwrap(),0);
     }

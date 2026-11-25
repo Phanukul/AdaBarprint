@@ -53,11 +53,11 @@ pub fn own_path() -> PathBuf {
         .join("AdaAccD.db")
 }
 pub async fn ensure(pool: &SqlitePool) -> Result<()> {
-    sqlx::query("CREATE TABLE IF NOT EXISTS ABSource(id INTEGER PRIMARY KEY CHECK(id=1), mode TEXT NOT NULL DEFAULT 'POS_SHARED', config TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT '', last_success TEXT NOT NULL DEFAULT '', lease_until INTEGER NOT NULL DEFAULT 0)").execute(pool).await.map_err(|e|e.to_string())?;
+    sqlx::query("CREATE TABLE IF NOT EXISTS TCNSLabelSource(FNLsoID INTEGER PRIMARY KEY CHECK(FNLsoID=1), FTLsoMode TEXT NOT NULL DEFAULT 'POS_SHARED', FTLsoConfigJson TEXT NOT NULL DEFAULT '{}', FTLsoStatus TEXT NOT NULL DEFAULT '', FDLsoLastSuccess TEXT NOT NULL DEFAULT '', FNLsoLeaseUntilUnix INTEGER NOT NULL DEFAULT 0)").execute(pool).await.map_err(|e|e.to_string())?;
     Ok(())
 }
 pub async fn mode(pool: &SqlitePool) -> String {
-    sqlx::query_scalar("SELECT mode FROM main.ABSource WHERE id=1")
+    sqlx::query_scalar("SELECT FTLsoMode FROM main.TCNSLabelSource WHERE FNLsoID=1")
         .fetch_optional(pool)
         .await
         .ok()
@@ -66,7 +66,7 @@ pub async fn mode(pool: &SqlitePool) -> String {
 }
 pub async fn status(pool: &SqlitePool) -> Value {
     let row: Option<(String, String, String)> =
-        sqlx::query_as("SELECT config,status,last_success FROM main.ABSource WHERE id=1")
+        sqlx::query_as("SELECT FTLsoConfigJson,FTLsoStatus,FDLsoLastSuccess FROM main.TCNSLabelSource WHERE FNLsoID=1")
             .fetch_optional(pool)
             .await
             .ok()
@@ -615,7 +615,7 @@ pub async fn apply_snapshots(
     result
 }
 pub async fn sync_now(pool: &SqlitePool) -> Result<()> {
-    let source_cfg: Option<(String, String)> = sqlx::query_as("SELECT mode, config FROM ABSource WHERE id=1")
+    let source_cfg: Option<(String, String)> = sqlx::query_as("SELECT FTLsoMode, FTLsoConfigJson FROM TCNSLabelSource WHERE FNLsoID=1")
         .fetch_optional(pool)
         .await
         .map_err(|e| e.to_string())?;
@@ -633,12 +633,12 @@ pub async fn sync_now(pool: &SqlitePool) -> Result<()> {
     if !has_api {
         return Err("ยังไม่ได้ตั้งค่าการเชื่อมต่อ API2PSMaster สำหรับดาวน์โหลด (เครื่องนี้ใช้งานฐานข้อมูลโดยตรง หรือนำเข้า Master)".into());
     }
-    let locked=sqlx::query("UPDATE ABSource SET lease_until=unixepoch()+1800,status='กำลังดาวน์โหลด' WHERE id=1 AND mode='STANDALONE' AND lease_until<unixepoch()").execute(pool).await.map_err(|e|e.to_string())?.rows_affected();
+    let locked=sqlx::query("UPDATE TCNSLabelSource SET FNLsoLeaseUntilUnix=unixepoch()+1800,FTLsoStatus='กำลังดาวน์โหลด' WHERE FNLsoID=1 AND FTLsoMode='STANDALONE' AND FNLsoLeaseUntilUnix<unixepoch()").execute(pool).await.map_err(|e|e.to_string())?.rows_affected();
     if locked == 0 {
         return Err("มีการดาวน์โหลดข้อมูลกำลังทำงานอยู่ กรุณารอสักครู่".into());
     }
     let result = tokio::time::timeout(Duration::from_secs(1500), async {
-        let raw: String = sqlx::query_scalar("SELECT config FROM ABSource WHERE id=1")
+        let raw: String = sqlx::query_scalar("SELECT FTLsoConfigJson FROM TCNSLabelSource WHERE FNLsoID=1")
             .fetch_one(pool)
             .await
             .map_err(|e| e.to_string())?;
@@ -652,7 +652,7 @@ pub async fn sync_now(pool: &SqlitePool) -> Result<()> {
                 .map_err(|e| format!("{}: {e}", task.table))?;
             bundles.push((task.table, value));
         }
-        let path:String=sqlx::query_scalar("SELECT path FROM ABStorage WHERE id=1").fetch_one(pool).await.map_err(|e|e.to_string())?;
+        let path:String=sqlx::query_scalar("SELECT FTLstDbPath FROM TCNSLabelStorage WHERE FNLstID=1").fetch_one(pool).await.map_err(|e|e.to_string())?;
         prepare_destination(Path::new(&path)).await?;
         apply_snapshots(Path::new(&path), &cfg, &bundles).await
     })
@@ -662,7 +662,7 @@ pub async fn sync_now(pool: &SqlitePool) -> Result<()> {
         Ok(()) => "ดาวน์โหลดครบแล้ว".into(),
         Err(e) => e.clone(),
     };
-    sqlx::query("UPDATE ABSource SET lease_until=0,status=?,last_success=CASE WHEN ? THEN datetime('now') ELSE last_success END WHERE id=1").bind(message).bind(result.is_ok()).execute(pool).await.map_err(|e|e.to_string())?;
+    sqlx::query("UPDATE TCNSLabelSource SET FNLsoLeaseUntilUnix=0,FTLsoStatus=?,FDLsoLastSuccess=CASE WHEN ? THEN datetime('now') ELSE FDLsoLastSuccess END WHERE FNLsoID=1").bind(message).bind(result.is_ok()).execute(pool).await.map_err(|e|e.to_string())?;
     result
 }
 #[derive(Deserialize)]
@@ -699,7 +699,7 @@ pub fn spawn(pool: SqlitePool) {
         loop {
             if pool.is_closed() { break; }
             tokio::time::sleep(Duration::from_secs(30)).await;
-            let due:bool=sqlx::query_scalar("SELECT COALESCE(mode='STANDALONE' AND lease_until<unixepoch() AND (last_success='' OR unixepoch()-unixepoch(last_success)>=COALESCE(json_extract(config,'$.intervalMinutes'),60)*60),0) FROM ABSource WHERE id=1").fetch_optional(&pool).await.ok().flatten().unwrap_or(false);
+            let due:bool=sqlx::query_scalar("SELECT COALESCE(FTLsoMode='STANDALONE' AND FNLsoLeaseUntilUnix<unixepoch() AND (FDLsoLastSuccess='' OR unixepoch()-unixepoch(FDLsoLastSuccess)>=COALESCE(json_extract(FTLsoConfigJson,'$.intervalMinutes'),60)*60),0) FROM TCNSLabelSource WHERE FNLsoID=1").fetch_optional(&pool).await.ok().flatten().unwrap_or(false);
             if due {
                 if sync_now(&pool).await.is_ok() { failures=0; }
                 else { failures=failures.saturating_add(1); }
@@ -771,12 +771,12 @@ mod tests {
         let pool = crate::storage::connect_path(&root.join("AdaBarprint.db"))
             .await
             .unwrap();
-        sqlx::query("INSERT INTO ABStorage VALUES(1,?,'B1',1440)")
+        sqlx::query("INSERT INTO TCNSLabelStorage VALUES(1,?,'B1',1440)")
             .bind(path.to_str().unwrap())
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO ABSource(id,mode) VALUES(1,'STANDALONE')")
+        sqlx::query("INSERT INTO TCNSLabelSource(FNLsoID,FTLsoMode) VALUES(1,'STANDALONE')")
             .execute(&pool)
             .await
             .unwrap();
@@ -787,7 +787,7 @@ mod tests {
                 .is_err(),
             "standalone must not expose old master before first completed sync"
         );
-        sqlx::query("UPDATE ABSource SET last_success=datetime('now')")
+        sqlx::query("UPDATE TCNSLabelSource SET FDLsoLastSuccess=datetime('now')")
             .execute(&pool)
             .await
             .unwrap();

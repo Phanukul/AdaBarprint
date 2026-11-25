@@ -372,7 +372,7 @@ pub async fn install(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     // Existing scheduled profiles keep their printer, quantities and event settings.
     // Only replace a legacy selector when its independent standard template exists.
     let rules: Vec<(String, String)> =
-        sqlx::query_as("SELECT id,config FROM ABPrintRule WHERE instr(config,'legacy:')>0")
+        sqlx::query_as("SELECT FTLprRuleID,FTLprConfigJson FROM TCNMLabelPrintRule WHERE instr(FTLprConfigJson,'legacy:')>0")
             .fetch_all(&mut *tx)
             .await?;
     for (id, raw) in rules {
@@ -402,7 +402,7 @@ pub async fn install(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             }
         }
         if changed {
-            sqlx::query("UPDATE ABPrintRule SET config=? WHERE id=?")
+            sqlx::query("UPDATE TCNMLabelPrintRule SET FTLprConfigJson=? WHERE FTLprRuleID=?")
                 .bind(rule.to_string())
                 .bind(id)
                 .execute(&mut *tx)

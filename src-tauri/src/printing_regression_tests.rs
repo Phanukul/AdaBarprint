@@ -13,8 +13,8 @@ async fn fixture()->(SqlitePool,SqliteConnection){
  db::seed_defaults(&pool).await.unwrap();
  print_center::ensure_schema(&pool).await.unwrap();
  auth::ensure_auth_schema(&pool).await.unwrap();
- sqlx::query("INSERT INTO ABStorage VALUES(1,?,'B1',1440)").bind(master.to_str().unwrap()).execute(&pool).await.unwrap();
- sqlx::query("INSERT INTO ABSource(id,mode,last_success) VALUES(1,'STANDALONE','2026-11-23 00:00:00')").execute(&pool).await.unwrap();
+ sqlx::query("INSERT INTO TCNSLabelStorage VALUES(1,?,'B1',1440)").bind(master.to_str().unwrap()).execute(&pool).await.unwrap();
+ sqlx::query("INSERT INTO TCNSLabelSource(FNLsoID,FTLsoMode,FDLsoLastSuccess) VALUES(1,'STANDALONE','2026-11-23 00:00:00')").execute(&pool).await.unwrap();
  let conn=SqliteConnection::connect_with(&sqlx::sqlite::SqliteConnectOptions::new().filename(master)).await.unwrap();
  (pool,conn)
 }
@@ -29,7 +29,7 @@ async fn installed_master_checks_all_active_barcodes() {
     let master = std::env::var("ADABARPRINT_VERIFY_MASTER").unwrap();
     let branch = std::env::var("ADABARPRINT_VERIFY_BRANCH").unwrap();
     let (pool, conn) = fixture().await;
-    sqlx::query("UPDATE ABStorage SET path=?, branch=? WHERE id=1")
+    sqlx::query("UPDATE TCNSLabelStorage SET FTLstDbPath=?, FTBchCode=? WHERE FNLstID=1")
         .bind(master).bind(&branch).execute(&pool).await.unwrap();
     let products: Vec<(String,String)> = sqlx::query_as(
         "SELECT DISTINCT FTPdtCode, FTBarCode FROM master.TCNMPdtBar
@@ -55,7 +55,7 @@ async fn installed_master_checks_all_active_barcodes() {
             }
         }
     }
-    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM ABPrintJob").fetch_one(&pool).await.unwrap(), 0);
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNTLabelQueueJob").fetch_one(&pool).await.unwrap(), 0);
     let blocked: usize = failures.values().copied().sum();
     println!("Total {total}, prepared {}, missing price {no_price}, other blocks {failures:?}", total-no_price-blocked);
     assert!(total > no_price+blocked, "No printable labels");
@@ -142,13 +142,13 @@ async fn four_scheduler_profiles_enqueue_snapshots_without_sending() {
   .bind(layout.to_string()).execute(&pool).await.unwrap();
  for event in ["PRICE_CHG","NEW_PDT","PROMO_START","PROMO_END_REVERT"] {
   let rule=json!({"id":event,"code":event,"name":event,"enabled":true,"branch":"B1","source":event,"time":"","days":"","size":"SH-100x38","template":"REGRESSION","printer":"SIMULATION ONLY","tray":"","protocol":"ZEBRA","ip":"127.0.0.1","port":1,"dpi":203,"quantity":1,"catchUp":false,"offsetDays":0});
-  sqlx::query("INSERT INTO ABPrintRule(id,config) VALUES(?,?)").bind(event).bind(rule.to_string()).execute(&pool).await.unwrap();
+  sqlx::query("INSERT INTO TCNMLabelPrintRule(FTLprRuleID,FTLprConfigJson) VALUES(?,?)").bind(event).bind(rule.to_string()).execute(&pool).await.unwrap();
   let result=print_center::enqueue_profile(&pool,event).await.unwrap();
   assert_eq!(result["status"],"QUEUED","{event}: {result}");
   assert_eq!(result["itemCount"],1,"{event}: {result}");
   assert_eq!(result["printedUnits"],0);
   let expected = if matches!(event, "PROMO_START" | "NEW_PDT") { "79.00" } else { "110.00" };
-  let queued: String = sqlx::query_scalar("SELECT json_extract(payload,'$.contexts[0].price.value') FROM ABPrintUnit WHERE job=?")
+  let queued: String = sqlx::query_scalar("SELECT json_extract(FTLquPayloadJson,'$.contexts[0].price.value') FROM TCNTLabelQueueUnit WHERE FTLqjJobID=?")
       .bind(result["jobId"].as_str()).fetch_one(&pool).await.unwrap();
   assert_eq!(queued, expected, "{event}");
   let response = print_center::preview_rule(State(routes::AppState{pool:pool.clone()}),Json(serde_json::from_value(rule).unwrap())).await;
@@ -157,24 +157,24 @@ async fn four_scheduler_profiles_enqueue_snapshots_without_sending() {
 
   assert!(print_center::enqueue_profile(&pool,event).await.unwrap_err().contains("มีอยู่ในคิวแล้ว"));
  }
- let states:Vec<String>=sqlx::query_scalar("SELECT status FROM ABPrintUnit").fetch_all(&pool).await.unwrap();
+ let states:Vec<String>=sqlx::query_scalar("SELECT FTLquStatus FROM TCNTLabelQueueUnit").fetch_all(&pool).await.unwrap();
  assert_eq!(states,vec!["READY";4]);
  // Acknowledge a transport unit in the isolated database, as the worker does.
- let job:String=sqlx::query_scalar("SELECT id FROM ABPrintJob WHERE json_extract(config,'$.code')='NEW_PDT'").fetch_one(&pool).await.unwrap();
- let raw:String=sqlx::query_scalar("SELECT payload FROM ABPrintUnit WHERE job=?").bind(&job).fetch_one(&pool).await.unwrap();
+ let job:String=sqlx::query_scalar("SELECT FTLqjJobID FROM TCNTLabelQueueJob WHERE json_extract(FTLqjConfigJson,'$.code')='NEW_PDT'").fetch_one(&pool).await.unwrap();
+ let raw:String=sqlx::query_scalar("SELECT FTLquPayloadJson FROM TCNTLabelQueueUnit WHERE FTLqjJobID=?").bind(&job).fetch_one(&pool).await.unwrap();
  let payload:serde_json::Value=serde_json::from_str(&raw).unwrap();
  let marks=payload["marks"].as_array().unwrap();
  assert_eq!(marks.len(),1);
  for mark in marks {
-  sqlx::query("INSERT INTO ABPrintWatermark VALUES(?,?,?)").bind(mark["rule"].as_str()).bind(mark["barcode"].as_str()).bind(mark["hash"].as_str()).execute(&pool).await.unwrap();
+  sqlx::query("INSERT INTO TCNTLabelPrintMark VALUES(?,?,?)").bind(mark["rule"].as_str()).bind(mark["barcode"].as_str()).bind(mark["hash"].as_str()).execute(&pool).await.unwrap();
  }
- sqlx::query("UPDATE ABPrintJob SET status='SUBMITTED' WHERE id=?").bind(&job).execute(&pool).await.unwrap();
- sqlx::query("UPDATE ABPrintHistory SET finished=datetime('now','-61 days') WHERE job=?")
+ sqlx::query("UPDATE TCNTLabelQueueJob SET FTLqjStatus='SUBMITTED' WHERE FTLqjJobID=?").bind(&job).execute(&pool).await.unwrap();
+ sqlx::query("UPDATE TCNTLabelQueueHistory SET FDLqhFinishedOn=datetime('now','-61 days') WHERE FTLqjJobID=?")
      .bind(&job).execute(&pool).await.unwrap();
  assert_eq!(print_center::archive_finished_jobs(&pool).await.unwrap(),1);
  assert_eq!(print_center::archive_finished_jobs(&pool).await.unwrap(),0);
- assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM ABPrintUnit WHERE job=?").bind(&job).fetch_one(&pool).await.unwrap(),0);
- assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM ABPrintUnit").fetch_one(&pool).await.unwrap(),3);
+ assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNTLabelQueueUnit WHERE FTLqjJobID=?").bind(&job).fetch_one(&pool).await.unwrap(),0);
+ assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNTLabelQueueUnit").fetch_one(&pool).await.unwrap(),3);
  let details=print_center::job_details(State(routes::AppState{pool:pool.clone()}),axum::extract::Path(job.clone())).await;
  let details:serde_json::Value=serde_json::from_slice(&axum::body::to_bytes(details.into_body(),65536).await.unwrap()).unwrap();
  assert_eq!(details[0]["printer"],"SIMULATION ONLY");
@@ -185,23 +185,23 @@ async fn four_scheduler_profiles_enqueue_snapshots_without_sending() {
  assert!(explicit.status().is_success());
  let explicit:serde_json::Value=serde_json::from_slice(&axum::body::to_bytes(explicit.into_body(),65536).await.unwrap()).unwrap();
  assert_eq!(explicit["status"],"QUEUED");
- sqlx::query("UPDATE ABPrintJob SET status='CANCELLED' WHERE id=?").bind(explicit["jobId"].as_str()).execute(&pool).await.unwrap();
- sqlx::query("UPDATE ABPrintRule SET config=json_set(config,'$.quantity',2) WHERE id='NEW_PDT'").execute(&pool).await.unwrap();
+ sqlx::query("UPDATE TCNTLabelQueueJob SET FTLqjStatus='CANCELLED' WHERE FTLqjJobID=?").bind(explicit["jobId"].as_str()).execute(&pool).await.unwrap();
+ sqlx::query("UPDATE TCNMLabelPrintRule SET FTLprConfigJson=json_set(FTLprConfigJson,'$.quantity',2) WHERE FTLprRuleID='NEW_PDT'").execute(&pool).await.unwrap();
  let changed=print_center::enqueue_profile(&pool,"NEW_PDT").await.unwrap();
  assert_eq!(changed["totalUnits"],2);
  // If only copy one reached the transport, rescheduling should prepare only copy two.
- let first_page:String=sqlx::query_scalar("SELECT payload FROM ABPrintUnit WHERE job=? AND seq=0").bind(changed["jobId"].as_str()).fetch_one(&pool).await.unwrap();
+ let first_page:String=sqlx::query_scalar("SELECT FTLquPayloadJson FROM TCNTLabelQueueUnit WHERE FTLqjJobID=? AND FNLquSeq=0").bind(changed["jobId"].as_str()).fetch_one(&pool).await.unwrap();
  let first_page:serde_json::Value=serde_json::from_str(&first_page).unwrap();
  let mark=&first_page["marks"][0];
- sqlx::query("UPDATE ABPrintWatermark SET hash=? WHERE rule=? AND barcode=?").bind(mark["hash"].as_str()).bind(mark["rule"].as_str()).bind(mark["barcode"].as_str()).execute(&pool).await.unwrap();
- sqlx::query("UPDATE ABPrintJob SET status='CANCELLED' WHERE id=?").bind(changed["jobId"].as_str()).execute(&pool).await.unwrap();
+ sqlx::query("UPDATE TCNTLabelPrintMark SET FTLpmPrintHash=? WHERE FTLpmRuleScope=? AND FTLpmItemKey=?").bind(mark["hash"].as_str()).bind(mark["rule"].as_str()).bind(mark["barcode"].as_str()).execute(&pool).await.unwrap();
+ sqlx::query("UPDATE TCNTLabelQueueJob SET FTLqjStatus='CANCELLED' WHERE FTLqjJobID=?").bind(changed["jobId"].as_str()).execute(&pool).await.unwrap();
  assert_eq!(print_center::enqueue_profile(&pool,"NEW_PDT").await.unwrap()["totalUnits"],1);
  // A fifth event is rejected, including configurations left by older builds.
- sqlx::query("INSERT INTO ABPrintRule(id,config) SELECT 'old',json_set(config,'$.id','old','$.code','OLD','$.source','ALL_PRODUCTS') FROM ABPrintRule LIMIT 1").execute(&pool).await.unwrap();
+ sqlx::query("INSERT INTO TCNMLabelPrintRule(FTLprRuleID,FTLprConfigJson) SELECT 'old',json_set(FTLprConfigJson,'$.id','old','$.code','OLD','$.source','ALL_PRODUCTS') FROM TCNMLabelPrintRule LIMIT 1").execute(&pool).await.unwrap();
  assert!(print_center::enqueue_profile(&pool,"OLD").await.unwrap_err().contains("ประเภทข้อมูล"));
  // The same target date drives preview, every paper group, and the CLI result.
  let mut rule: serde_json::Value = serde_json::from_str(&sqlx::query_scalar::<_,String>(
-     "SELECT config FROM ABPrintRule WHERE id='NEW_PDT'").fetch_one(&pool).await.unwrap()).unwrap();
+     "SELECT FTLprConfigJson FROM TCNMLabelPrintRule WHERE FTLprRuleID='NEW_PDT'").fetch_one(&pool).await.unwrap()).unwrap();
  rule["id"]=json!("dated"); rule["code"]=json!("DATED");
  let target=json!({"size":"SH-100x38","template":"REGRESSION","printer":"SIMULATION ONLY","ip":"127.0.0.1","port":1});
  rule["targets"]=json!([target,target]);
@@ -215,13 +215,13 @@ async fn four_scheduler_profiles_enqueue_snapshots_without_sending() {
      assert_eq!(groups.len(),2);
      for group in groups { assert_eq!(group["items"].as_array().unwrap().len(),usize::from(offset==0)); }
  }
- sqlx::query("INSERT INTO ABPrintRule(id,config) VALUES('dated',?)").bind(rule.to_string()).execute(&pool).await.unwrap();
+ sqlx::query("INSERT INTO TCNMLabelPrintRule(FTLprRuleID,FTLprConfigJson) VALUES('dated',?)").bind(rule.to_string()).execute(&pool).await.unwrap();
  let empty=print_center::execute_profile_cli(&pool,"DATED").await.unwrap();
  assert_eq!(empty["status"],"NO_MATCH");
  // Break only the fixture's product-date column and verify that retry is possible after repair.
  sqlx::query("ALTER TABLE TCNMPdt RENAME COLUMN FDCreateOn TO broken_created").execute(&mut c).await.unwrap();
  let error=print_center::execute_profile_cli(&pool,"DATED").await.unwrap_err();
- let history:(String,String)=sqlx::query_as("SELECT status,error FROM ABPrintJob WHERE json_extract(config,'$.code')='DATED' ORDER BY seq DESC LIMIT 1").fetch_one(&pool).await.unwrap();
+ let history:(String,String)=sqlx::query_as("SELECT FTLqjStatus,FTLqjError FROM TCNTLabelQueueJob WHERE json_extract(FTLqjConfigJson,'$.code')='DATED' ORDER BY FNLqjSeq DESC LIMIT 1").fetch_one(&pool).await.unwrap();
  assert_eq!(history,("FAILED".into(),error));
  sqlx::query("ALTER TABLE TCNMPdt RENAME COLUMN broken_created TO FDCreateOn").execute(&mut c).await.unwrap();
  assert_eq!(print_center::execute_profile_cli(&pool,"DATED").await.unwrap()["status"],"NO_MATCH");
@@ -248,7 +248,7 @@ async fn import_master_twice_keeps_product_identity_and_resolves_prices() {
 #[tokio::test]
 async fn branch_only_sync_accepts_one_agency_and_rejects_mixed_prices(){
  let (pool,c)=fixture().await;
- let path:String=sqlx::query_scalar("SELECT path FROM ABStorage WHERE id=1").fetch_one(&pool).await.unwrap();
+ let path:String=sqlx::query_scalar("SELECT FTLstDbPath FROM TCNSLabelStorage WHERE FNLstID=1").fetch_one(&pool).await.unwrap();
  let tasks:serde_json::Value=serde_json::from_str(include_str!("../resources/master-tasks.json")).unwrap();
  let mut bundles=vec![];
  for task in tasks.as_array().unwrap(){
@@ -289,7 +289,7 @@ async fn samsung_preview_and_queue_agree_for_both_a4_layouts() {
         sqlx::query("UPDATE TCNMLabelSize SET FCLbsWidth=?, FNLbsCol=?, FCLbsMagLeft=?, FCLbsMagTop=?, FCLbsGapH=2 WHERE FTLbsCode='SH-100x38'")
             .bind(width).bind(cols).bind(left).bind(top).execute(&pool).await.unwrap();
         let rule=json!({"id":code,"code":code,"name":"Samsung A4 test","branch":"B1","source":"PRICE_CHG","size":"SH-100x38","template":"legacy:SH-100x38","printer":"Samsung M262x 282x Series Class Driver","quantity":copies,"tray":"Automatically Select","protocol":"WINDOWS","ip":"","time":"","days":"","dpi":600,"port":9100,"enabled":true,"catchUp":false});
-        sqlx::query("INSERT INTO ABPrintRule(id,config) VALUES(?,?)").bind(code).bind(rule.to_string()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO TCNMLabelPrintRule(FTLprRuleID,FTLprConfigJson) VALUES(?,?)").bind(code).bind(rule.to_string()).execute(&pool).await.unwrap();
         let response=print_center::preview_rule(State(routes::AppState{pool:pool.clone()}),Json(serde_json::from_value(rule).unwrap())).await;
         let preview:serde_json::Value=serde_json::from_slice(&axum::body::to_bytes(response.into_body(),65536).await.unwrap()).unwrap();
         let group=&preview["groups"][0];
@@ -299,7 +299,7 @@ async fn samsung_preview_and_queue_agree_for_both_a4_layouts() {
         if code == "001" { assert!(warning.contains("บน แถว 1")); }
         let error=print_center::enqueue_profile(&pool,code).await.unwrap_err();
         assert!(error.contains(warning));
-        let failed:(String,i64)=sqlx::query_as("SELECT status,total FROM ABPrintJob WHERE json_extract(config,'$.code')=? ORDER BY seq DESC LIMIT 1").bind(code).fetch_one(&pool).await.unwrap();
+        let failed:(String,i64)=sqlx::query_as("SELECT FTLqjStatus,FNLqjQtyTotal FROM TCNTLabelQueueJob WHERE json_extract(FTLqjConfigJson,'$.code')=? ORDER BY FNLqjSeq DESC LIMIT 1").bind(code).fetch_one(&pool).await.unwrap();
         assert_eq!(failed,("FAILED".into(),0));
         sqlx::query("UPDATE TCNMLabelSize SET FCLbsMagLeft=5,FCLbsMagTop=5,FCLbsGapH=0 WHERE FTLbsCode='SH-100x38'").execute(&pool).await.unwrap();
         let fixed=print_center::enqueue_profile(&pool,code).await.unwrap();
@@ -329,7 +329,7 @@ async fn manual_sheet_checks_match_preview_and_reject_mixed_jobs_atomically() {
     let state=routes::AppState{pool:pool.clone()};
     let rejected=print_center::enqueue_manual(State(state.clone()),Json(json!({"units":[fits,clipped]}))).await;
     assert!(!rejected.status().is_success());
-    let jobs:i64=sqlx::query_scalar("SELECT COUNT(*) FROM ABPrintJob").fetch_one(&pool).await.unwrap();
+    let jobs:i64=sqlx::query_scalar("SELECT COUNT(*) FROM TCNTLabelQueueJob").fetch_one(&pool).await.unwrap();
     assert_eq!(jobs,0);
     size["FTLbsPaperSize"]=json!("A4_L");
     size["FCLbsPaperWidth"]=json!(297);
@@ -383,9 +383,9 @@ async fn standard_designs_upgrade_profiles_and_preserve_exact_edits() {
     let (pool, _) = fixture().await;
     let profile = json!({"source":"PROMO_START","size":"UFM-PRO-A5","template":"legacy:UFM-PRO-A5",
         "targets":[{"size":"UFM-PRO-A5","template":"legacy:UFM-PRO-A5"},{"size":"BC-25x32","template":"BC-25x32-NOR"}]});
-    sqlx::query("INSERT INTO ABPrintRule VALUES('upgrade',?)").bind(profile.to_string()).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO TCNMLabelPrintRule VALUES('upgrade',?)").bind(profile.to_string()).execute(&pool).await.unwrap();
     crate::standard_designs::install(&pool).await.unwrap();
-    let profile:String=sqlx::query_scalar("SELECT config FROM ABPrintRule WHERE id='upgrade'").fetch_one(&pool).await.unwrap();
+    let profile:String=sqlx::query_scalar("SELECT FTLprConfigJson FROM TCNMLabelPrintRule WHERE FTLprRuleID='upgrade'").fetch_one(&pool).await.unwrap();
     let profile:serde_json::Value=serde_json::from_str(&profile).unwrap();
     assert_eq!(profile["template"], "UFM-PRO-A5-STD-PMT");
     assert_eq!(profile["targets"][0]["template"], profile["template"]);
