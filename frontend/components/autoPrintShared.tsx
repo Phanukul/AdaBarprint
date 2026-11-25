@@ -5,7 +5,7 @@ import type { PrinterConfig } from '@/types/printer';
 
 export interface Props {
   mode?: 'schedules' | 'jobs';
-  onOpenDesign?: (size: string, template: string, promo: boolean) => void;
+  onOpenDesign?: (size: string, template: string, promo: boolean, route?: import('@/lib/printProfile').PrinterRoute) => void;
   onOpenConnection?: () => void;
   authUser: AuthSessionUser;
   allLabelSizes: ConfigLabelSizeRow[]; sysOptions: SysOptionRow[];

@@ -105,6 +105,8 @@ import {
   type PreviewMediaConfig,
 } from '@/lib/previewMedia';
 
+import { resolveTemplateRoute, type ProfileMapping, type PrinterRoute } from '@/lib/printProfile';
+
 const PX_PER_MM = 3.779527559;
 
 export interface SheetConfigMeta {
@@ -183,6 +185,8 @@ export interface SaveAsPayload {
 }
 
 interface LabelDesignerProps {
+  driverMappings: Array<ProfileMapping & { lbsCode: string }>;
+  designTarget?: {size:string; template:string; route:PrinterRoute};
   labelSizes: DesignerLabelSizeItem[];
   products: DesignerProductItem[];
   paperSizes?: PaperSizeRecord[];
@@ -309,6 +313,7 @@ function ColorSwatchPicker({
 }
 
 export function LabelDesigner({
+  driverMappings, designTarget,
   labelSizes,
   products,
   paperSizes = [],
@@ -1763,6 +1768,41 @@ export function LabelDesigner({
       ),
     [doc.width, doc.height, currentSize.FTLbsGroup, savedMetrics, previewMedia]
   );
+
+  const previewCode = selectedTemplate?.FTLtmCode || requestedTemplate;
+  const route = designTarget && designTarget.size === effectiveLbsCode && designTarget.template === previewCode
+    ? designTarget.route
+    : resolveTemplateRoute(driverMappings.find(m => m.lbsCode === effectiveLbsCode), previewCode, priType);
+  const offsetX = currentSize.FCLbsOffsetX || 0;
+  const offsetY = currentSize.FCLbsOffsetY || 0;
+  const sheetRequest = a4PreviewOpen && !a4Metrics.isRoll && !a4Metrics.isSingle && route.printer && route.protocol === 'WINDOWS'
+    ? JSON.stringify({printerName: route.printer, trayName: route.tray, sheetCheck: {count:a4Metrics.perPage, size:{
+        FTLbsCode: effectiveLbsCode, FTLbsName: currentSize.FTLbsName || effectiveLbsCode, FTLbsGroup: currentSize.FTLbsGroup || '', FTLbsStaUse:'1',
+        FCLbsWidth:doc.width, FCLbsHeight:doc.height, FNLbsCol:a4Metrics.cols, FNLbsRow:a4Metrics.rows,
+        FCLbsMagLeft:a4Metrics.magLeftMm, FCLbsMagTop:a4Metrics.magTopMm, FCLbsGapH:a4Metrics.gapHMm, FCLbsGapV:a4Metrics.gapVMm,
+        FTLbsPaperSize:a4Metrics.paperSize, FCLbsPaperWidth:a4Metrics.paperWidthMm, FCLbsPaperHeight:a4Metrics.paperHeightMm,
+        FCLbsOffsetX:offsetX, FCLbsOffsetY:offsetY
+      }}}) : '';
+  type Bounds = {left:number; top:number; right:number; bottom:number};
+  const [driverCheck,setDriverCheck] = useState<{key:string; area?:Bounds; warning?:string}>();
+  useEffect(() => {
+    if (!sheetRequest) return;
+    const controller = new AbortController();
+    async function check() {
+      try {
+        const response = await fetch('/api/print/sheet-preview', {method:'POST', headers:{'Content-Type':'application/json'}, body:sheetRequest, signal:controller.signal});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'ตรวจสอบพื้นที่พิมพ์ไม่ได้');
+        if (!controller.signal.aborted) setDriverCheck({key:sheetRequest, area:data.area, warning:data.warning});
+      } catch (error) {
+        if (!controller.signal.aborted) setDriverCheck({key:sheetRequest, warning:error instanceof Error ? error.message : 'ตรวจสอบพื้นที่พิมพ์ไม่ได้'});
+      }
+    }
+    const timer = window.setTimeout(check, 150);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [sheetRequest]);
+  const check = driverCheck?.key === sheetRequest ? driverCheck : undefined;
+  const area = check?.area;
 
   const updateSheetSpacingDraft = (patch: Partial<SheetConfigMeta>) => {
     const pw = a4Metrics.paperWidthMm;
@@ -3619,6 +3659,9 @@ export function LabelDesigner({
             lbsGroup={currentSize.FTLbsGroup}
           />
 
+          {!a4Metrics.isRoll && !a4Metrics.isSingle && <p role="status" className={check?.warning ? 'bg-amber-50 p-2 text-amber-900' : 'text-sm text-slate-600'}>
+            {sheetRequest ? `${route.printer} · ${check?.warning || (area ? 'เส้นประคือขอบพื้นที่พิมพ์ · ตรวจครบทุกดวงบนแผ่น' : check ? 'ไม่มีข้อมูลพื้นที่พิมพ์' : 'กำลังตรวจพื้นที่พิมพ์…')}` : 'แสดงขนาดกระดาษ · ยังไม่มีข้อมูลพื้นที่พิมพ์จากเครื่องพิมพ์'}
+          </p>}
           {!a4Metrics.isRoll && !a4Metrics.isSingle && (
             <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-50/90 border border-slate-200 rounded-md px-2.5 py-1.5 text-[11px]">
               <div className="flex flex-wrap items-center gap-2">
@@ -3794,7 +3837,7 @@ export function LabelDesigner({
                 </div>
               ) : (
                 <div
-                  className="bg-white shadow-xl border-2 border-[#007a87] relative overflow-hidden"
+                  className="bg-white shadow-xl outline outline-1 outline-[#007a87] relative overflow-hidden"
                   style={{
                     width: `${a4Metrics.paperWidthMm * a4Scale}mm`,
                     height: `${a4Metrics.paperHeightMm * a4Scale}mm`,
@@ -3834,9 +3877,13 @@ export function LabelDesigner({
                         }}
                       />
                     )}
+                  {area && <div aria-hidden="true" className="pointer-events-none absolute z-10 border border-dashed border-amber-700" style={{
+                    left:`${area.left*a4Scale}mm`, top:`${area.top*a4Scale}mm`, width:`${(area.right-area.left)*a4Scale}mm`, height:`${(area.bottom-area.top)*a4Scale}mm`,
+                    boxShadow:'0 0 0 100vmax rgba(190,55,35,.16)'
+                  }} />}
                   {Array.from({ length: a4Metrics.perPage }).map((_, idx) => (
+                    <div key={idx} style={{transform: `translate(${offsetX*a4Scale}mm, ${offsetY*a4Scale}mm)`}}>
                     <CustomDesignRenderer
-                      key={`a4-cmp-${idx}`}
                       layout={doc}
                       line={sampleLine}
                       scale={a4Scale}
@@ -3850,6 +3897,7 @@ export function LabelDesigner({
                           : 'ink'
                       }
                     />
+                    </div>
                   ))}
                   {previewMedia.refFrame !== 'NONE' && (
                     <div className="absolute bottom-1 right-1 bg-[#007a87]/90 text-white text-[10px] font-mono px-1.5 py-0.5 rounded pointer-events-none">

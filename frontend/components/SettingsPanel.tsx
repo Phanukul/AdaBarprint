@@ -153,7 +153,7 @@ interface SettingsPanelProps {
   onClearInitialEdit?: () => void;
   initialSubTab?: 'sizes' | 'preprints' | 'printers' | 'devices' | 'autoprint' | 'autoprint_history' | 'connection' | 'jobs' | null;
   onClearInitialSubTab?: () => void;
-  onOpenDesign?: (size: string, template: string, promo: boolean) => void;
+  onOpenDesign?: (size: string, template: string, promo: boolean, route?: import('@/lib/printProfile').PrinterRoute) => void;
   onLoadManualRows?: (lines: ManualLoadLine[]) => void;
 }
 

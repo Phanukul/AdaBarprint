@@ -525,7 +525,9 @@ function AdaBarprintWorkspace({
 
   const [initialDesignTemplate, setInitialDesignTemplate] = useState('');
   const [designPriceType, setDesignPriceType] = useState<'1' | '2'>('1');
-  function openDesign(size: string, template: string, promo: boolean) {
+  const [designTarget, setDesignTarget] = useState<{size:string; template:string; route:import('@/lib/printProfile').PrinterRoute}>();
+  function openDesign(size: string, template: string, promo: boolean, route?: import('@/lib/printProfile').PrinterRoute) {
+    setDesignTarget(route ? {size, template, route} : undefined);
     setDesignPriceType(promo ? '2' : '1');
     setInitialDesignTemplate(template);
     setDesignLabelCode(size);
@@ -2620,6 +2622,8 @@ function AdaBarprintWorkspace({
       {activeMenu === 'design' ? (
         <LabelDesigner key={initialDesignTemplate}
           labelSizes={labelSizes}
+          driverMappings={driverMappings}
+          designTarget={designTarget}
           products={catalogProducts}
           paperSizes={paperSizes}
           preprints={preprints}

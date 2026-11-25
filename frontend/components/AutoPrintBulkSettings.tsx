@@ -762,7 +762,7 @@ export function AutoPrintBulkSettings(
                                   กระดาษ {i + 1}: {format?.label || t.template || '-'}
                                 </div>
                                 <div className="text-slate-600">
-                                  {format && p.onOpenDesign && <button type="button" className="block text-teal-700 underline" onClick={() => p.onOpenDesign?.(t.size, t.template, rule.source === 'PROMO_START')}>{t.template.startsWith('legacy:') ? 'เปิดแบบดั้งเดิมใน Design' : 'แก้ไขแบบป้ายนี้'}</button>}
+                                  {format && p.onOpenDesign && <button type="button" className="block text-teal-700 underline" onClick={() => p.onOpenDesign?.(t.size, t.template, rule.source === 'PROMO_START', {printer:t.printer, tray:t.tray, protocol:t.ip ? 'LAN' : 'WINDOWS'})}>{t.template.startsWith('legacy:') ? 'เปิดแบบดั้งเดิมใน Design' : 'แก้ไขแบบป้ายนี้'}</button>}
                                   เครื่องพิมพ์: {t.printer || '-'}
                                   {t.tray ? ` (${p.formatTrayLabel(t.tray)})` : ''} · {t.quantity} ดวง/รายการ
                                 </div>
