@@ -2963,6 +2963,9 @@ pub async fn post_build_line(
             accd, &item.FTPdtCode, &item.FTBarCode, Some(&bch_ppl), &on_date_str, verify,
         ).await {
             Ok(price) => price,
+            Err(sqlx::Error::Protocol(reason)) if reason == crate::promo_v6::MISSING_PRICE => {
+                return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"code":"MISSING_PRICE","error":reason}))).into_response();
+            }
             Err(error) => return err_json(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()),
         };
         let sale_price = price.normal_price;
@@ -3633,17 +3636,24 @@ pub async fn post_import(State(_st): State<AppState>, _multipart: Multipart) -> 
     err_json(StatusCode::CONFLICT, "กรุณาใช้หน้าต่างนำเข้าข้อมูล (Excel / JSON / CSV) แบบใหม่เพื่อตรวจและนำเข้าข้อมูล")
 }
 
+fn default_import_unit() -> String {
+    "PCS".to_string()
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MasterImportItem {
+    pub source_row: Option<usize>,
     pub pdt_code: String,
+    #[serde(default)]
     pub pdt_name: String,
     pub bar_code: String,
-    #[serde(default)]
+    #[serde(default = "default_import_unit")]
     pub unit_code: String,
     #[serde(default)]
     pub unit_name: String,
-    pub base_price: f64,
+    pub base_price: Option<f64>,
+    pub unit_factor: Option<f64>,
     #[serde(default)]
     pub effective_start: String,
     #[serde(default)]
@@ -3676,6 +3686,14 @@ pub async fn post_import_master(
     State(st): State<AppState>,
     Json(body): Json<MasterImportBody>,
 ) -> Response {
+    process_master_import(st, body, false).await
+}
+
+pub async fn preview_import_master(State(st): State<AppState>, Json(body): Json<MasterImportBody>) -> Response {
+    process_master_import(st, body, true).await
+}
+
+async fn process_master_import(st: AppState, body: MasterImportBody, preview: bool) -> Response {
     if body.items.is_empty() {
         return err_json(StatusCode::BAD_REQUEST, "ไม่มีรายการข้อมูลสินค้าที่จะนำเข้า");
     }
@@ -3693,7 +3711,7 @@ pub async fn post_import_master(
     if configured.is_some() && mode == "POS_SHARED" {
         return err_json(
             StatusCode::CONFLICT,
-            "ระบบกำลังเชื่อมต่อฐาน StoreFront ของ POS อยู่ (อ่านอย่างเดียว) จึงไม่อนุญาตให้นำเข้าทับฐาน POS — กรุณานำเข้าลงตารางพิมพ์ หรือเปลี่ยนเป็นโหมดเครื่องแยก",
+            "ระบบกำลังเชื่อมต่อฐาน StoreFront ของ POS อยู่ (อ่านอย่างเดียว) จึงไม่อนุญาตให้นำเข้าทับฐาน POS — กรุณาเลือกฐาน Master ของเครื่องแยกก่อนนำเข้า",
         );
     }
 
@@ -3702,8 +3720,10 @@ pub async fn post_import_master(
         .map(|(p, _)| std::path::PathBuf::from(p))
         .unwrap_or_else(crate::standalone::own_path);
 
-    if let Err(e) = crate::standalone::prepare_destination(&target_path).await {
+    if !preview {
+      if let Err(e) = crate::standalone::prepare_destination(&target_path).await {
         return err_json(StatusCode::BAD_REQUEST, e);
+      }
     }
 
     let branch = if !body.branch.trim().is_empty() {
@@ -3733,6 +3753,23 @@ pub async fn post_import_master(
     };
 
     let mut imported = 0usize;
+    let mut actions = Vec::new();
+    let mut file_barcodes = std::collections::HashMap::new();
+    for (idx, item) in body.items.iter().enumerate() {
+        let row = item.source_row.unwrap_or(idx + 2);
+        let barcode = item.bar_code.trim();
+        let product = item.pdt_code.trim();
+        if let Some((first_row, first_product)) = file_barcodes.insert(barcode.to_ascii_uppercase(), (row, product)) {
+            let message = if product.eq_ignore_ascii_case(first_product) {
+                format!("แถวที่ {first_row} และ {row}: รหัสสินค้า {product} และบาร์โค้ด {barcode} ซ้ำในไฟล์")
+            } else {
+                format!("แถวที่ {first_row} และ {row}: บาร์โค้ด {barcode} ระบุรหัสสินค้าต่างกัน ({first_product}, {product})")
+            };
+            return err_json(StatusCode::BAD_REQUEST, message);
+        }
+    }
+    // A price document is shared by all barcodes of the same product and unit in this branch.
+    let mut file_prices = std::collections::HashMap::new();
     let mut promo_count = 0usize;
     let write_res: Result<(), String> = async {
         let mut tx = conn.begin().await.map_err(|e| e.to_string())?;
@@ -3749,13 +3786,34 @@ pub async fn post_import_master(
             .map_err(|e| e.to_string())?;
 
         for (idx, item) in body.items.iter().enumerate() {
+            let row = item.source_row.unwrap_or(idx + 2);
             let pdt_code = item.pdt_code.trim();
             let bar_code = item.bar_code.trim();
-            let pdt_name = if item.pdt_name.trim().is_empty() { pdt_code } else { item.pdt_name.trim() };
-            if pdt_code.is_empty() || bar_code.is_empty() || !item.base_price.is_finite() || item.base_price < 0.0 {
-                return Err(format!("รายการที่ {} ข้อมูลไม่ครบถ้วน (ต้องมีรหัสสินค้า, บาร์โค้ด และราคา >= 0)", idx + 1));
+            if pdt_code.is_empty() || bar_code.is_empty() || item.base_price.is_some_and(|p| !p.is_finite() || p < 0.0)
+                || item.unit_factor.is_some_and(|n| !n.is_finite() || n <= 0.0) {
+                return Err(format!("แถวที่ {}: ตรวจรหัสสินค้า บาร์โค้ด ราคา และตัวคูณหน่วย", row));
             }
-            let unit_code = if item.unit_code.trim().is_empty() { "PCS" } else { item.unit_code.trim() };
+            let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM TCNMPdt WHERE FTPdtCode=?)")
+                .bind(pdt_code).fetch_one(&mut *tx).await.map_err(|e|e.to_string())?;
+            let units: Vec<String> = sqlx::query_scalar("SELECT DISTINCT FTPunCode FROM TCNMPdtBar WHERE FTPdtCode=? AND FTBarCode=?")
+                .bind(pdt_code).bind(bar_code).fetch_all(&mut *tx).await.map_err(|e|e.to_string())?;
+            if units.is_empty() || item.promo_price.is_some() {
+                let other_products: Vec<String> = sqlx::query_scalar("SELECT DISTINCT FTPdtCode FROM TCNMPdtBar WHERE FTBarCode=? AND FTPdtCode<>? ORDER BY FTPdtCode")
+                    .bind(bar_code).bind(pdt_code).fetch_all(&mut *tx).await.map_err(|e|e.to_string())?;
+                if !other_products.is_empty() {
+                    return Err(format!("แถวที่ {row}: บาร์โค้ด {bar_code} ของรายการ {pdt_code} ผูกกับรหัสสินค้าอื่นใน Master ด้วย ({}) กรุณาตรวจสอบรหัสสินค้าและบาร์โค้ด",other_products.join(", ")));
+                }
+            }
+            let unit_code = if item.unit_code.trim().is_empty() {
+                units.first().map(String::as_str).ok_or_else(||format!("แถวที่ {}: กรุณาระบุรหัสหน่วยสำหรับบาร์โค้ดใหม่",row))?
+            } else { item.unit_code.trim() };
+            if units.iter().any(|u| u != unit_code) {
+                return Err(format!("แถวที่ {}: หน่วยของบาร์โค้ด {} ขัดกับ Master",row,bar_code));
+            }
+            if !exists && item.pdt_name.trim().is_empty() {
+                return Err(format!("แถวที่ {}: กรุณาระบุชื่อสินค้าใหม่",row));
+            }
+            actions.push(if !exists {"สินค้าใหม่"} else if units.is_empty() {"เพิ่มบาร์โค้ด"} else {"ปรับปรุงรายการเดิม"});
             let unit_name = if item.unit_name.trim().is_empty() { unit_code } else { item.unit_name.trim() };
             let d_start = if item.effective_start.trim().is_empty() { today.as_str() } else { item.effective_start.trim() };
             let d_stop = item.effective_stop.trim();
@@ -3767,30 +3825,50 @@ pub async fn post_import_master(
 
             for (field, value) in [("EffectiveStart", d_start), ("EffectiveStop", d_stop), ("PromoStart", item.promo_start.trim()), ("PromoStop", item.promo_stop.trim())] {
                 if !value.is_empty() && chrono::NaiveDate::parse_from_str(value,"%Y-%m-%d").map(|d| d.to_string()!=value).unwrap_or(true) {
-                    return Err(format!("แถว {}: {field} ต้องเป็นวันที่ YYYY-MM-DD", idx+1));
+                    return Err(format!("แถว {}: {field} ต้องเป็นวันที่ YYYY-MM-DD", row));
                 }
             }
-            let promo_from = if item.promo_start.trim().is_empty(){d_start}else{item.promo_start.trim()};
-            let promo_to = if item.promo_stop.trim().is_empty(){d_stop}else{item.promo_stop.trim()};
-            if (!d_stop.is_empty() && d_stop < d_start) || item.promo_price.is_some_and(|price| price < 0.0 || (!promo_to.is_empty() && promo_to < promo_from)) {
-                return Err(format!("แถว {}: ตรวจราคาและช่วงวันที่",idx+1));
+            if item.promo_price.is_none() && [item.promo_name.trim(),item.promo_start.trim(),item.promo_stop.trim()].iter().any(|s| !s.is_empty()) {
+                return Err(format!("แถวที่ {}: กรุณาระบุราคาโปรโมชัน",row));
+            }
+            let p_start = item.promo_start.trim();
+            let p_stop = item.promo_stop.trim();
+            if item.promo_price.is_some() {
+                if p_start.is_empty() || p_stop.is_empty() {
+                    return Err(format!("แถวที่ {row}: เมื่อระบุราคาโปร กรุณาระบุวันเริ่มโปรและวันหมดโปรให้ครบ"));
+                }
+                if p_stop < p_start {
+                    return Err(format!("แถวที่ {row}: วันหมดโปรต้องตรงกับหรืออยู่หลังวันเริ่มโปร"));
+                }
+            }
+            if (!d_stop.is_empty() && d_stop < d_start) || item.promo_price.is_some_and(|price| !price.is_finite() || price < 0.0) {
+                return Err(format!("แถว {}: ตรวจราคาและช่วงวันที่",row));
             }
             sqlx::query("INSERT INTO TCNMPdt(FTPdtCode,FTPdtStaActive,FDCreateOn,FDLastUpdOn) VALUES(?,'1',?,?) ON CONFLICT(FTPdtCode) DO UPDATE SET FDLastUpdOn=excluded.FDLastUpdOn")
                 .bind(pdt_code).bind(&now_dt).bind(&now_dt).execute(&mut *tx).await.map_err(|e| e.to_string())?;
-            sqlx::query("INSERT INTO TCNMPdt_L(FTPdtCode,FNLngID,FTPdtName) VALUES(?,1,?) ON CONFLICT DO UPDATE SET FTPdtName=excluded.FTPdtName")
-                .bind(pdt_code).bind(pdt_name).execute(&mut *tx).await.map_err(|e| e.to_string())?;
-            sqlx::query("INSERT INTO TCNMPdtPackSize(FTPdtCode,FTPunCode,FCPdtUnitFact,FCPdtPriceRET) VALUES(?,?,1,?) ON CONFLICT DO UPDATE SET FCPdtPriceRET=excluded.FCPdtPriceRET")
-                .bind(pdt_code).bind(unit_code).bind(item.base_price).execute(&mut *tx).await.map_err(|e| e.to_string())?;
-            sqlx::query("INSERT INTO TCNMPdtBar(FTPdtCode,FTBarCode,FTPunCode,FNBarRefSeq,FTBarStaUse,FDCreateOn,FDLastUpdOn) VALUES(?,?,?,1,'1',?,?) ON CONFLICT DO UPDATE SET FTPunCode=excluded.FTPunCode,FDLastUpdOn=excluded.FDLastUpdOn")
-                .bind(pdt_code).bind(bar_code).bind(unit_code).bind(&now_dt).bind(&now_dt).execute(&mut *tx).await.map_err(|e| e.to_string())?;
-
-            let price_doc = format!("IMP:{}:{}", d_start, serde_json::json!([pdt_code,unit_code]));
-            sqlx::query("INSERT INTO TCNTPdtPrice4PDT(FTBchCode,FTPdtCode,FTPunCode,FNPghSrcSeq,FDPghEffectiveStart,FDPghEffectiveStop,FDPghDStart,FDPghDStop,FTPghDocNo,FTPghDocType,FCPgdPrice,FCPgdPriceRet,FDCreateOn,FDLastUpdOn) VALUES(?,?,?,1,?,?,?,?,?,'1',?,?,?,?) ON CONFLICT DO UPDATE SET FCPgdPrice=excluded.FCPgdPrice,FCPgdPriceRet=excluded.FCPgdPriceRet,FDPghEffectiveStop=excluded.FDPghEffectiveStop,FDPghDStop=excluded.FDPghDStop,FDLastUpdOn=excluded.FDLastUpdOn")
-                .bind(&branch).bind(pdt_code).bind(unit_code).bind(d_start).bind(d_stop).bind(d_start).bind(d_stop).bind(&price_doc).bind(item.base_price).bind(item.base_price).bind(&now_dt).bind(&now_dt)
-                .execute(&mut *tx).await.map_err(|e| e.to_string())?;
+            if !item.pdt_name.trim().is_empty() {
+                sqlx::query("INSERT INTO TCNMPdt_L(FTPdtCode,FNLngID,FTPdtName) VALUES(?,1,?) ON CONFLICT DO UPDATE SET FTPdtName=excluded.FTPdtName")
+                    .bind(pdt_code).bind(item.pdt_name.trim()).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+            }
+            sqlx::query("INSERT INTO TCNMPdtPackSize(FTPdtCode,FTPunCode,FCPdtUnitFact,FCPdtPriceRET) VALUES(?,?,COALESCE(?,1),NULL) ON CONFLICT(FTPdtCode,FTPunCode) DO UPDATE SET FCPdtUnitFact=COALESCE(?,FCPdtUnitFact)")
+                .bind(pdt_code).bind(unit_code).bind(item.unit_factor).bind(item.unit_factor).execute(&mut *tx).await.map_err(|e|e.to_string())?;
+            if units.is_empty() {
+                sqlx::query("INSERT INTO TCNMPdtBar(FTPdtCode,FTBarCode,FTPunCode,FNBarRefSeq,FTBarStaUse,FDCreateOn,FDLastUpdOn) VALUES(?,?,?,1,'1',?,?) ON CONFLICT DO UPDATE SET FTPunCode=excluded.FTPunCode,FDLastUpdOn=excluded.FDLastUpdOn")
+                    .bind(pdt_code).bind(bar_code).bind(unit_code).bind(&now_dt).bind(&now_dt).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+            }
+            if let Some(base_price) = item.base_price {
+                let key = (pdt_code.to_owned(), unit_code.to_owned(), d_start.to_owned());
+                let (first_row, first_price, first_stop) = file_prices.entry(key)
+                    .or_insert_with(|| (row, base_price, d_stop.to_owned()));
+                if *first_price != base_price || first_stop.as_str() != d_stop {
+                    return Err(format!("แถวที่ {first_row} และ {row}: สินค้า {pdt_code} หน่วย {unit_code} สาขา {branch} เริ่มราคา {d_start} ต้องระบุราคาและวันสิ้นสุดตรงกันทุกบาร์โค้ด"));
+                }
+                let price_doc = format!("IMP:{}:{}", d_start, serde_json::json!([pdt_code,unit_code]));
+                sqlx::query("INSERT INTO TCNTPdtPrice4PDT(FTBchCode,FTPdtCode,FTPunCode,FNPghSrcSeq,FDPghEffectiveStart,FDPghEffectiveStop,FDPghDStart,FDPghDStop,FTPghDocNo,FTPghDocType,FCPgdPrice,FCPgdPriceRet,FDCreateOn,FDLastUpdOn) VALUES(?,?,?,1,?,?,?,?,?,'1',?,?,?,?) ON CONFLICT DO UPDATE SET FCPgdPrice=excluded.FCPgdPrice,FCPgdPriceRet=excluded.FCPgdPriceRet,FDPghEffectiveStop=excluded.FDPghEffectiveStop,FDPghDStop=excluded.FDPghDStop,FDLastUpdOn=excluded.FDLastUpdOn")
+                    .bind(&branch).bind(pdt_code).bind(unit_code).bind(d_start).bind(d_stop).bind(d_start).bind(d_stop).bind(&price_doc).bind(base_price).bind(base_price).bind(&now_dt).bind(&now_dt)
+                    .execute(&mut *tx).await.map_err(|e| e.to_string())?;
+            }
             if let Some(promo_pri) = item.promo_price.filter(|p| p.is_finite() && *p >= 0.0) {
-                let p_start = if item.promo_start.trim().is_empty() { d_start } else { item.promo_start.trim() };
-                let p_stop = if item.promo_stop.trim().is_empty() { d_stop } else { item.promo_stop.trim() };
                 let p_doc = format!("IMP-PMT:{}", serde_json::json!([bar_code,p_start]));
                 let p_name = if item.promo_name.trim().is_empty() { "โปรโมชันนำเข้า".to_string() } else { item.promo_name.trim().to_string() };
                 let canonical: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM TCNTPmtHD WHERE NULLIF(TRIM(FTPmhRuleJson),'') IS NOT NULL) OR EXISTS(SELECT 1 FROM pragma_table_info('TCNTPmtGrpDT') WHERE name='FTPgdRefCode')")
@@ -3814,11 +3892,12 @@ pub async fn post_import_master(
             imported += 1;
         }
 
+        if preview {return tx.rollback().await.map_err(|e|e.to_string());}
         for t in ["TCNMBranch", "TCNMPdt", "TCNTPdtPrice4PDT", "TCNTPmtHD"] {
             sqlx::query("INSERT OR REPLACE INTO TSysSyncTaskDownload(FTSynTable,FDSynLastSuccess) VALUES(?,?)")
                 .bind(t).bind(&now_dt).execute(&mut *tx).await.map_err(|e| e.to_string())?;
         }
-        sqlx::query("INSERT INTO ABMasterIdentity VALUES(1,'',?,'') ON CONFLICT(id) DO UPDATE SET branch=excluded.branch")
+        sqlx::query("INSERT INTO TCNSLabelMasterIdentity(FNLmiID,FTAgnCode,FTBchCode,FTPosCode) VALUES(1,'',?,'') ON CONFLICT(FNLmiID) DO UPDATE SET FTBchCode=excluded.FTBchCode")
             .bind(&branch).execute(&mut *tx).await.map_err(|e| e.to_string())?;
         tx.commit().await.map_err(|e| e.to_string())?;
         Ok(())
@@ -3830,6 +3909,7 @@ pub async fn post_import_master(
         return err_json(StatusCode::BAD_REQUEST, e);
     }
 
+    if preview {return Json(json!({"actions":actions,"branch":branch})).into_response();}
     let path_str = target_path.to_string_lossy().to_string();
     let status_write: Result<(), sqlx::Error> = async {
         let mut tx=st.pool.begin().await?;

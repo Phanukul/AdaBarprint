@@ -8,7 +8,7 @@ import { getStoredAuthToken } from '@/lib/auth';
 
 type ProtectedAction = 'save' | 'check' | 'sync';
 
-export function MasterDatabaseSettings({ onSaved }: { onSaved?: () => void }) {
+export function MasterDatabaseSettings({ onSaved, readOnly = false, lockControl }: { onSaved?: () => void; readOnly?: boolean; lockControl?: React.ReactNode }) {
   const [defaultPath, setDefaultPath] = useState('');
   const [pathWarning, setPathWarning] = useState('');
   const [useApi, setUseApi] = useState(false);
@@ -393,6 +393,7 @@ export function MasterDatabaseSettings({ onSaved }: { onSaved?: () => void }) {
           <ShieldCheck className="h-4 w-4 text-[#007a87]" />
           แหล่งข้อมูลสินค้า
         </h3>
+        {lockControl}
       </div>
 
       {pathWarning && (
@@ -401,6 +402,27 @@ export function MasterDatabaseSettings({ onSaved }: { onSaved?: () => void }) {
         </p>
       )}
 
+      {readOnly ? (
+        <dl className="grid gap-4 rounded-lg border border-slate-200 p-4 text-sm sm:grid-cols-2">
+          {[
+            ['ฐานข้อมูลที่ใช้พิมพ์ป้าย', dbPath],
+            ['สถานะฐานข้อมูล', databaseStatus],
+            ['รหัสสาขา', branch],
+            ['ดาวน์โหลดจากส่วนกลาง (API2PSMaster)', useApi ? 'เปิดใช้งาน' : 'ปิดใช้งาน'],
+            ...(useApi ? [
+              ['URL ของ API2PSMaster', sync.baseUrl],
+              ['รหัสตัวแทน Agency', sync.agency],
+              ['รหัสเครื่อง POS', sync.pos],
+              ['ชื่อ Header สำหรับ API Key', sync.headerName],
+            ] : []),
+          ].map(([label, value]) => (
+            <div key={label} className="min-w-0">
+              <dt className="text-slate-600">{label}</dt>
+              <dd className="mt-1 break-all font-medium">{value || '—'}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : <>
       {pathFields}
 
         <label className="flex items-center gap-2 text-sm">
@@ -554,6 +576,8 @@ export function MasterDatabaseSettings({ onSaved }: { onSaved?: () => void }) {
           {busy ? 'กำลังบันทึก…' : 'บันทึกการตั้งค่าแหล่งข้อมูล'}
         </Button>
       </div>
+
+      </>}
 
       <div className="rounded-md bg-slate-50 p-3 text-xs text-slate-600 space-y-1" aria-live="polite">
         <p>

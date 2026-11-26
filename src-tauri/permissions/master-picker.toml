@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-master-picker"
+description = "Open the local Master database file picker."
+commands.allow = ["choose_master_database"]

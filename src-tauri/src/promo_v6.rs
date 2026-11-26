@@ -3,6 +3,8 @@ use sqlx::{FromRow, SqlitePool};
 
 use crate::db::{apply_promo, parse_dt, resolve_accd_promotion, PromoResult};
 
+pub const MISSING_PRICE: &str = "ไม่พบราคาขายที่ใช้ได้ในวันที่เลือก กรุณาตรวจสอบข้อมูลราคาก่อนพิมพ์";
+
 #[derive(FromRow)]
 struct V6PromoRow {
     #[sqlx(rename = "FTPmhDocNo")]
@@ -340,7 +342,7 @@ pub async fn resolve_normal_price_on_date(
     }
 
     // Do not substitute a future/expired price or a Barprint-local mock price.
-    Err(sqlx::Error::Protocol("ไม่พบราคาขายที่ใช้ได้ในวันที่เลือก กรุณาตรวจสอบข้อมูลราคาก่อนพิมพ์".into()))
+    Err(sqlx::Error::Protocol(MISSING_PRICE.into()))
 }
 
 #[derive(Debug, Clone)]

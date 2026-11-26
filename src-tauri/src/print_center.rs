@@ -72,7 +72,7 @@ pub struct PrintProfileTarget {
     pub port: u16,
     #[serde(default = "default_dpi")]
     pub dpi: u32,
-    #[serde(default = "default_qty")]
+    #[serde(skip_deserializing, default = "default_qty")]
     pub quantity: i64,
 }
 
@@ -107,7 +107,7 @@ pub struct PrintRule {
     pub port: u16,
     #[serde(default = "default_dpi")]
     pub dpi: u32,
-    #[serde(default = "default_qty")]
+    #[serde(skip_deserializing, default = "default_qty")]
     pub quantity: i64,
     #[serde(default)]
     pub catch_up: bool,
@@ -303,8 +303,25 @@ pub(crate) async fn archive_finished_jobs(pool: &SqlitePool) -> std::result::Res
     Ok(jobs.len())
 }
 
-pub async fn get_center(State(st): State<AppState>) -> Response {
+#[derive(Deserialize)]
+pub struct CenterQuery {
+    view: Option<String>,
+}
+
+pub async fn get_center(State(st): State<AppState>, axum::extract::Query(query): axum::extract::Query<CenterQuery>) -> Response {
+    if query.view.as_deref() == Some("profiles") {
+        return match rules(&st.pool).await {
+            Ok(rules) => Json(json!({"rules":rules,"master":{"branch":crate::storage::configured_branch(&st.pool).await}})).into_response(),
+            Err(e) => err(e),
+        };
+    }
     let jobs=sqlx::query_as::<_,QueueJob>("SELECT FTLqjJobID AS id,FNLqjSeq AS seq,FTLqjSource AS source,FTLqjName AS name,FTLqjStatus AS status,FDCreateOn AS created,json_extract(FTLqjConfigJson,'$.targetDate') AS target_date,FTLqjError AS error,FNLqjQtySent AS completed,FNLqjQtyTotal AS total FROM TCNTLabelQueueJob WHERE FTLqjStatus NOT IN ('SUBMITTED','EMPTY','NO_MATCH','ALREADY_SUBMITTED','FAILED','CANCELLED') OR FTLqjJobID IN (SELECT FTLqjJobID FROM TCNTLabelQueueJob WHERE FTLqjStatus IN ('SUBMITTED','EMPTY','NO_MATCH','ALREADY_SUBMITTED','FAILED','CANCELLED') ORDER BY FNLqjSeq DESC LIMIT 100) ORDER BY FNLqjSeq DESC").fetch_all(&st.pool).await;
+    if query.view.as_deref() == Some("jobs") {
+        return match jobs {
+            Ok(jobs) => Json(json!({"jobs":jobs,"heartbeat":setting(&st.pool,"heartbeat").await})).into_response(),
+            Err(e) => err(e),
+        };
+    }
     match (rules(&st.pool).await,jobs) {
       (Ok(r),Ok(j))=>Json(json!({"rules":r,"jobs":j,
         "master":crate::storage::status(&st.pool).await,"heartbeat":setting(&st.pool,"heartbeat").await,
@@ -356,8 +373,8 @@ async fn validate_rule(pool: &SqlitePool, r: &PrintRule) -> Result<()> {
         } else {
             String::new()
         };
-        if t.printer.trim().is_empty() || !(1..=999).contains(&t.quantity) {
-            return Err(format!("{prefix}ระบุเครื่องพิมพ์และจำนวน 1–999"));
+        if t.printer.trim().is_empty() {
+            return Err(format!("{prefix}ระบุเครื่องพิมพ์"));
         }
         if !t.ip.is_empty() {
             t.ip.parse::<std::net::IpAddr>()
@@ -669,7 +686,8 @@ pub async fn manual_candidates(State(st):State<AppState>,Json(body):Json<ManualC
         let branch=crate::storage::configured_branch(&st.pool).await;
         if branch.is_empty(){return Err("กรุณาตั้งค่าแหล่งข้อมูล StoreFront".into());}
         let r=PrintRule{id:"manual-preview".into(),code:"MANUAL".into(),name:"ค้นหาสินค้า".into(),enabled:false,branch:branch.clone(),source:body.source.clone(),time:"00:00".into(),days:"1111111".into(),size:body.size.clone(),template:String::new(),printer:String::new(),tray:String::new(),protocol:"WINDOWS".into(),ip:String::new(),port:9100,dpi:203,quantity:body.quantity,catch_up:false,offset_days:0,targets:vec![]};
-        let delta=crate::delta_engine::compute_profile_candidates_exact(&st.pool,&schedule(&r),&body.date).await.map_err(|e|e.to_string())?;
+        let mut failures = Vec::new();
+        let delta=crate::delta_engine::manual_event_candidates(&st.pool,&schedule(&r),&body.date,&mut failures).await.map_err(|e|e.to_string())?;
         let (price_date, verify_promo) = match body.source.as_str() {
             "PRICE_CHG" => (body.date.clone(), false),
             "PROMO_END_REVERT" => (crate::delta_engine::next_day(&body.date), true),
@@ -677,18 +695,22 @@ pub async fn manual_candidates(State(st):State<AppState>,Json(body):Json<ManualC
         };
         let mut lines=vec![];
         for item in delta.items {
-            let response=crate::routes::post_build_line(State(st.clone()),Json(crate::routes::BuildLineBody{barcode:item.bar_code,pdt_code:Some(item.pdt_code),qty:Some(body.quantity),bch_code:branch.clone(),pri_type:"1".into(),verify:Some(verify_promo),override_lbs:Some(body.size.clone()),effective_date:Some(price_date.clone()),price_group:None})).await;
+            let response=crate::routes::post_build_line(State(st.clone()),Json(crate::routes::BuildLineBody{barcode:item.bar_code.clone(),pdt_code:Some(item.pdt_code.clone()),qty:Some(body.quantity),bch_code:branch.clone(),pri_type:"1".into(),verify:Some(verify_promo),override_lbs:Some(body.size.clone()),effective_date:Some(price_date.clone()),price_group:None})).await;
             let ok=response.status().is_success();
             let bytes=axum::body::to_bytes(response.into_body(),4*1024*1024).await.map_err(|e|e.to_string())?;
             let line:Value=serde_json::from_slice(&bytes).map_err(|e|e.to_string())?;
+            if !ok && line["code"] == "MISSING_PRICE" {
+                failures.push(json!({"pdtCode":item.pdt_code,"barcode":item.bar_code,"reason":crate::promo_v6::MISSING_PRICE}));
+                continue;
+            }
             if !ok{return Err(line["error"].as_str().unwrap_or("สร้างข้อมูลป้ายไม่สำเร็จ").to_string());}
             let promo=line["isPromo"]==true;
             if (body.source=="PROMO_START"&&!promo)||(body.source=="PROMO_END_REVERT"&&promo){continue;}
             lines.push(line);
         }
-        Ok::<_,String>(lines)
+        Ok::<_,String>((lines, failures))
     }.await;
-    match result {Ok(lines)=>Json(json!({"lines":lines})).into_response(),Err(e)=>err(e)}
+    match result {Ok((lines, failures))=>Json(json!({"lines":lines,"failures":failures})).into_response(),Err(e)=>err(e)}
 }
 
 pub async fn preview_rule(State(st): State<AppState>, Json(r): Json<PrintRule>) -> Response {
@@ -1665,7 +1687,7 @@ mod tests {
         assert_eq!(effective_targets(&saved[0]).len(), 2);
         assert_eq!(saved[0].size, "S1");
         assert_eq!(effective_targets(&saved[0])[1].printer, "Printer-B");
-        assert_eq!(effective_targets(&saved[0])[1].quantity, 2);
+        assert_eq!(effective_targets(&saved[0])[1].quantity, 1);
         let mut legacy = saved[0].clone();
         legacy.targets[1].template = "legacy:S1".into();
         assert!(validate_rule(&p, &legacy).await.is_err());

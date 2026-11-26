@@ -153,7 +153,7 @@ interface SettingsPanelProps {
   onClearInitialEdit?: () => void;
   initialSubTab?: 'sizes' | 'preprints' | 'printers' | 'devices' | 'autoprint' | 'autoprint_history' | 'connection' | 'jobs' | null;
   onClearInitialSubTab?: () => void;
-  onOpenDesign?: (size: string, template: string, promo: boolean, route?: import('@/lib/printProfile').PrinterRoute) => void;
+  onOpenDesign?: (size: string, template: string, promo: boolean, route?: import('@/lib/printProfile').PrinterRoute, onReturn?: (size?: string, template?: string) => void) => void;
   onLoadManualRows?: (lines: ManualLoadLine[]) => void;
 }
 
@@ -216,21 +216,24 @@ export function SettingsPanel({
     if (workspace === 'profiles') return 'autoprint';
     return initialSubTab || 'devices';
   });
-  const [adminChecked, setAdminChecked] = useState(workspace !== 'settings');
-  const [adminGranted, setAdminGranted] = useState(workspace !== 'settings');
+  const [adminChecked, setAdminChecked] = useState(false);
+  const [adminGranted, setAdminGranted] = useState(false);
   const [pinChangeRequired, setPinChangeRequired] = useState(false);
   const [adminPinInput, setAdminPinInput] = useState('');
   const [adminNewPinInput, setAdminNewPinInput] = useState('');
   const [adminConfirmPinInput, setAdminConfirmPinInput] = useState('');
+  const [settingsUnlockOpen, setSettingsUnlockOpen] = useState(false);
   const [adminPinError, setAdminPinError] = useState('');
   const [verifyingAdminPin, setVerifyingAdminPin] = useState(false);
 
   React.useEffect(() => {
-    if (workspace !== 'settings') {
+    if (workspace === 'jobs') {
       setAdminChecked(true);
-      setAdminGranted(true);
+      setAdminGranted(false);
       return;
     }
+    setAdminChecked(false);
+    setAdminGranted(false);
     let active = true;
     fetch('/api/config/admin-status')
       .then((r) => r.json())
@@ -247,6 +250,21 @@ export function SettingsPanel({
       active = false;
     };
   }, [workspace]);
+
+  async function checkProfileAdmin() {
+    try {
+      const res = await fetch('/api/config/admin-status', { cache: 'no-store' });
+      if (res.ok) {
+        const status = await res.json();
+        setPinChangeRequired(Boolean(status.pinChangeRequired));
+        if (status.adminGranted === true) return true;
+      }
+    } catch {
+      toast.error('ตรวจสอบสิทธิ์ผู้ดูแลระบบไม่สำเร็จ');
+    }
+    setAdminGranted(false);
+    return false;
+  }
 
   const handleUnlockAdminConfig = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -275,6 +293,7 @@ export function SettingsPanel({
       }
       setPinChangeRequired(Boolean(data?.pinChangeRequired));
       setAdminGranted(true);
+      setSettingsUnlockOpen(false);
       setAdminPinInput('');
       setAdminNewPinInput('');
       setAdminConfirmPinInput('');
@@ -884,21 +903,16 @@ export function SettingsPanel({
     }
   };
 
-  const isAdminLockedView =
-    workspace === 'settings' &&
-    subTab === 'connection' &&
-    (!adminChecked || !adminGranted);
+  function closeSettingsUnlock() {
+    if (verifyingAdminPin) return;
+    setSettingsUnlockOpen(false);
+    setAdminPinInput('');
+    setAdminNewPinInput('');
+    setAdminConfirmPinInput('');
+    setAdminPinError('');
+  }
 
-  const renderAdminGateCard = (title: string) => (
-    <div className="max-w-md mx-auto py-4">
-      <Card className="border-slate-200 shadow-sm bg-white py-0 overflow-hidden">
-        <CardHeader className="bg-[#3d4a57] text-white py-3 px-4">
-          <CardTitle className="text-sm font-semibold">🔒 {title}</CardTitle>
-        </CardHeader>
-        <CardContent className="p-5 space-y-4">
-          <p className="text-sm text-slate-600">
-            กรุณายืนยันด้วย PIN ผู้ดูแลระบบ (IT / Admin)
-          </p>
+  const renderAdminPinForm = () => (
           <form onSubmit={handleUnlockAdminConfig} className="space-y-3">
             <div className="space-y-1.5">
               <Label htmlFor="settings-admin-pin" className="text-xs font-medium">
@@ -964,19 +978,21 @@ export function SettingsPanel({
                 {adminPinError}
               </p>
             )}
+            <div className="flex justify-end gap-2">
+            {settingsUnlockOpen && <Button type="button" variant="outline" disabled={verifyingAdminPin} onClick={closeSettingsUnlock}>ยกเลิก</Button>}
             <Button
               type="submit"
-              className="w-full bg-[#007a87] hover:bg-[#00606b] text-white"
+              className="flex-1 bg-[#007a87] hover:bg-[#00606b] text-white"
               disabled={!adminPinInput.trim() || (pinChangeRequired && (!adminNewPinInput.trim() || !adminConfirmPinInput.trim())) || verifyingAdminPin}
             >
-              {verifyingAdminPin ? 'กำลังตรวจสอบ...' : pinChangeRequired ? 'ตั้ง PIN ใหม่และปลดล็อกสิทธิ์ Admin' : 'ยืนยัน PIN ผู้ดูแลระบบ'}
+              {verifyingAdminPin ? 'กำลังตรวจสอบ...' : pinChangeRequired ? 'ตั้ง PIN ใหม่และปลดล็อกสิทธิ์ Admin' : settingsUnlockOpen ? 'ปลดล็อก' : 'ยืนยัน PIN ผู้ดูแลระบบ'}
             </Button>
+            </div>
           </form>
-        </CardContent>
-      </Card>
-    </div>
   );
 
+  const canEditSettings = adminChecked && adminGranted;
+  const toggleSettingsLock = canEditSettings ? handleLockAdminConfig : () => setSettingsUnlockOpen(true);
   const jobsPanel = <AutoScheduleSettings mode="jobs" authUser={authUser} allLabelSizes={allLabelSizes} sysOptions={sysOptions} branches={branches} windowsPrinters={windowsPrinters} printers={printers} driverMappings={driverMappings} driverServerCode={driverServerCode} formatTrayLabel={formatTrayLabel} onRefreshAll={onRefreshAll}/>;
   if (workspace === 'jobs' && !ENABLE_AUTO_PRINT_HISTORY_TAB) {
     return <main className="max-w-[1600px] min-w-0 w-full mx-auto p-2 sm:p-4">{jobsPanel}</main>;
@@ -987,30 +1003,21 @@ export function SettingsPanel({
       <Tabs value={subTab} onValueChange={(v) => setSubTab(v as typeof subTab)} className="space-y-4">
         <div className="space-y-3">
           {workspace==='jobs'?<TabsList className="bg-white border p-1 h-auto w-full justify-start overflow-x-auto"><TabsTrigger value="jobs" className="min-h-10">งานพิมพ์</TabsTrigger>{ENABLE_AUTO_PRINT_HISTORY_TAB&&<TabsTrigger value="autoprint_history" className="min-h-10">ประวัติก่อนย้ายระบบ</TabsTrigger>}</TabsList>:workspace==='profiles'?null:<>
-            <label className="block sm:hidden text-sm space-y-2"><span className="font-medium">หมวดการตั้งค่า</span><select className="w-full rounded-lg border bg-white p-3" value={subTab} onChange={e=>setSubTab(e.target.value as typeof subTab)}>{[['sizes','ขนาดและกระดาษ'],['printers','เครื่องพิมพ์ตามแบบป้าย'],['preprints','กระดาษพิมพ์พื้นหลัง'],['devices','เครื่องพิมพ์'],['connection','🔒 แหล่งข้อมูล (IT/Admin)'],...(ENABLE_AUTO_PRINT_UI?[['autoprint','จัดการ พิมพ์อัตโนมัติ']]:[])].map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>
+            <label className="block sm:hidden text-sm space-y-2"><span className="font-medium">หมวดการตั้งค่า</span><select className="w-full rounded-lg border bg-white p-3" value={subTab} onChange={e=>setSubTab(e.target.value as typeof subTab)}>{[['sizes','ขนาดและกระดาษ'],['printers','เครื่องพิมพ์ตามแบบป้าย'],['preprints','กระดาษพิมพ์พื้นหลัง'],['devices','เครื่องพิมพ์'],['connection','แหล่งข้อมูล (IT/Admin)'],...(ENABLE_AUTO_PRINT_UI?[['autoprint','จัดการพิมพ์อัตโนมัติ (IT/Admin)']]:[])].map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>
             <div className="hidden sm:block"><TabsList className="bg-white border border-slate-200 p-1 h-auto min-h-11 w-full max-w-full flex-nowrap overflow-x-auto justify-start gap-1">
-              {([['sizes','ขนาดและกระดาษ'],['printers','เครื่องพิมพ์ตามแบบป้าย'],['preprints','กระดาษพิมพ์พื้นหลัง'],['devices','เครื่องพิมพ์'],...(ENABLE_AUTO_PRINT_UI?[['autoprint','จัดการ พิมพ์อัตโนมัติ']]:[]),['connection','🔒 แหล่งข้อมูล (IT/Admin)']]).map(([value,label])=><TabsTrigger key={value} value={value} className="flex-none min-h-10 text-sm px-3">{label}</TabsTrigger>)}
+              {([['sizes','ขนาดและกระดาษ'],['printers','เครื่องพิมพ์ตามแบบป้าย'],['preprints','กระดาษพิมพ์พื้นหลัง'],['devices','เครื่องพิมพ์'],...(ENABLE_AUTO_PRINT_UI?[['autoprint','จัดการพิมพ์อัตโนมัติ (IT/Admin)']]:[]),['connection','แหล่งข้อมูล (IT/Admin)']]).map(([value,label])=><TabsTrigger key={value} value={value} className="flex-none min-h-10 text-sm px-3">{label}</TabsTrigger>)}
             </TabsList></div>
-            {adminGranted && ['connection', 'sizes', 'devices'].includes(subTab) && (
-              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-teal-200 bg-teal-50 px-3 py-2 text-xs text-teal-900">
-                <span>โหมดผู้ดูแลระบบ (IT / Admin) ปลดล็อกอยู่ · สิทธิ์: {authUser.name} ({authUser.role})</span>
-                <Button type="button" size="sm" variant="outline" className="h-7 text-xs bg-white border-teal-300" onClick={() => void handleLockAdminConfig()}>
-                  ล็อกสิทธิ์ Admin กลับ
-                </Button>
-              </div>
-            )}
           </>}
         </div>
         <TabsContent value="connection">
-          {!adminChecked || isAdminLockedView ? (
-            !adminChecked ? (
-              <p className="p-6 text-sm text-slate-500">กำลังตรวจสอบสิทธิ์ผู้ดูแลระบบ...</p>
-            ) : (
-              renderAdminGateCard('แหล่งข้อมูลสินค้า & API (IT / Admin Only)')
-            )
-          ) : (
-            <MasterDatabaseSettings onSaved={() => window.location.reload()} />
-          )}
+          <MasterDatabaseSettings
+            key={canEditSettings ? 'connection-edit' : 'connection-read'}
+            readOnly={!canEditSettings}
+            lockControl={<Button size="sm" variant={canEditSettings ? 'outline' : 'teal'} disabled={!adminChecked} onClick={toggleSettingsLock}>
+              {canEditSettings ? 'ล็อกกลับ' : 'ปลดล็อกเพื่อแก้ไข'}
+            </Button>}
+            onSaved={() => window.location.reload()}
+          />
         </TabsContent>
         <TabsContent value="jobs">{jobsPanel}</TabsContent>
 
@@ -1022,6 +1029,12 @@ export function SettingsPanel({
               <CardTitle className="text-sm font-semibold">
                 ขนาดป้ายและการจัดวางบนกระดาษ
               </CardTitle>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+              {canEditSettings && (
+                <Button type="button" size="sm" variant="ghost" className="h-8 text-xs text-white hover:bg-white/10 hover:text-white" onClick={() => void handleLockAdminConfig()}>
+                  ล็อกสิทธิ์ Admin
+                </Button>
+              )}
               <Button
                 size="sm"
                 className="h-8 text-xs bg-[#007a87] hover:bg-[#00606b] text-white"
@@ -1030,6 +1043,7 @@ export function SettingsPanel({
                 <Plus className="h-3.5 w-3.5 mr-1" />
                 เพิ่มขนาดป้ายใหม่
               </Button>
+              </div>
             </CardHeader>
             <CardContent className="p-4 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1334,6 +1348,12 @@ export function SettingsPanel({
                   รายชื่อเครื่องพิมพ์ในเครื่องและเครื่องพิมพ์ LAN (TCP/IP)
                 </CardTitle>
               </div>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+              {canEditSettings && (
+                <Button type="button" size="sm" variant="ghost" className="h-8 text-xs text-white hover:bg-white/10 hover:text-white" onClick={() => void handleLockAdminConfig()}>
+                  ล็อกสิทธิ์ Admin
+                </Button>
+              )}
               <Button
                 size="sm"
                 className="h-8 text-xs bg-[#007a87] hover:bg-[#00606b] text-white"
@@ -1342,6 +1362,7 @@ export function SettingsPanel({
                 <Plus className="h-3.5 w-3.5 mr-1" />
                 เพิ่มเครื่องพิมพ์ LAN
               </Button>
+              </div>
             </CardHeader>
             <CardContent className="p-4 space-y-3">
               <div className="border border-slate-200 rounded-md overflow-x-auto">
@@ -1462,7 +1483,11 @@ export function SettingsPanel({
         {ENABLE_AUTO_PRINT_UI && (
           <TabsContent value="autoprint" className="space-y-4 mt-0">
             <AutoScheduleSettings
-              onOpenDesign={onOpenDesign}
+              key={adminGranted ? 'profile-edit' : 'profile-read'}
+              onProfileLockChange={toggleSettingsLock}
+              profileAdmin={adminGranted}
+              checkProfileAdmin={checkProfileAdmin}
+              onOpenDesign={adminGranted ? onOpenDesign : undefined}
               onOpenConnection={()=>setSubTab('connection')}
               authUser={authUser}
               allLabelSizes={allLabelSizes}
@@ -1488,6 +1513,15 @@ export function SettingsPanel({
           </TabsContent>
         )}
       </Tabs>
+      <Dialog open={settingsUnlockOpen} onOpenChange={open => { if (!open) closeSettingsUnlock(); }}>
+        <DialogContent className="w-[calc(100%-2rem)] sm:max-w-sm max-h-[90dvh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>ปลดล็อกเพื่อแก้ไข</DialogTitle>
+            <DialogDescription>ยืนยันสิทธิ์ IT/Admin ด้วย PIN ของ AdaBarprint</DialogDescription>
+          </DialogHeader>
+          {renderAdminPinForm()}
+        </DialogContent>
+      </Dialog>
 
       {/* ════════════ MODAL: ADD / EDIT LABEL SIZE ════════════════════════════ */}
       <Dialog open={Boolean(removeFormat)} onOpenChange={open=>{if (!open && !removingFormat) setRemoveFormat(null);}}>

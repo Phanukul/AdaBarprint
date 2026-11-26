@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
@@ -35,8 +35,36 @@ export function AutoScheduleSettings(p:Props) {
     setDetailError('');
     setDetailJob(job);
   }
-  const refresh=useCallback(async()=>{const [c,t]=await Promise.all([api('/api/print-center'),api('/api/templates')]);setCenter(c);setTemplates(t.db||[]);setFailure('');},[]);
-  useEffect(()=>{let active=true;const load=async()=>{try{const [c,t]=await Promise.all([api('/api/print-center'),api('/api/templates')]);if(active){setCenter(c);setTemplates(t.db||[]);setFailure('');}}catch(e){if(active)setFailure(e instanceof Error?e.message:String(e));}};void load();const timer=setInterval(load,5000);return()=>{active=false;clearInterval(timer);};},[]);
+  const jobsView = p.mode === 'jobs';
+  const latestRequest = useRef(0);
+  const refresh = useCallback(async () => {
+    const request = ++latestRequest.current;
+    try {
+      if (jobsView) {
+        const result = await api('/api/print-center?view=jobs');
+        if (request !== latestRequest.current) return;
+        setCenter(result);
+      } else {
+        const [result, formats] = await Promise.all([api('/api/print-center?view=profiles'), api('/api/templates')]);
+        if (request !== latestRequest.current) return;
+        setCenter(result);
+        setTemplates(formats.db || []);
+      }
+      setFailure('');
+    } catch (error) {
+      if (request === latestRequest.current) setFailure(error instanceof Error ? error.message : String(error));
+    }
+  }, [jobsView]);
+  useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const load = async () => {
+      await refresh();
+      if (active && jobsView) timer = setTimeout(load, 5000);
+    };
+    void load();
+    return () => { active = false; clearTimeout(timer); latestRequest.current++; };
+  }, [refresh, jobsView]);
   const perform=async(fn:()=>Promise<void>)=>{setBusy(true);try{await fn();await refresh();}catch(e){toast.error(e instanceof Error?e.message:String(e));}finally{setBusy(false);}};
   const jobs = center?.jobs ?? [];
   const [page, setPage] = useState(1);
@@ -54,7 +82,7 @@ export function AutoScheduleSettings(p:Props) {
     setDecision({job:selected, action});
   }
   return <div className="min-w-0 space-y-4">
-    {failure&&<p role="alert" className="rounded-lg bg-red-50 p-4 text-red-700">{failure}</p>}
+    {failure&&<div role="alert" className="flex items-center gap-3 rounded-lg bg-red-50 p-4 text-red-700">{failure}<Button size="sm" variant="outline" onClick={() => void refresh()}>ลองอีกครั้ง</Button></div>}
     {p.mode!=='jobs'?center?<AutoPrintBulkSettings {...p} center={center} templates={templates} onSaved={refresh}/>:<p className="p-4">กำลังโหลดการตั้งค่า…</p>:<>
     {<section className={section}>
       <header><h3 className="text-lg font-semibold">รายการงานพิมพ์</h3>

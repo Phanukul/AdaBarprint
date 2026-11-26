@@ -166,6 +166,7 @@ pub fn build_router(pool: SqlitePool) -> Router {
         .route("/api/history/:jobId", get(get_history_job))
         .route("/api/import", post(post_import))
         .route("/api/import/master", post(post_import_master))
+        .route("/api/import/master/preview", post(preview_import_master))
         .route("/api/print/build-line", post(post_build_line))
         .route("/api/print/create-job", post(post_create_job))
         .route("/api/print/send", post(print_center::enqueue_lan))
@@ -359,6 +360,13 @@ pub fn run() {
                     .expect("Invalid local URL")
             };
 
+            app.add_capability(
+                tauri::ipc::CapabilityBuilder::new("master-picker")
+                    .window("main")
+                    .local(false)
+                    .remote(format!("{}/*", initial_url.origin().ascii_serialization()))
+                    .permission("allow-master-picker"),
+            )?;
             let win_builder =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::External(initial_url));
             #[cfg(desktop)]

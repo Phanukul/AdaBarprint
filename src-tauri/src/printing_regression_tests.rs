@@ -232,7 +232,7 @@ async fn four_scheduler_profiles_enqueue_snapshots_without_sending() {
 async fn import_master_twice_keeps_product_identity_and_resolves_prices() {
  let (pool,mut conn)=fixture().await;
  for price in [100,120] {
-    let body=serde_json::from_value(json!({"branch":"B1","items":[{"pdtCode":"P1","pdtName":"Coffee","barCode":"00123","basePrice":price,"promoPrice":79,"effectiveStart":"2026-11-23","effectiveStop":"2026-11-30"}]})).unwrap();
+    let body=serde_json::from_value(json!({"branch":"B1","items":[{"pdtCode":"P1","pdtName":"Coffee","barCode":"00123","basePrice":price,"promoPrice":79,"promoStart":"2026-11-23","promoStop":"2026-11-30","effectiveStart":"2026-11-23","effectiveStop":"2026-11-30"}]})).unwrap();
     let response=routes::post_import_master(State(routes::AppState{pool:pool.clone()}),Json(body)).await;
     let status=response.status();
     let bytes=axum::body::to_bytes(response.into_body(),10240).await.unwrap();
@@ -243,6 +243,97 @@ async fn import_master_twice_keeps_product_identity_and_resolves_prices() {
  assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNTPdtPrice4PDT").fetch_one(&mut conn).await.unwrap(),1);
  let result=crate::promo_v6::resolve_effective_price(&pool,"P1","00123",None,"2026-11-24",true).await.unwrap();
  assert_eq!((result.normal_price,result.sale_price),(120.0,79.0));
+}
+
+#[tokio::test]
+async fn import_master_shared_unit_rejects_conflicting_prices_atomically() {
+    let (pool, mut master) = fixture().await;
+    let state = || State(routes::AppState {pool:pool.clone()});
+    let mut input = json!({"branch":"B1","items":[
+        {"sourceRow":2,"pdtCode":"01","unitCode":"PCS","pdtName":"Coffee","barCode":"0001","basePrice":80},
+        {"sourceRow":7,"pdtCode":"01","unitCode":"PCS","barCode":"0002","basePrice":95}
+    ]});
+    for preview in [true, false] {
+        let body = Json(serde_json::from_value(input.clone()).unwrap());
+        let res = if preview {routes::preview_import_master(state(),body).await} else {routes::post_import_master(state(),body).await};
+        assert_eq!(res.status(),axum::http::StatusCode::BAD_REQUEST);
+        let data = axum::body::to_bytes(res.into_body(),8192).await.unwrap();
+        assert!(std::str::from_utf8(&data).unwrap().contains("แถวที่ 2 และ 7"));
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNMPdtBar").fetch_one(&mut master).await.unwrap(),0);
+    }
+    input["items"][1]["basePrice"] = json!(80);
+    assert!(routes::post_import_master(state(),Json(serde_json::from_value(input).unwrap())).await.status().is_success());
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNMPdtBar").fetch_one(&mut master).await.unwrap(),2);
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNTPdtPrice4PDT").fetch_one(&mut master).await.unwrap(),1);
+}
+
+#[tokio::test]
+async fn import_master_promo_checks_dates_and_barcode_ownership_before_commit() {
+    let (pool, mut master) = fixture().await;
+    let state = || State(routes::AppState { pool: pool.clone() });
+    let promo = json!({"sourceRow":7,"pdtCode":"P1","pdtName":"Coffee","barCode":"0007",
+        "unitCode":"PCS","effectiveStart":"2026-11-01","effectiveStop":"2099-12-31",
+        "promoPrice":0,"promoStart":"2026-11-26","promoStop":"2026-11-26"});
+    let first = json!({"sourceRow":3,"pdtCode":"OTHER","pdtName":"Other","barCode":"0003","unitCode":"PCS"});
+    let mut cases = Vec::new();
+    for (field,value,reason) in [("promoStart","","วันเริ่มโปร"),("promoStop","","วันหมดโปร"),
+                                  ("promoStop","2026-11-25","อยู่หลังวันเริ่มโปร")] {
+        let mut invalid = promo.clone();
+        invalid[field] = json!(value);
+        cases.push((first.clone(),invalid,vec!["แถวที่ 7",reason]));
+    }
+    let mut duplicate = first.clone();
+    duplicate["barCode"] = json!("0007");
+    cases.push((duplicate,promo.clone(),vec!["แถวที่ 3 และ 7","0007","OTHER","P1"]));
+    for (first_row, second_row, reasons) in cases {
+        for preview in [true,false] {
+            let body = Json(serde_json::from_value(json!({"branch":"B1","items":[first_row,second_row]})).unwrap());
+            let res = if preview { routes::preview_import_master(state(),body).await } else { routes::post_import_master(state(),body).await };
+            assert_eq!(res.status(),axum::http::StatusCode::BAD_REQUEST);
+            let msg = axum::body::to_bytes(res.into_body(),8192).await.unwrap();
+            for reason in &reasons { assert!(std::str::from_utf8(&msg).unwrap().contains(reason)); }
+            assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNMPdt").fetch_one(&mut master).await.unwrap(),0);
+        }
+    }
+    // A single-day promotion is valid, including a zero promotional price.
+    let input = json!({"branch":"B1","items":[promo]});
+    assert!(routes::post_import_master(state(),Json(serde_json::from_value(input.clone()).unwrap())).await.status().is_success());
+    sqlx::query("INSERT INTO TCNMPdtBar(FTPdtCode,FTBarCode,FTPunCode) VALUES('P2','0007','PACK')").execute(&mut master).await.unwrap();
+    for preview in [true,false] {
+        let mut replacement = input.clone();
+        replacement["items"][0]["promoPrice"] = json!(25);
+        let body = Json(serde_json::from_value(replacement).unwrap());
+        let res = if preview { routes::preview_import_master(state(),body).await } else { routes::post_import_master(state(),body).await };
+        assert_eq!(res.status(),axum::http::StatusCode::BAD_REQUEST);
+        let msg = axum::body::to_bytes(res.into_body(),8192).await.unwrap();
+        for reason in ["แถวที่ 7","0007","P1","P2"] { assert!(std::str::from_utf8(&msg).unwrap().contains(reason)); }
+        assert_eq!(sqlx::query_scalar::<_,f64>("SELECT CAST(FCPmcValue AS REAL) FROM TCNTPmtCond").fetch_one(&mut master).await.unwrap(),0.0);
+    }
+}
+
+#[tokio::test]
+async fn import_master_preview_and_optional_price() {
+    let (pool, mut conn) = fixture().await;
+    let state = || State(routes::AppState {pool:pool.clone()});
+    let input = json!({"branch":"B1","items":[
+        {"pdtCode":"0001","barCode":"001","pdtName":"Coffee","unitCode":"PACK","unitFactor":6,"basePrice":0},
+        {"pdtCode":"0001","barCode":"002","unitCode":"PCS","unitFactor":1}
+    ]});
+    let preview = routes::preview_import_master(state(),Json(serde_json::from_value(input.clone()).unwrap())).await;
+    assert!(preview.status().is_success());
+    let data:serde_json::Value=serde_json::from_slice(&axum::body::to_bytes(preview.into_body(),8192).await.unwrap()).unwrap();
+    assert_eq!(data["actions"],json!(["สินค้าใหม่","เพิ่มบาร์โค้ด"]));
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNMPdt").fetch_one(&mut conn).await.unwrap(),0);
+    assert!(routes::post_import_master(state(),Json(serde_json::from_value(input).unwrap())).await.status().is_success());
+    let edit=json!({"branch":"B1","items":[{"pdtCode":"0001","barCode":"001","unitCode":"","pdtName":"New name"}]});
+    assert!(routes::post_import_master(state(),Json(serde_json::from_value(edit).unwrap())).await.status().is_success());
+    let price:(f64,f64)=sqlx::query_as("SELECT CAST(p.FCPgdPriceRet AS REAL),CAST(s.FCPdtUnitFact AS REAL) FROM TCNTPdtPrice4PDT p JOIN TCNMPdtPackSize s USING(FTPdtCode,FTPunCode)").fetch_one(&mut conn).await.unwrap();
+    assert_eq!(price,(0.0,6.0));
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNTPdtPrice4PDT").fetch_one(&mut conn).await.unwrap(),1);
+    let read = |bar| Json(serde_json::from_value(json!({"barcode":bar,"pdtCode":"0001","qty":1,"bchCode":"B1","priType":"1"})).unwrap());
+    let line=routes::post_build_line(state(),read("001")).await;
+    assert!(line.status().is_success());
+    assert_eq!(routes::post_build_line(state(),read("002")).await.status(),axum::http::StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[tokio::test]
@@ -266,7 +357,7 @@ async fn branch_only_sync_accepts_one_agency_and_rejects_mixed_prices(){
  let result=standalone::apply_snapshots(std::path::Path::new(&path),&cfg,&bundles).await;
  println!("AUDIT optional empty agency config accepted but valid A1 price snapshot={result:?}");
  result.unwrap();
- let agency:String=sqlx::query_scalar("SELECT agency FROM ABMasterIdentity WHERE id=1").fetch_one(&pool).await.unwrap();
+ let agency:String=sqlx::query_scalar("SELECT FTAgnCode FROM TCNSLabelMasterIdentity WHERE FNLmiID=1").fetch_one(&pool).await.unwrap();
  assert_eq!(agency,"A1");
  for (_,data) in &mut bundles {
     if let Some(rows)=data.get_mut("raPdtPrice4PDT").and_then(|v|v.as_array_mut()) {
@@ -439,4 +530,30 @@ async fn save_as_on_existing_size_adds_only_independent_templates() {
     }
     assert_eq!(sizes().await.unwrap(),before);
     assert_eq!(formats().await.unwrap(),old_formats+2);
+}
+#[tokio::test]
+async fn manual_new_products_report_missing_price_without_losing_priced_rows() {
+    let (pool, mut c) = fixture().await;
+    seed_product(&mut c).await;
+    sqlx::raw_sql("UPDATE TCNMPdt SET FDCreateOn='2026-11-26';
+        UPDATE TCNMPdtPackSize SET FCPdtPriceRET=0;
+        INSERT INTO TCNMPdt(FTPdtCode,FDCreateOn) VALUES('P0','2026-11-26');
+        INSERT INTO TCNMPdtBar(FTPdtCode,FTBarCode,FTPunCode,FTBarStaUse) VALUES('P0','0000011','PCS','1');")
+        .execute(&mut c).await.unwrap();
+    for expected_count in [1, 0] {
+        let response = print_center::manual_candidates(State(routes::AppState { pool: pool.clone() }),
+            Json(print_center::ManualCandidates { source:"NEW_PDT".into(), date:"2026-11-26".into(), size:String::new(), quantity:1 })).await;
+        assert!(response.status().is_success());
+        let bytes = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(data["lines"].as_array().unwrap().len(), expected_count);
+        assert_eq!(data["failures"].as_array().unwrap().len(), 2 - expected_count);
+        assert_eq!(data["failures"][0], json!({"pdtCode":"P0","barcode":"0000011","reason":crate::promo_v6::MISSING_PRICE}));
+        if expected_count == 1 {
+            assert_eq!(data["lines"][0]["setPrice"], 0.0);
+            sqlx::query("UPDATE TCNMPdtPackSize SET FCPdtPriceRET=NULL").execute(&mut c).await.unwrap();
+        }
+    }
+    c.close().await.unwrap();
+    pool.close().await;
 }

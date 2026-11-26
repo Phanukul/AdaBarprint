@@ -225,14 +225,21 @@ pub async fn compute_profile_candidates_exact(
     schedule: &TCNTLabelSchedule,
     target_date: &str,
 ) -> Result<DeltaSummary, sqlx::Error> {
-    compute_delta_candidates_impl(pool, schedule, target_date, target_date, true).await
+    compute_delta_candidates_impl(pool, schedule, target_date, target_date, true, None).await
 }
 
 /// Select changes since the last completed round, resolving prices as of today.
 pub async fn compute_delta_candidates_since(
     pool: &SqlitePool, schedule: &TCNTLabelSchedule, biz_date: &str, since: &str,
 ) -> Result<DeltaSummary, sqlx::Error> {
-    compute_delta_candidates_impl(pool, schedule, biz_date, since, false).await
+    compute_delta_candidates_impl(pool, schedule, biz_date, since, false, None).await
+}
+
+pub async fn manual_event_candidates(
+    pool: &SqlitePool, schedule: &TCNTLabelSchedule, date: &str,
+    failures: &mut Vec<serde_json::Value>,
+) -> Result<DeltaSummary, sqlx::Error> {
+    compute_delta_candidates_impl(pool, schedule, date, date, true, Some(failures)).await
 }
 
 async fn compute_delta_candidates_impl(
@@ -241,6 +248,7 @@ async fn compute_delta_candidates_impl(
     biz_date: &str,
     since: &str,
     exact_profile_mode: bool,
+    mut manual_failures: Option<&mut Vec<serde_json::Value>>,
 ) -> Result<DeltaSummary, sqlx::Error> {
     crate::promo_v6::validate_v6_schema(pool).await?;
     let yesterday = previous_day(biz_date);
@@ -457,15 +465,24 @@ async fn compute_delta_candidates_impl(
             (biz_date.to_string(), true)
         };
 
-        let eff = resolve_effective_price(
+        let eff = match resolve_effective_price(
             pool,
             &pdt_code,
             &bar_code,
             eff_ppl.as_deref(),
             &price_date,
             verify_promo,
-        )
-        .await?;
+        ).await {
+            Ok(price) => price,
+            Err(sqlx::Error::Protocol(reason)) if reason == crate::promo_v6::MISSING_PRICE => {
+                if let Some(failures) = manual_failures.as_deref_mut() {
+                    failures.push(serde_json::json!({"pdtCode":pdt_code,"barcode":bar_code,"reason":reason}));
+                    continue;
+                }
+                return Err(sqlx::Error::Protocol(reason));
+            }
+            Err(error) => return Err(error),
+        };
 
         if exact_profile_mode && trigger_src == "PRICE_CHG" {
             // Compare published prices in the same unit/group. A first price

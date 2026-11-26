@@ -638,7 +638,7 @@ pub async fn verify_and_update_admin_pin(pool: &SqlitePool, pin: &str, new_pin: 
     }
     Ok(must_change)
 }
-async fn has_barprint_identity(path: &Path) -> Result<bool, String> {
+pub(crate) async fn has_barprint_identity(path: &Path) -> Result<bool, String> {
     let options = SqliteConnectOptions::new()
         .filename(path)
         .read_only(true)
@@ -648,7 +648,7 @@ async fn has_barprint_identity(path: &Path) -> Result<bool, String> {
         .await
         .map_err(|_| "เปิดไฟล์ฐานข้อมูลเพื่อตรวจสอบไม่ได้".to_string())?;
     let owned: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='ABMasterIdentity'",
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('TCNSLabelMasterIdentity','ABMasterIdentity')",
     )
     .fetch_one(&mut c)
     .await
@@ -846,7 +846,8 @@ pub async fn save_config(State(st):State<AppState>,Json(mut cfg):Json<Config>) -
         if bootstrap {
             let mut local = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&canonical).create_if_missing(false)).await?;
             let mut write = local.begin_with("BEGIN IMMEDIATE").await?;
-            sqlx::query("SELECT id FROM ABMasterIdentity LIMIT 0").execute(&mut *write).await?;
+            crate::standalone::migrate_master_identity(&mut write).await?;
+            sqlx::query("SELECT FNLmiID FROM TCNSLabelMasterIdentity LIMIT 0").execute(&mut *write).await?;
             let count:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM TCNMUsrLogin").fetch_one(&mut *write).await?;
             if count != 0 { return Err(sqlx::Error::Protocol("ฐานนี้มีบัญชีผู้ใช้แล้ว ให้เข้าสู่ระบบด้วยบัญชีเดิม".into())); }
             let password=crate::auth::encrypt_pos_aes_b64(&cfg.operator_password).ok_or_else(||sqlx::Error::Protocol("สร้างรหัสผ่านไม่ได้".into()))?;
