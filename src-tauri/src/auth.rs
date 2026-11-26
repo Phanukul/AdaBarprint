@@ -118,65 +118,7 @@ pub async fn ensure_auth_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .execute(pool)
     .await?;
-    sqlx::query("CREATE TABLE IF NOT EXISTS TCNTLabelAdminGrant(FTLagTokenHash TEXT PRIMARY KEY, FNLagExpiresUnix INTEGER NOT NULL)").execute(pool).await?;
     Ok(())
-}
-
-pub async fn has_active_session(pool: &SqlitePool, headers: &HeaderMap) -> bool {
-    let Some(token) = bearer_token(headers) else {
-        return false;
-    };
-    matches!(load_valid_session(pool, &token).await, Ok(session) if session.FTSesLocked == 0)
-}
-
-pub async fn get_admin_status(State(st): State<AppState>, headers: HeaderMap) -> Response {
-    let pin_change_required = crate::storage::admin_pin_change_required(&st.pool).await;
-    let granted = if let Some(token) = bearer_token(&headers) {
-        if let Ok(session) = load_valid_session(&st.pool, &token).await {
-            if session.FTSesLocked == 0 {
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT COUNT(*) FROM TCNTLabelAdminGrant WHERE FTLagTokenHash=? AND FNLagExpiresUnix>unixepoch()",
-                )
-                .bind(&session.FTSesTokenHash)
-                .fetch_one(&st.pool)
-                .await
-                .unwrap_or(0)
-                    > 0
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-    Json(json!({
-        "adminGranted": granted,
-        "pinChangeRequired": pin_change_required
-    }))
-    .into_response()
-}
-
-pub async fn grant_admin(pool: &SqlitePool, headers: &HeaderMap) -> Result<(), String> {
-    let token=bearer_token(headers).ok_or("กรุณาเข้าสู่ระบบก่อนยืนยันสิทธิ์ผู้ดูแล")?;
-    let session=load_valid_session(pool,&token).await.map_err(|(_,m)|m)?;
-    if session.FTSesLocked!=0 {return Err("กรุณาปลดล็อกก่อนยืนยันสิทธิ์ผู้ดูแล".into());}
-    sqlx::query("DELETE FROM TCNTLabelAdminGrant WHERE FNLagExpiresUnix < unixepoch()").execute(pool).await.map_err(|e|e.to_string())?;
-    sqlx::query("INSERT INTO TCNTLabelAdminGrant(FTLagTokenHash,FNLagExpiresUnix) VALUES(?,unixepoch()+600) ON CONFLICT(FTLagTokenHash) DO UPDATE SET FNLagExpiresUnix=excluded.FNLagExpiresUnix")
-        .bind(session.FTSesTokenHash).execute(pool).await.map_err(|e|e.to_string())?;
-    Ok(())
-}
-
-pub async fn revoke_admin(State(st): State<AppState>, headers: HeaderMap) -> Response {
-    if let Some(token) = bearer_token(&headers) {
-        let token_hash = hash_token(&token);
-        let _ = sqlx::query("DELETE FROM TCNTLabelAdminGrant WHERE FTLagTokenHash = ?")
-            .bind(&token_hash)
-            .execute(&st.pool)
-            .await;
-    }
-    Json(json!({ "ok": true, "adminGranted": false })).into_response()
 }
 
 fn normalize_credential_type(raw: Option<&str>) -> &'static str {
@@ -289,7 +231,7 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
 }
 
 /// Enforce sessions on business APIs, including requests made outside the UI.
-/// Source setup remains available before login; its writes require the admin PIN.
+/// Source setup remains available before login.
 pub async fn require_api_session(
     State(pool): State<SqlitePool>,
     request: axum::extract::Request,
@@ -317,18 +259,6 @@ pub async fn require_api_session(
             Ok(session) if session.FTSesLocked == 0 => {
                 if session.FTBchCode != crate::storage::configured_branch(&pool).await {
                     return (StatusCode::UNAUTHORIZED, Json(json!({"error":"แหล่งข้อมูลเปลี่ยนแล้ว กรุณาเข้าสู่ระบบใหม่"}))).into_response();
-                }
-                // Both routes persist the design confirmed by the signed-in operator.
-                let save_design = request.method() == axum::http::Method::POST
-                    && matches!(path, "/api/templates/overwrite" | "/api/templates/save");
-                let changes_settings=!save_design && request.method()!=axum::http::Method::GET && (
-                    path.starts_with("/api/config/") && !matches!(path, "/api/config/admin-verify" | "/api/config/admin-revoke")
-                    || ["/api/paper-sizes/","/api/preprints/","/api/lan-printers/","/api/label-sizes/","/api/templates/","/api/schedules/"].iter().any(|prefix|path.starts_with(prefix))
-                    || matches!(path,"/api/seed"|"/api/printers"|"/api/label-printers"|"/api/agent/register"|"/api/print-center/rule"|"/api/print-center/rules"|"/api/print-center/profile/delete"|"/api/print-center/sync"|"/api/print-center/action"));
-                if changes_settings {
-                    let granted=sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNTLabelAdminGrant WHERE FTLagTokenHash=? AND FNLagExpiresUnix>unixepoch()")
-                        .bind(&session.FTSesTokenHash).fetch_one(&pool).await.unwrap_or(0)>0;
-                    if !granted {return (StatusCode::FORBIDDEN,Json(json!({"code":"ADMIN_REQUIRED","error":"กรุณายืนยัน PIN ผู้ดูแลก่อนแก้ไขการตั้งค่า"}))).into_response();}
                 }
             }
             Ok(_) => return (StatusCode::LOCKED, Json(json!({"error":"กรุณาปลดล็อกหน้าจอก่อนใช้งาน"}))).into_response(),
@@ -740,9 +670,6 @@ pub async fn post_auth_lock(State(st): State<AppState>, headers: HeaderMap) -> R
         Ok(s) => s,
         Err((status, msg)) => return err_json(status, msg),
     };
-    if let Err(e)=sqlx::query("DELETE FROM TCNTLabelAdminGrant WHERE FTLagTokenHash=?").bind(&session.FTSesTokenHash).execute(&st.pool).await {
-        return err_json(StatusCode::INTERNAL_SERVER_ERROR,e.to_string());
-    }
 
     if let Err(e) = sqlx::query("UPDATE TCNTLabelAuthSession SET FTSesLocked = 1 WHERE FTSesTokenHash = ?")
         .bind(&session.FTSesTokenHash)
@@ -805,10 +732,6 @@ pub async fn post_auth_unlock(
 pub async fn post_auth_logout(State(st): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(token) = bearer_token(&headers) {
         let token_hash = hash_token(&token);
-        let _ = sqlx::query("DELETE FROM TCNTLabelAdminGrant WHERE FTLagTokenHash = ?")
-            .bind(&token_hash)
-            .execute(&st.pool)
-            .await;
         let _ = sqlx::query("DELETE FROM TCNTLabelAuthSession WHERE FTSesTokenHash = ?")
             .bind(&token_hash)
             .execute(&st.pool)
@@ -895,7 +818,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settings_require_admin_grant_and_lock_revokes_it() {
+    async fn settings_use_the_signed_in_session_and_respect_screen_lock() {
         let pool=setup_auth_test_db().await;
         sqlx::raw_sql("CREATE TABLE TCNSLabelStorage(FNLstID INTEGER PRIMARY KEY,FTBchCode TEXT); INSERT INTO TCNSLabelStorage VALUES(1,'00001')").execute(&pool).await.unwrap();
         let app=Router::new()
@@ -913,13 +836,9 @@ mod tests {
         let token=response["sessionToken"].as_str().unwrap();
         let request=|path:&str|Request::builder().method("POST").uri(path)
             .header("authorization",format!("Bearer {token}")).body(Body::empty()).unwrap();
-        assert_eq!(app.clone().oneshot(request("/api/config/options")).await.unwrap().status(),StatusCode::FORBIDDEN);
-        let mut headers=HeaderMap::new();headers.insert("authorization",format!("Bearer {token}").parse().unwrap());
-        grant_admin(&pool,&headers).await.unwrap();
         assert_eq!(app.clone().oneshot(request("/api/config/options")).await.unwrap().status(),StatusCode::OK);
         assert_eq!(app.clone().oneshot(request("/api/auth/lock")).await.unwrap().status(),StatusCode::OK);
         assert_eq!(app.oneshot(request("/api/config/options")).await.unwrap().status(),StatusCode::LOCKED);
-        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM TCNTLabelAdminGrant").fetch_one(&pool).await.unwrap(),0);
         pool.close().await;
     }
 

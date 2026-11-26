@@ -739,7 +739,6 @@ pub async fn seed_defaults(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         ("UrlTemplate", "PrintBar", "URL Template สำหรับ QR", "", "รูปแบบ URL สินค้าใน QR Code", 5),
         ("DefaultUser", "PrintBar", "รหัสผู้ใช้งานเริ่มต้น", "ADMIN", "ชื่อผู้ใช้งานที่บันทึกลง Transaction Log", 6),
         ("AutoPrintRetentionDays", "PrintBar", "จำนวนวันเก็บไฟล์และคิวพิมพ์", "60", "ลบประวัติคิวและไฟล์ชั่วคราวที่เก่าเกินกำหนดอัตโนมัติ", 14),
-        ("AutoPrintAdminPin", "PrintBar", "รหัส PIN แท็บผู้ดูแลระบบ", "1234", "PIN สำหรับตั้งค่าแหล่งข้อมูล StoreFront", 16),
     ];
     for (code, app, name, val, desc, seq) in sys_opts {
         sqlx::query(

@@ -393,7 +393,7 @@ function AdaBarprintWorkspace({
   onLogout: () => void;
 }) {
   const [loading, setLoading] = useState(true);
-  const [activeMenu, setActiveMenu] = useState<'print' | 'design' | 'settings' | 'jobs'>('print');
+  const [activeMenu, setActiveMenu] = useState<'print' | 'design' | 'paper' | 'settings' | 'jobs'>('print');
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [syncingNow, setSyncingNow] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth >= 1024);
@@ -2439,6 +2439,20 @@ function AdaBarprintWorkspace({
 
           <button
             type="button"
+            title="ตั้งค่ากระดาษ"
+            onClick={() => {
+              setSettingsEditLbsCode(null);
+              setSettingsSubTab('sizes');
+              setActiveMenu('paper');
+            }}
+            className={`w-full flex items-center gap-2.5 px-2.5 py-2.5 rounded-md text-sm font-medium transition-colors ${activeMenu === 'paper' ? 'bg-[#007a87] text-white shadow-xs' : 'text-slate-300 hover:bg-slate-700/50 hover:text-white'}`}
+          >
+            <Layers className="h-4 w-4 shrink-0" />
+            {sidebarOpen && <span className="truncate">ตั้งค่ากระดาษ</span>}
+          </button>
+
+          <button
+            type="button"
             onClick={() => {
               setSettingsEditLbsCode(null);
               if (activeMenu === 'design' && designFromProfile) {
@@ -2453,7 +2467,7 @@ function AdaBarprintWorkspace({
                 ? 'bg-[#007a87] text-white shadow-xs'
                 : 'text-slate-300 hover:bg-slate-700/50 hover:text-white'
             }`}
-            title="ตั้งค่าขนาดป้าย, เครื่องพิมพ์, ถาดกระดาษ และระบบ"
+            title="ตั้งค่าระบบ"
           >
             <Settings2 className="h-4 w-4 shrink-0" />
             {sidebarOpen && <span className="truncate">ตั้งค่าระบบ</span>}
@@ -2537,7 +2551,7 @@ function AdaBarprintWorkspace({
             <div>
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-base font-bold text-[#007a87]">
-                  {{print:'พิมพ์ป้าย',jobs:'ประวัติการพิมพ์',design:'ออกแบบป้าย',settings:'ตั้งค่าระบบ'}[activeMenu]}
+                  {{print:'พิมพ์ป้าย',jobs:'ประวัติการพิมพ์',design:'ออกแบบป้าย',paper:'ตั้งค่ากระดาษ',settings:'ตั้งค่าระบบ'}[activeMenu]}
                 </h1>
                 <Badge variant="outline" className="text-[11px] border-[#007a87] text-[#007a87]">AdaBarprint</Badge>
               </div>
@@ -2625,7 +2639,7 @@ function AdaBarprintWorkspace({
                             setMoreMenuOpen(false);
                             setSettingsEditLbsCode(null);
                             setSettingsSubTab('printers');
-                            setActiveMenu('settings');
+                            setActiveMenu('paper');
                           }}
                           className="w-full px-3 py-2 text-left hover:bg-slate-50 flex items-center gap-2 text-slate-700 cursor-pointer"
                         >
@@ -2663,11 +2677,11 @@ function AdaBarprintWorkspace({
           onResetLayout={handleResetCustomLayout}
         />
       )}
-      {(['settings', 'jobs'].includes(activeMenu) || (activeMenu === 'design' && designFromProfile)) && (
+      {(['settings', 'paper', 'jobs'].includes(activeMenu) || (activeMenu === 'design' && designFromProfile)) && (
         <div className={activeMenu === 'design' ? 'hidden' : 'contents'}>
         <SettingsPanel
-          key={activeMenu === 'jobs' ? 'jobs' : 'settings'}
-          workspace={activeMenu === 'jobs' ? 'jobs' : 'settings'}
+          key={activeMenu === 'paper' || activeMenu === 'jobs' ? activeMenu : 'settings'}
+          workspace={activeMenu === 'paper' || activeMenu === 'jobs' ? activeMenu : 'settings'}
           authUser={authUser}
           allLabelSizes={
             allConfigSizes.length > 0
@@ -3072,7 +3086,7 @@ function AdaBarprintWorkspace({
                       onClick={() => {
                         setSettingsEditLbsCode(selectedLabelCode);
                         setSettingsSubTab('printers');
-                        setActiveMenu('settings');
+                        setActiveMenu('paper');
                       }}
                     >
                       ตั้งค่าเครื่อง/ถาดของป้ายนี้
@@ -3892,41 +3906,45 @@ function AdaBarprintWorkspace({
       </Dialog>
 
       <Dialog open={Boolean(pendingMaster)} onOpenChange={open => { if (!open && !importingFile) setPendingMaster(null); }}>
-        <DialogContent className="flex max-h-[92dvh] w-[96vw] min-w-0 flex-col gap-0 overflow-hidden rounded-2xl p-0 sm:max-w-6xl">
-          <DialogHeader className="shrink-0 border-b px-5 py-4 pr-12 text-left">
-            <DialogTitle className="text-xl text-slate-900">ตรวจรายการก่อนบันทึก Master</DialogTitle>
-            <DialogDescription>หลังบันทึก ตารางพิมพ์จะแสดงสินค้าชุดนี้แทนรายการเดิม ช่องราคาที่เว้นว่างจะคงราคาเดิม</DialogDescription>
+        <DialogContent className="flex max-h-[92dvh] w-[96vw] min-w-0 flex-col gap-0 overflow-hidden rounded-2xl p-0 sm:max-w-[88rem]">
+          <DialogHeader className="shrink-0 border-b px-4 py-3 pr-12 text-left">
+            <DialogTitle className="text-base text-slate-900">ตรวจรายการก่อนบันทึก Master</DialogTitle>
+            <DialogDescription className="text-xs leading-relaxed">หลังบันทึก ตารางพิมพ์จะแสดงสินค้าชุดนี้แทนรายการเดิม ช่องราคาที่เว้นว่างจะคงราคาเดิม</DialogDescription>
           </DialogHeader>
           {pendingMaster && <div className="flex min-h-0 flex-col overflow-y-auto">
-            <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3 text-sm">
-              <div className="min-w-0"><p className="break-all font-medium text-slate-900">{pendingMaster.file}</p>
+            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-2 text-xs">
+              <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1"><p className="break-all font-medium text-slate-900">{pendingMaster.file}</p>
                 <p className="text-slate-600">สาขา {pendingMaster.branch} · {pendingMaster.items.length.toLocaleString('th-TH')} รายการ</p></div>
-              <div className="flex flex-wrap gap-2">{Array.from(new Set(pendingMaster.actions)).map(action =>
+              <div className="flex flex-wrap items-center gap-2">{Array.from(new Set(pendingMaster.actions)).map(action =>
                 <span key={action} className="rounded-md bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700">
                   {action} {pendingMaster.actions.filter(item => item === action).length}
-                </span>)}</div>
+                </span>)}
+
+              </div>
             </div>
             <div tabIndex={0} role="region" aria-label="รายการสินค้าในไฟล์" className="min-h-24 overflow-auto border-t border-slate-200 focus-visible:outline-teal-600">
-              <table className="w-full min-w-[900px] text-left text-sm">
+              <table className="w-full min-w-[1060px] text-left text-[13px] leading-[1.35]">
                 <thead className="sticky top-0 z-10 bg-slate-100 text-slate-700"><tr>
-                  {['ผลตรวจ','สินค้า','บาร์โค้ด','หน่วยขาย','ตัวคูณ','ราคาปกติ','ราคาโปร'].map(label =>
-                    <th scope="col" key={label} className="whitespace-nowrap px-3 py-2.5 font-semibold first:pl-5">{label}</th>)}
+                  {['ผลตรวจ','สินค้า','บาร์โค้ด','หน่วยขาย','ตัวคูณ','ราคาปกติ (บาท)','ช่วงวันที่ราคาปกติ','ราคาโปร (บาท)','ช่วงวันที่โปร'].map(label =>
+                    <th scope="col" key={label} className="whitespace-nowrap px-2.5 py-2 text-xs font-medium first:pl-4 [&:nth-child(5)]:text-right [&:nth-child(6)]:text-right [&:nth-child(8)]:text-right">{label}</th>)}
                 </tr></thead>
-                <tbody className="divide-y divide-slate-200">{pendingMaster.items.map((row, i) => <tr key={row.sourceRow} className="align-top even:bg-slate-50/60">
-                  <td className="whitespace-nowrap py-3 pl-5 pr-3"><span className={`rounded-md px-2 py-1 text-xs font-medium ${pendingMaster.actions[i] === 'สินค้าใหม่' ? 'bg-teal-50 text-teal-800' : pendingMaster.actions[i] === 'เพิ่มบาร์โค้ด' ? 'bg-sky-50 text-sky-800' : 'bg-amber-50 text-amber-900'}`}>{pendingMaster.actions[i]}</span></td>
-                  <td className="max-w-72 break-words px-3 py-3"><div className="font-medium">{row.pdtName || row.pdtCode}</div>{row.pdtName && <small className="text-slate-600">{row.pdtCode}</small>}</td>
-                  <td className="max-w-48 break-all px-3 py-3 tabular-nums">{row.barCode}</td>
-                  <td className="px-3 py-3">{row.unitCode || '—'}{row.unitName && <small className="block text-slate-600">{row.unitName}</small>}</td>
-                  <td className="px-3 py-3 tabular-nums">{row.unitFactor ?? '—'}</td>
-                  <td className="px-3 py-3 tabular-nums">{row.basePrice ?? '—'}{row.basePrice !== undefined && <small className="block whitespace-nowrap text-slate-600">{row.effectiveStart} – {row.effectiveStop}</small>}</td>
-                  <td className="px-3 py-3 tabular-nums">{row.promoPrice ?? '—'}{row.promoPrice !== undefined && <><small className="block max-w-52 break-words text-slate-600">{row.promoName}</small><small className="block whitespace-nowrap text-slate-600">{row.promoStart} – {row.promoStop}</small></>}</td>
+                <tbody className="divide-y divide-slate-200">{pendingMaster.items.map((row, i) => <tr key={row.sourceRow} className="align-middle even:bg-slate-50/60 hover:bg-teal-50/40">
+                  <td className="whitespace-nowrap py-1.5 pl-4 pr-2"><span className={`rounded px-1.5 py-0.5 text-xs font-medium ${pendingMaster.actions[i] === 'สินค้าใหม่' ? 'bg-teal-50 text-teal-800' : pendingMaster.actions[i] === 'เพิ่มบาร์โค้ด' ? 'bg-sky-50 text-sky-800' : 'bg-amber-50 text-amber-900'}`}>{pendingMaster.actions[i]}</span></td>
+                  <td className="max-w-72 break-words px-2.5 py-1.5"><div className="font-medium">{row.pdtName || row.pdtCode}</div>{row.pdtName && <small className="block text-[11px] leading-tight text-slate-600">{row.pdtCode}</small>}</td>
+                  <td className="max-w-48 break-all px-2.5 py-1.5 tabular-nums">{row.barCode}</td>
+                  <td className="px-2.5 py-1.5">{row.unitCode || '—'}{row.unitName && <small className="block text-slate-600">{row.unitName}</small>}</td>
+                  <td className="px-2.5 py-1.5 text-right tabular-nums">{row.unitFactor ?? '—'}</td>
+                  <td className="px-2.5 py-1.5 text-right tabular-nums">{row.basePrice?.toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 20 }) ?? '—'}</td>
+                  <td className="whitespace-nowrap px-2.5 py-1.5 text-xs tabular-nums text-slate-600">{row.basePrice !== undefined ? `${row.effectiveStart} – ${row.effectiveStop}` : '—'}</td>
+                  <td className="px-2.5 py-1.5 text-right tabular-nums">{row.promoPrice?.toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 20 }) ?? '—'}{row.promoName && <small className="block max-w-52 break-words text-slate-600">{row.promoName}</small>}</td>
+                  <td className="whitespace-nowrap px-2.5 py-1.5 text-xs tabular-nums text-slate-600">{row.promoPrice !== undefined ? `${row.promoStart} – ${row.promoStop}` : '—'}</td>
                 </tr>)}</tbody>
               </table>
             </div>
           </div>}
-          <DialogFooter className="shrink-0 flex-row justify-end border-t bg-white px-5 py-3">
+          <DialogFooter className="shrink-0 flex-row justify-end border-t bg-white px-4 py-2.5">
             <Button variant="outline" disabled={importingFile} onClick={() => setPendingMaster(null)}>ยกเลิก</Button>
-            <Button variant="teal" disabled={importingFile} onClick={confirmMasterImport}>{importingFile ? 'กำลังบันทึก…' : 'ยืนยันบันทึกลงฐาน'}</Button>
+            <Button variant="teal" disabled={importingFile} onClick={confirmMasterImport}>{importingFile ? 'กำลังบันทึก…' : 'ยืนยัน'}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -4509,7 +4527,7 @@ export default function AdaBarprintPage() {
   }
 
   if (!authUser) {
-    return <><div className="fixed right-3 top-3 z-50"><button className="rounded-lg border bg-white px-3 py-2 text-sm text-teal-800 shadow" onClick={()=>setStorageSetup(!storageSetup)}>{storageSetup?'กลับเข้าสู่ระบบ':'ตั้งค่าฐานข้อมูล (IT/Admin)'}</button></div>{storageSetup?<div className="min-h-screen bg-slate-100 p-4 pt-20"><div className="mx-auto max-w-3xl"><MasterDatabaseSettings onSaved={()=>window.location.reload()}/></div></div>:<LoginPage onLoginSuccess={(user) => setAuthUser(user)} />}</>;
+    return <><div className="fixed right-3 top-3 z-50"><button className="rounded-lg border bg-white px-3 py-2 text-sm text-teal-800 shadow" onClick={()=>setStorageSetup(!storageSetup)}>{storageSetup?'กลับเข้าสู่ระบบ':'ตั้งค่าฐานข้อมูล'}</button></div>{storageSetup?<div className="min-h-screen bg-slate-100 p-4 pt-20"><div className="mx-auto max-w-3xl"><MasterDatabaseSettings onSaved={()=>window.location.reload()}/></div></div>:<LoginPage onLoginSuccess={(user) => setAuthUser(user)} />}</>;
   }
 
   if (authUser.locked) {

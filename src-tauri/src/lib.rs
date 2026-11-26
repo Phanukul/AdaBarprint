@@ -185,10 +185,7 @@ pub fn build_router(pool: SqlitePool) -> Router {
             .route("/api/schedules/runs/:runId/reprint-failed", post(print_center::legacy_disabled))
             .route("/api/schedules/runs/:runId/load-to-manual", post(post_load_failed_to_manual))
             .route("/api/sync/status", get(get_sync_status))
-            .route("/api/sync/trigger", post(print_center::request_sync))
-            .route("/api/config/admin-status", get(auth::get_admin_status))
-            .route("/api/config/admin-verify", post(post_verify_admin_pin))
-            .route("/api/config/admin-revoke", post(auth::revoke_admin));
+            .route("/api/sync/trigger", post(print_center::request_sync));
     }
 
     router

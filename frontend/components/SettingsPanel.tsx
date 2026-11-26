@@ -131,7 +131,7 @@ export interface SettingsWindowsPrinter {
 }
 
 interface SettingsPanelProps {
-  workspace?: 'settings' | 'jobs' | 'profiles';
+  workspace?: 'paper' | 'settings' | 'jobs' | 'profiles';
 
   authUser: AuthSessionUser;
   allLabelSizes: ConfigLabelSizeRow[];
@@ -207,117 +207,15 @@ export function SettingsPanel({
   const [subTab, setSubTab] = useState<'sizes' | 'preprints' | 'printers' | 'devices' | 'autoprint' | 'autoprint_history' | 'connection' | 'jobs'>(() => {
     if (initialEditLbsCode) return 'printers';
     if (!ENABLE_AUTO_PRINT_UI && initialSubTab === 'autoprint') {
-      return 'sizes';
+      return 'devices';
     }
     if (!ENABLE_AUTO_PRINT_HISTORY_TAB && initialSubTab === 'autoprint_history') {
-      return 'sizes';
+      return 'jobs';
     }
     if (workspace === 'jobs') return 'jobs';
     if (workspace === 'profiles') return 'autoprint';
-    return initialSubTab || 'devices';
+    return initialSubTab || (workspace === 'paper' ? 'sizes' : 'devices');
   });
-  const [adminChecked, setAdminChecked] = useState(false);
-  const [adminGranted, setAdminGranted] = useState(false);
-  const [pinChangeRequired, setPinChangeRequired] = useState(false);
-  const [adminPinInput, setAdminPinInput] = useState('');
-  const [adminNewPinInput, setAdminNewPinInput] = useState('');
-  const [adminConfirmPinInput, setAdminConfirmPinInput] = useState('');
-  const [settingsUnlockOpen, setSettingsUnlockOpen] = useState(false);
-  const [adminPinError, setAdminPinError] = useState('');
-  const [verifyingAdminPin, setVerifyingAdminPin] = useState(false);
-
-  React.useEffect(() => {
-    if (workspace === 'jobs') {
-      setAdminChecked(true);
-      setAdminGranted(false);
-      return;
-    }
-    setAdminChecked(false);
-    setAdminGranted(false);
-    let active = true;
-    fetch('/api/config/admin-status')
-      .then((r) => r.json())
-      .then((d) => {
-        if (!active) return;
-        setAdminGranted(Boolean(d?.adminGranted));
-        setPinChangeRequired(Boolean(d?.pinChangeRequired));
-        setAdminChecked(true);
-      })
-      .catch(() => {
-        if (active) setAdminChecked(true);
-      });
-    return () => {
-      active = false;
-    };
-  }, [workspace]);
-
-  async function checkProfileAdmin() {
-    try {
-      const res = await fetch('/api/config/admin-status', { cache: 'no-store' });
-      if (res.ok) {
-        const status = await res.json();
-        setPinChangeRequired(Boolean(status.pinChangeRequired));
-        if (status.adminGranted === true) return true;
-      }
-    } catch {
-      toast.error('ตรวจสอบสิทธิ์ผู้ดูแลระบบไม่สำเร็จ');
-    }
-    setAdminGranted(false);
-    return false;
-  }
-
-  const handleUnlockAdminConfig = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!adminPinInput.trim() || verifyingAdminPin) return;
-    if (pinChangeRequired) {
-      if (!adminNewPinInput.trim() || adminNewPinInput.trim() !== adminConfirmPinInput.trim()) {
-        setAdminPinError('กรุณากรอก PIN ผู้ดูแลระบบใหม่ (6–12 หลัก) และยืนยันให้ตรงกัน');
-        return;
-      }
-    }
-    setVerifyingAdminPin(true);
-    setAdminPinError('');
-    try {
-      const res = await fetch('/api/config/admin-verify', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          pin: adminPinInput.trim(),
-          ...(pinChangeRequired ? { newPin: adminNewPinInput.trim() } : {}),
-        }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        if (data?.pinChangeRequired) setPinChangeRequired(true);
-        throw new Error(data?.error || 'รหัส PIN ผู้ดูแลระบบไม่ถูกต้อง');
-      }
-      setPinChangeRequired(Boolean(data?.pinChangeRequired));
-      setAdminGranted(true);
-      setSettingsUnlockOpen(false);
-      setAdminPinInput('');
-      setAdminNewPinInput('');
-      setAdminConfirmPinInput('');
-      toast.success('ยืนยันสิทธิ์ผู้ดูแลระบบ (IT / Admin) สำเร็จ');
-    } catch (err) {
-      setAdminPinError(err instanceof Error ? err.message : 'ยืนยันสิทธิ์ไม่สำเร็จ');
-    } finally {
-      setVerifyingAdminPin(false);
-    }
-  };
-
-  const handleLockAdminConfig = async () => {
-    try {
-      await fetch('/api/config/admin-revoke', { method: 'POST' });
-    } catch {
-      // ignore network error; lock UI state regardless
-    }
-    setAdminGranted(false);
-    setAdminPinInput('');
-    setAdminNewPinInput('');
-    setAdminConfirmPinInput('');
-    setAdminPinError('');
-    toast.info('ล็อกสิทธิ์ผู้ดูแลระบบ (IT / Admin) เรียบร้อยแล้ว');
-  };
 
   // ── Tab 1: Label Sizes State ───────────────────────────────────────────────
   const [sizeSearch, setSizeSearch] = useState('');
@@ -405,7 +303,7 @@ export function SettingsPanel({
         (!ENABLE_AUTO_PRINT_UI && initialSubTab === 'autoprint') ||
         (!ENABLE_AUTO_PRINT_HISTORY_TAB && initialSubTab === 'autoprint_history')
       ) {
-        setSubTab('sizes');
+        setSubTab(initialSubTab === 'autoprint_history' ? 'jobs' : 'devices');
       } else {
         setSubTab(initialSubTab);
       }
@@ -903,97 +801,15 @@ export function SettingsPanel({
     }
   };
 
-  function closeSettingsUnlock() {
-    if (verifyingAdminPin) return;
-    setSettingsUnlockOpen(false);
-    setAdminPinInput('');
-    setAdminNewPinInput('');
-    setAdminConfirmPinInput('');
-    setAdminPinError('');
-  }
-
-  const renderAdminPinForm = () => (
-          <form onSubmit={handleUnlockAdminConfig} className="space-y-3">
-            <div className="space-y-1.5">
-              <Label htmlFor="settings-admin-pin" className="text-xs font-medium">
-                {pinChangeRequired ? 'PIN ผู้ดูแลระบบปัจจุบัน (ค่าเริ่มต้น 1234)' : 'PIN ผู้ดูแลระบบ AdaBarprint'}
-              </Label>
-              <Input
-                id="settings-admin-pin"
-                type="password"
-                inputMode="numeric"
-                autoComplete="off"
-                autoFocus
-                value={adminPinInput}
-                disabled={verifyingAdminPin}
-                onChange={(e) => {
-                  setAdminPinError('');
-                  setAdminPinInput(e.target.value);
-                }}
-                placeholder="กรอก PIN ผู้ดูแล..."
-              />
-            </div>
-            {pinChangeRequired && (
-              <>
-                <div className="space-y-1.5">
-                  <Label htmlFor="settings-admin-new-pin" className="text-xs font-medium">
-                    ตั้ง PIN ผู้ดูแลระบบใหม่ (ตัวเลข 6–12 หลัก)
-                  </Label>
-                  <Input
-                    id="settings-admin-new-pin"
-                    type="password"
-                    inputMode="numeric"
-                    autoComplete="new-password"
-                    value={adminNewPinInput}
-                    disabled={verifyingAdminPin}
-                    onChange={(e) => {
-                      setAdminPinError('');
-                      setAdminNewPinInput(e.target.value);
-                    }}
-                    placeholder="กรอก PIN ใหม่..."
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="settings-admin-confirm-pin" className="text-xs font-medium">
-                    ยืนยัน PIN ผู้ดูแลระบบใหม่
-                  </Label>
-                  <Input
-                    id="settings-admin-confirm-pin"
-                    type="password"
-                    inputMode="numeric"
-                    autoComplete="new-password"
-                    value={adminConfirmPinInput}
-                    disabled={verifyingAdminPin}
-                    onChange={(e) => {
-                      setAdminPinError('');
-                      setAdminConfirmPinInput(e.target.value);
-                    }}
-                    placeholder="กรอก PIN ใหม่อีกครั้ง..."
-                  />
-                </div>
-              </>
-            )}
-            {adminPinError && (
-              <p role="alert" className="text-xs text-red-700 bg-red-50 border border-red-200 rounded p-2.5">
-                {adminPinError}
-              </p>
-            )}
-            <div className="flex justify-end gap-2">
-            {settingsUnlockOpen && <Button type="button" variant="outline" disabled={verifyingAdminPin} onClick={closeSettingsUnlock}>ยกเลิก</Button>}
-            <Button
-              type="submit"
-              className="flex-1 bg-[#007a87] hover:bg-[#00606b] text-white"
-              disabled={!adminPinInput.trim() || (pinChangeRequired && (!adminNewPinInput.trim() || !adminConfirmPinInput.trim())) || verifyingAdminPin}
-            >
-              {verifyingAdminPin ? 'กำลังตรวจสอบ...' : pinChangeRequired ? 'ตั้ง PIN ใหม่และปลดล็อกสิทธิ์ Admin' : settingsUnlockOpen ? 'ปลดล็อก' : 'ยืนยัน PIN ผู้ดูแลระบบ'}
-            </Button>
-            </div>
-          </form>
-  );
-
-  const canEditSettings = adminChecked && adminGranted;
-  const toggleSettingsLock = canEditSettings ? handleLockAdminConfig : () => setSettingsUnlockOpen(true);
   const jobsPanel = <AutoScheduleSettings mode="jobs" authUser={authUser} allLabelSizes={allLabelSizes} sysOptions={sysOptions} branches={branches} windowsPrinters={windowsPrinters} printers={printers} driverMappings={driverMappings} driverServerCode={driverServerCode} formatTrayLabel={formatTrayLabel} onRefreshAll={onRefreshAll}/>;
+  const settingsTabs = workspace === 'paper'
+    ? [['sizes', 'ขนาดและกระดาษ'], ['printers', 'เครื่องพิมพ์ตามแบบป้าย'], ['preprints', 'กระดาษพิมพ์พื้นหลัง']]
+    : [
+        ['devices', 'เครื่องพิมพ์'],
+        ...(ENABLE_AUTO_PRINT_UI ? [['autoprint', 'จัดการพิมพ์อัตโนมัติ']] : []),
+        ['connection', 'แหล่งข้อมูล'],
+      ];
+
   if (workspace === 'jobs' && !ENABLE_AUTO_PRINT_HISTORY_TAB) {
     return <main className="max-w-[1600px] min-w-0 w-full mx-auto p-2 sm:p-4">{jobsPanel}</main>;
   }
@@ -1003,19 +819,14 @@ export function SettingsPanel({
       <Tabs value={subTab} onValueChange={(v) => setSubTab(v as typeof subTab)} className="space-y-4">
         <div className="space-y-3">
           {workspace==='jobs'?<TabsList className="bg-white border p-1 h-auto w-full justify-start overflow-x-auto"><TabsTrigger value="jobs" className="min-h-10">งานพิมพ์</TabsTrigger>{ENABLE_AUTO_PRINT_HISTORY_TAB&&<TabsTrigger value="autoprint_history" className="min-h-10">ประวัติก่อนย้ายระบบ</TabsTrigger>}</TabsList>:workspace==='profiles'?null:<>
-            <label className="block sm:hidden text-sm space-y-2"><span className="font-medium">หมวดการตั้งค่า</span><select className="w-full rounded-lg border bg-white p-3" value={subTab} onChange={e=>setSubTab(e.target.value as typeof subTab)}>{[['sizes','ขนาดและกระดาษ'],['printers','เครื่องพิมพ์ตามแบบป้าย'],['preprints','กระดาษพิมพ์พื้นหลัง'],['devices','เครื่องพิมพ์'],['connection','แหล่งข้อมูล (IT/Admin)'],...(ENABLE_AUTO_PRINT_UI?[['autoprint','จัดการพิมพ์อัตโนมัติ (IT/Admin)']]:[])].map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>
+            <label className="block sm:hidden text-sm space-y-2"><span className="font-medium">หมวดการตั้งค่า</span><select className="w-full rounded-lg border bg-white p-3" value={subTab} onChange={e=>setSubTab(e.target.value as typeof subTab)}>{settingsTabs.map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>
             <div className="hidden sm:block"><TabsList className="bg-white border border-slate-200 p-1 h-auto min-h-11 w-full max-w-full flex-nowrap overflow-x-auto justify-start gap-1">
-              {([['sizes','ขนาดและกระดาษ'],['printers','เครื่องพิมพ์ตามแบบป้าย'],['preprints','กระดาษพิมพ์พื้นหลัง'],['devices','เครื่องพิมพ์'],...(ENABLE_AUTO_PRINT_UI?[['autoprint','จัดการพิมพ์อัตโนมัติ (IT/Admin)']]:[]),['connection','แหล่งข้อมูล (IT/Admin)']]).map(([value,label])=><TabsTrigger key={value} value={value} className="flex-none min-h-10 text-sm px-3">{label}</TabsTrigger>)}
+              {settingsTabs.map(([value,label])=><TabsTrigger key={value} value={value} className="flex-none min-h-10 text-sm px-3">{label}</TabsTrigger>)}
             </TabsList></div>
           </>}
         </div>
         <TabsContent value="connection">
           <MasterDatabaseSettings
-            key={canEditSettings ? 'connection-edit' : 'connection-read'}
-            readOnly={!canEditSettings}
-            lockControl={<Button size="sm" variant={canEditSettings ? 'outline' : 'teal'} disabled={!adminChecked} onClick={toggleSettingsLock}>
-              {canEditSettings ? 'ล็อกกลับ' : 'ปลดล็อกเพื่อแก้ไข'}
-            </Button>}
             onSaved={() => window.location.reload()}
           />
         </TabsContent>
@@ -1030,11 +841,6 @@ export function SettingsPanel({
                 ขนาดป้ายและการจัดวางบนกระดาษ
               </CardTitle>
               <div className="flex flex-wrap items-center justify-end gap-2">
-              {canEditSettings && (
-                <Button type="button" size="sm" variant="ghost" className="h-8 text-xs text-white hover:bg-white/10 hover:text-white" onClick={() => void handleLockAdminConfig()}>
-                  ล็อกสิทธิ์ Admin
-                </Button>
-              )}
               <Button
                 size="sm"
                 className="h-8 text-xs bg-[#007a87] hover:bg-[#00606b] text-white"
@@ -1349,11 +1155,6 @@ export function SettingsPanel({
                 </CardTitle>
               </div>
               <div className="flex flex-wrap items-center justify-end gap-2">
-              {canEditSettings && (
-                <Button type="button" size="sm" variant="ghost" className="h-8 text-xs text-white hover:bg-white/10 hover:text-white" onClick={() => void handleLockAdminConfig()}>
-                  ล็อกสิทธิ์ Admin
-                </Button>
-              )}
               <Button
                 size="sm"
                 className="h-8 text-xs bg-[#007a87] hover:bg-[#00606b] text-white"
@@ -1483,11 +1284,7 @@ export function SettingsPanel({
         {ENABLE_AUTO_PRINT_UI && (
           <TabsContent value="autoprint" className="space-y-4 mt-0">
             <AutoScheduleSettings
-              key={adminGranted ? 'profile-edit' : 'profile-read'}
-              onProfileLockChange={toggleSettingsLock}
-              profileAdmin={adminGranted}
-              checkProfileAdmin={checkProfileAdmin}
-              onOpenDesign={adminGranted ? onOpenDesign : undefined}
+              onOpenDesign={onOpenDesign}
               onOpenConnection={()=>setSubTab('connection')}
               authUser={authUser}
               allLabelSizes={allLabelSizes}
@@ -1513,15 +1310,6 @@ export function SettingsPanel({
           </TabsContent>
         )}
       </Tabs>
-      <Dialog open={settingsUnlockOpen} onOpenChange={open => { if (!open) closeSettingsUnlock(); }}>
-        <DialogContent className="w-[calc(100%-2rem)] sm:max-w-sm max-h-[90dvh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>ปลดล็อกเพื่อแก้ไข</DialogTitle>
-            <DialogDescription>ยืนยันสิทธิ์ IT/Admin ด้วย PIN ของ AdaBarprint</DialogDescription>
-          </DialogHeader>
-          {renderAdminPinForm()}
-        </DialogContent>
-      </Dialog>
 
       {/* ════════════ MODAL: ADD / EDIT LABEL SIZE ════════════════════════════ */}
       <Dialog open={Boolean(removeFormat)} onOpenChange={open=>{if (!open && !removingFormat) setRemoveFormat(null);}}>

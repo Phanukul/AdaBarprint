@@ -4,9 +4,6 @@ import type { ConfigLabelSizeRow, SettingsDriverMapping, SettingsWindowsPrinter,
 import type { PrinterConfig } from '@/types/printer';
 
 export interface Props {
-  profileAdmin?: boolean;
-  onProfileLockChange?: () => void;
-  checkProfileAdmin?: () => Promise<boolean>;
   mode?: 'schedules' | 'jobs';
   onOpenDesign?: (size: string, template: string, promo: boolean, route?: import('@/lib/printProfile').PrinterRoute, onReturn?: (size?: string, template?: string) => void) => void;
   onOpenConnection?: () => void;

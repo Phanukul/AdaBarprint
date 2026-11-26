@@ -3,12 +3,10 @@ import React, { useEffect, useState } from 'react';
 import { Download, FolderOpen, ShieldCheck } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { getStoredAuthToken } from '@/lib/auth';
 
-type ProtectedAction = 'save' | 'check' | 'sync';
+type SourceAction = 'save' | 'check';
 
-export function MasterDatabaseSettings({ onSaved, readOnly = false, lockControl }: { onSaved?: () => void; readOnly?: boolean; lockControl?: React.ReactNode }) {
+export function MasterDatabaseSettings({ onSaved }: { onSaved?: () => void }) {
   const [defaultPath, setDefaultPath] = useState('');
   const [pathWarning, setPathWarning] = useState('');
   const [useApi, setUseApi] = useState(false);
@@ -37,14 +35,8 @@ export function MasterDatabaseSettings({ onSaved, readOnly = false, lockControl 
   const [branches, setBranches] = useState<Array<{ code: string; name?: string }>>([]);
   const [checkedPath, setCheckedPath] = useState('');
   const [operatorPassword, setOperatorPassword] = useState('');
-  const [pin, setPin] = useState('');
-  const [newPin, setNewPin] = useState('');
-  const [pinConfirmation, setPinConfirmation] = useState('');
-  const [pinChangeRequired, setPinChangeRequired] = useState(false);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
-  const [pendingAction, setPendingAction] = useState<ProtectedAction | null>(null);
-  const [authorizationError, setAuthorizationError] = useState('');
 
   async function request(url: string, body?: unknown) {
     const r = await fetch(url, {
@@ -69,7 +61,6 @@ export function MasterDatabaseSettings({ onSaved, readOnly = false, lockControl 
         `โฟลเดอร์โปรแกรม (${s.dataRoot}) ไม่มีสิทธิ์เขียนไฟล์ กรุณาย้ายโปรแกรมออกจาก Program Files เช่น D:\\AdaBarprint`,
       );
     }
-    setPinChangeRequired(Boolean(s.adminPinChangeRequired));
     const mode = s.configured && s.mode === 'POS_SHARED' ? 'POS_SHARED' : 'STANDALONE';
     setSavedSource(s.configured ? mode : '');
     setUseApi(Boolean(s.apiConfigured || s.sync?.config?.baseUrl));
@@ -128,19 +119,6 @@ export function MasterDatabaseSettings({ onSaved, readOnly = false, lockControl 
     };
   }, []);
 
-  function pinFields() {
-    if ((pinChangeRequired || newPin) && (!newPin || newPin !== pinConfirmation)) {
-      throw new Error('กรอก PIN ใหม่และยืนยันให้ตรงกัน');
-    }
-    return { pin, newPin };
-  }
-
-  const actionTitle =
-    pendingAction === 'check'
-      ? 'ตรวจสอบไฟล์ฐานข้อมูล AdaAccD.db'
-      : pendingAction === 'sync'
-        ? 'ดาวน์โหลดข้อมูลตอนนี้ (Manual Sync)'
-        : 'บันทึกการตั้งค่าแหล่งข้อมูล';
 
   const runDirectSync = async () => {
     if (dirty) {
@@ -149,10 +127,6 @@ export function MasterDatabaseSettings({ onSaved, readOnly = false, lockControl 
     }
     if (!apiConfigured) {
       setMessage('ยังไม่ได้ตั้งค่า URL ของ API2PSMaster สำหรับดาวน์โหลด');
-      return;
-    }
-    if (!getStoredAuthToken()) {
-      beginAction('sync');
       return;
     }
     setBusy(true);
@@ -196,14 +170,12 @@ export function MasterDatabaseSettings({ onSaved, readOnly = false, lockControl 
       <span id={'source-error-' + field} className="block text-xs text-red-700">{errors[field]}</span>;
   }
 
-  function beginAction(action: ProtectedAction) {
+  async function beginAction(action: SourceAction) {
     let error = '';
     const trimmedPath = dbPath.trim();
     if (action === 'check') {
       if (!trimmedPath) error = 'กรุณาระบุพาธไฟล์ฐานข้อมูล AdaAccD.db';
-    } else if (action === 'sync') {
-      if (dirty) error = 'มีการแก้ไขค่าที่ยังไม่บันทึก กรุณากด “บันทึกการตั้งค่าแหล่งข้อมูล” ก่อนดาวน์โหลด';
-      else if (!apiConfigured) error = 'ยังไม่ได้ตั้งค่า URL ของ API2PSMaster สำหรับดาวน์โหลด';
+
     } else if (action === 'save') {
       setShowErrors(true);
       const first = Object.keys(errors)[0];
@@ -216,34 +188,11 @@ export function MasterDatabaseSettings({ onSaved, readOnly = false, lockControl 
       setMessage(error);
       return;
     }
-    setPin('');
-    setNewPin('');
-    setPinConfirmation('');
-    setAuthorizationError('');
-    setPendingAction(action);
-  }
-
-  function closeAuthorization() {
     if (busy) return;
-    setPendingAction(null);
-    setPin('');
-    setNewPin('');
-    setPinConfirmation('');
-    setAuthorizationError('');
-  }
-
-  async function confirmAction(event: React.FormEvent) {
-    event.preventDefault();
-    if (busy || !pendingAction) return;
-    if (!pin.trim()) {
-      setAuthorizationError('กรุณากรอก PIN ผู้ดูแลระบบเพื่อยืนยัน');
-      return;
-    }
     setBusy(true);
-    setAuthorizationError('');
     try {
-      if (pendingAction === 'check') {
-        const r = await request('/api/storage/check', { path: dbPath.trim(), pin });
+      if (action === 'check') {
+        const r = await request('/api/storage/check', { path: dbPath.trim() });
         const branchList = Array.isArray(r.branches) ? r.branches : [];
         setBranches(branchList);
         setCheckedPath(dbPath.trim());
@@ -258,10 +207,6 @@ export function MasterDatabaseSettings({ onSaved, readOnly = false, lockControl 
             ? 'พบไฟล์ฐานข้อมูล แต่ยังไม่มีข้อมูลสาขา'
             : `ตรวจโครงสร้าง DB สำเร็จ · สินค้า ${r.productCount} รายการ · ผู้ใช้ ${r.userCount} ราย`,
         );
-      } else if (pendingAction === 'sync') {
-        const r = await request('/api/storage/sync', { pin });
-        setMessage(String(r.message || 'ดาวน์โหลดข้อมูลครบแล้ว'));
-        await refreshStatus();
       } else {
         const effectiveBranch = branch.trim();
         const hasUrl = useApi;
@@ -279,11 +224,9 @@ export function MasterDatabaseSettings({ onSaved, readOnly = false, lockControl 
                 branch: effectiveBranch,
               }
             : null,
-          ...pinFields(),
         };
         const r = await request('/api/storage', payload);
         setOperatorPassword('');
-        if (newPin) setPinChangeRequired(false);
         setApiConfigured(hasUrl);
         setDirty(false);
         if (hasUrl) {
@@ -294,12 +237,8 @@ export function MasterDatabaseSettings({ onSaved, readOnly = false, lockControl 
         await refreshStatus();
         onSaved?.();
       }
-      setPendingAction(null);
-      setPin('');
-      setNewPin('');
-      setPinConfirmation('');
     } catch (e) {
-      setAuthorizationError(e instanceof Error ? e.message : 'ทำรายการไม่สำเร็จ กรุณาลองใหม่');
+      setMessage(e instanceof Error ? e.message : 'ทำรายการไม่สำเร็จ กรุณาลองใหม่');
     } finally {
       setBusy(false);
     }
@@ -393,7 +332,6 @@ export function MasterDatabaseSettings({ onSaved, readOnly = false, lockControl 
           <ShieldCheck className="h-4 w-4 text-[#007a87]" />
           แหล่งข้อมูลสินค้า
         </h3>
-        {lockControl}
       </div>
 
       {pathWarning && (
@@ -402,27 +340,6 @@ export function MasterDatabaseSettings({ onSaved, readOnly = false, lockControl 
         </p>
       )}
 
-      {readOnly ? (
-        <dl className="grid gap-4 rounded-lg border border-slate-200 p-4 text-sm sm:grid-cols-2">
-          {[
-            ['ฐานข้อมูลที่ใช้พิมพ์ป้าย', dbPath],
-            ['สถานะฐานข้อมูล', databaseStatus],
-            ['รหัสสาขา', branch],
-            ['ดาวน์โหลดจากส่วนกลาง (API2PSMaster)', useApi ? 'เปิดใช้งาน' : 'ปิดใช้งาน'],
-            ...(useApi ? [
-              ['URL ของ API2PSMaster', sync.baseUrl],
-              ['รหัสตัวแทน Agency', sync.agency],
-              ['รหัสเครื่อง POS', sync.pos],
-              ['ชื่อ Header สำหรับ API Key', sync.headerName],
-            ] : []),
-          ].map(([label, value]) => (
-            <div key={label} className="min-w-0">
-              <dt className="text-slate-600">{label}</dt>
-              <dd className="mt-1 break-all font-medium">{value || '—'}</dd>
-            </div>
-          ))}
-        </dl>
-      ) : <>
       {pathFields}
 
         <label className="flex items-center gap-2 text-sm">
@@ -556,6 +473,10 @@ export function MasterDatabaseSettings({ onSaved, readOnly = false, lockControl 
         </div>
       </div>
 
+            {!useApi && <details><summary className="cursor-pointer text-sm">ตั้งผู้ใช้ LOCAL สำหรับฐานใหม่</summary><label className="grid gap-1 text-sm">
+              ตั้งรหัสผ่านสำหรับผู้ใช้ LOCAL (เฉพาะเครื่องใหม่ที่ไม่มี POS/API)
+              <input className="rounded border p-2" type="password" autoComplete="new-password" minLength={8} maxLength={64} value={operatorPassword} onChange={e=>setOperatorPassword(e.target.value)} placeholder="8–64 ตัวอักษร หรือเว้นว่างหากใช้บัญชีเดิม" />
+            </label></details>}
       {/* ปุ่มดำเนินการ: บันทึก + ดาวน์โหลดข้อมูลตอนนี้ (Manual Sync) */}
       <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
         {useApi && <Button
@@ -577,7 +498,6 @@ export function MasterDatabaseSettings({ onSaved, readOnly = false, lockControl 
         </Button>
       </div>
 
-      </>}
 
       <div className="rounded-md bg-slate-50 p-3 text-xs text-slate-600 space-y-1" aria-live="polite">
         <p>
@@ -601,93 +521,6 @@ export function MasterDatabaseSettings({ onSaved, readOnly = false, lockControl 
         {message}
       </p>
 
-      <Dialog
-        open={pendingAction !== null}
-        onOpenChange={(open) => {
-          if (!open) closeAuthorization();
-        }}
-      >
-        <DialogContent
-          className="sm:max-w-md"
-          onEscapeKeyDown={(event) => {
-            if (busy) event.preventDefault();
-          }}
-          onPointerDownOutside={(event) => {
-            if (busy) event.preventDefault();
-          }}
-        >
-          <DialogHeader>
-            <DialogTitle>ยืนยันด้วย PIN ผู้ดูแลระบบ (IT / Admin)</DialogTitle>
-            <DialogDescription>
-              {actionTitle} · ใช้ PIN ผู้ดูแลของ AdaBarprint ไม่ใช่รหัสเข้าสู่ระบบ POS
-            </DialogDescription>
-          </DialogHeader>
-          <form onSubmit={confirmAction} className="space-y-4">
-            <label className="block space-y-2 text-sm">
-              <span>PIN ผู้ดูแลระบบ</span>
-              <Input
-                autoFocus
-                type="password"
-                inputMode="numeric"
-                autoComplete="off"
-                value={pin}
-                disabled={busy}
-                onChange={(e) => setPin(e.target.value)}
-                aria-invalid={Boolean(authorizationError)}
-                aria-describedby={authorizationError ? 'source-pin-error' : undefined}
-              />
-            </label>
-            {pendingAction === 'save' && !useApi && <details><summary className="cursor-pointer text-sm">ตั้งผู้ใช้ LOCAL สำหรับฐานใหม่</summary><label className="grid gap-1 text-sm">
-              ตั้งรหัสผ่านสำหรับผู้ใช้ LOCAL (เฉพาะเครื่องใหม่ที่ไม่มี POS/API)
-              <input className="rounded border p-2" type="password" autoComplete="new-password" minLength={8} maxLength={64} value={operatorPassword} onChange={e=>setOperatorPassword(e.target.value)} placeholder="8–64 ตัวอักษร หรือเว้นว่างหากใช้บัญชีเดิม" />
-            </label></details>}
-            {pendingAction === 'save' && (
-              <details open={pinChangeRequired || undefined}>
-                <summary className="text-sm cursor-pointer">
-                  {pinChangeRequired ? 'ตั้ง PIN ผู้ดูแลระบบใหม่ก่อนเริ่มใช้งาน' : 'เปลี่ยน PIN ผู้ดูแลระบบ (ถ้าต้องการ)'}
-                </summary>
-                <div className="space-y-3 mt-3">
-                  <label className="block space-y-2 text-sm">
-                    <span>PIN ใหม่ (ตัวเลข 6–12 หลัก)</span>
-                    <Input
-                      type="password"
-                      inputMode="numeric"
-                      autoComplete="new-password"
-                      value={newPin}
-                      disabled={busy}
-                      onChange={(e) => setNewPin(e.target.value)}
-                    />
-                  </label>
-                  <label className="block space-y-2 text-sm">
-                    <span>ยืนยัน PIN ใหม่</span>
-                    <Input
-                      type="password"
-                      inputMode="numeric"
-                      autoComplete="new-password"
-                      value={pinConfirmation}
-                      disabled={busy}
-                      onChange={(e) => setPinConfirmation(e.target.value)}
-                    />
-                  </label>
-                </div>
-              </details>
-            )}
-            {authorizationError && (
-              <p id="source-pin-error" role="alert" className="text-sm text-red-700 bg-red-50 rounded-md p-3">
-                {authorizationError}
-              </p>
-            )}
-            <div className="flex justify-end gap-2">
-              <Button type="button" variant="outline" disabled={busy} onClick={closeAuthorization}>
-                ยกเลิก
-              </Button>
-              <Button type="submit" disabled={busy}>
-                {busy ? 'กำลังดำเนินการ…' : pendingAction === 'sync' ? 'ยืนยันดาวน์โหลด' : pendingAction === 'check' ? 'ยืนยันตรวจสอบ' : 'ยืนยันบันทึก'}
-              </Button>
-            </div>
-          </form>
-        </DialogContent>
-      </Dialog>
     </section>
   );
 }

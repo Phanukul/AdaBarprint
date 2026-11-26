@@ -379,8 +379,7 @@ export function AutoPrintBulkSettings(
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {/* <span className="text-sm text-slate-500">สาขา {branch || '-'}</span> */}
-          <Button size="sm" variant={p.profileAdmin ? 'outline' : 'teal'} disabled={busy} onClick={p.onProfileLockChange}>{p.profileAdmin ? 'ล็อกกลับ' : 'ปลดล็อกเพื่อแก้ไข'}</Button>
-          {!editing && p.profileAdmin && <Button className="bg-teal-700 hover:bg-teal-800 text-white" disabled={busy || !branch} onClick={async () => { if (await p.checkProfileAdmin?.()) startNewProfile('PRICE_CHG'); }}>
+          {!editing && <Button className="bg-teal-700 hover:bg-teal-800 text-white" disabled={busy || !branch} onClick={() => startNewProfile('PRICE_CHG')}>
             + เพิ่มโปรไฟล์
           </Button>}
         </div>
@@ -532,7 +531,7 @@ export function AutoPrintBulkSettings(
                         }}
                       />
                     </Field>
-                      {p.profileAdmin && p.onOpenDesign && templateOptions.some(option => option.value === target.template) && (
+                      {p.onOpenDesign && templateOptions.some(option => option.value === target.template) && (
                         <button
                           type="button"
                           className="text-xs font-medium text-teal-700 underline"
@@ -658,7 +657,7 @@ export function AutoPrintBulkSettings(
                             </span>
                           </div>
                           <div className="flex flex-wrap items-center gap-1.5">
-                            {p.profileAdmin && <Button size="sm" disabled={busy} onClick={async () => { if (await p.checkProfileAdmin?.()) openEditProfile(rule); }}>แก้ไขโปรไฟล์</Button>}
+                            <Button size="sm" disabled={busy} onClick={() => openEditProfile(rule)}>แก้ไขโปรไฟล์</Button>
                           </div>
                         </div>
 

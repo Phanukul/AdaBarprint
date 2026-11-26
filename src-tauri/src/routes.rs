@@ -3720,10 +3720,13 @@ async fn process_master_import(st: AppState, body: MasterImportBody, preview: bo
         .map(|(p, _)| std::path::PathBuf::from(p))
         .unwrap_or_else(crate::standalone::own_path);
 
-    if !preview {
-      if let Err(e) = crate::standalone::prepare_destination(&target_path).await {
+    let destination = if preview {
+        crate::standalone::validate_destination(&target_path).await
+    } else {
+        crate::standalone::prepare_destination(&target_path).await
+    };
+    if let Err(e) = destination {
         return err_json(StatusCode::BAD_REQUEST, e);
-      }
     }
 
     let branch = if !body.branch.trim().is_empty() {
@@ -4749,34 +4752,6 @@ pub async fn post_sync_trigger(State(st): State<AppState>) -> Response {
     crate::print_center::request_sync(State(st)).await
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VerifyAdminPinBody {
-    pub pin: String,
-    #[serde(default)]
-    pub new_pin: String,
-}
-
-pub async fn post_verify_admin_pin(
-    State(st): State<AppState>,
-    headers: axum::http::HeaderMap,
-    Json(body): Json<VerifyAdminPinBody>,
-) -> Response {
-    let pin_change_required = match crate::storage::verify_and_update_admin_pin(&st.pool, &body.pin, &body.new_pin).await {
-        Ok(still_required) => still_required,
-        Err((status, msg, required)) => {
-            return (
-                status,
-                Json(json!({ "ok": false, "pinChangeRequired": required, "error": msg })),
-            )
-                .into_response();
-        }
-    };
-    match crate::auth::grant_admin(&st.pool, &headers).await {
-        Ok(()) => Json(json!({ "ok": true, "pinChangeRequired": pin_change_required })).into_response(),
-        Err(e) => err_json(StatusCode::UNAUTHORIZED, e),
-    }
-}
 
 #[cfg(test)]
 mod manual_job_tests {

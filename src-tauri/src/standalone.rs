@@ -211,28 +211,22 @@ pub async fn protect(secret: &str, decrypt: bool) -> Result<String> {
     }
 }
 /// A standalone destination must be a local, print-owned master; never adopt a POS database.
-pub async fn prepare_destination(path: &Path) -> Result<()> {
+pub(crate) async fn validate_destination(path: &Path) -> Result<()> {
     if !path.is_absolute() || path.to_string_lossy().starts_with("\\\\") || path.file_name().and_then(|v|v.to_str()).map(|v|!v.eq_ignore_ascii_case("AdaAccD.db")).unwrap_or(true) {
         return Err("ระบุพาธเต็มของ AdaAccD.db บนเครื่องนี้".into());
     }
     if path.exists() {
         if !crate::storage::has_barprint_identity(path).await? {return Err("ไฟล์นี้ไม่ใช่ฐานดาวน์โหลดของ Barprint กรุณาเลือกโฟลเดอร์ใหม่ หรือใช้โหมดอ่านข้อมูลจาก StoreFront".into());}
-    } else {
+    }
+    Ok(())
+}
+
+pub async fn prepare_destination(path: &Path) -> Result<()> {
+    validate_destination(path).await?;
+    if !path.exists() {
         std::fs::create_dir_all(path.parent().ok_or("พาธไม่ถูกต้อง")?).map_err(|_|"สร้างโฟลเดอร์ปลายทางไม่ได้")?;
     }
     create_master(path).await
-}
-
-// Caller holds a write transaction so other connections never see a partially renamed schema.
-pub(crate) async fn migrate_master_identity(c: &mut sqlx::SqliteConnection) -> std::result::Result<(), sqlx::Error> {
-    let legacy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ABMasterIdentity')")
-        .fetch_one(&mut *c).await?;
-    if legacy {
-        for statement in include_str!("../resources/migrate-master-identity.sql").lines() {
-            sqlx::query(statement).execute(&mut *c).await?;
-        }
-    }
-    Ok(())
 }
 
 pub async fn create_master(path: &Path) -> Result<()> {
@@ -256,11 +250,8 @@ pub async fn create_master(path: &Path) -> Result<()> {
         }
     }
     sqlx::query("CREATE TABLE IF NOT EXISTS TSysSyncTaskDownload(FTSynTable TEXT PRIMARY KEY,FDSynLastSuccess TEXT)").execute(&mut c).await.map_err(|e|e.to_string())?;
-    let mut tx = c.begin_with("BEGIN IMMEDIATE").await.map_err(|e|e.to_string())?;
-    migrate_master_identity(&mut tx).await.map_err(|e|e.to_string())?;
     sqlx::query("CREATE TABLE IF NOT EXISTS TCNSLabelMasterIdentity(FNLmiID INTEGER PRIMARY KEY,FTAgnCode TEXT,FTBchCode TEXT,FTPosCode TEXT)")
-        .execute(&mut *tx).await.map_err(|e|e.to_string())?;
-    tx.commit().await.map_err(|e|e.to_string())?;
+        .execute(&mut c).await.map_err(|e|e.to_string())?;
     c.close().await.map_err(|e| e.to_string())
 }
 fn enc(s: &str) -> String {
@@ -678,29 +669,7 @@ pub async fn sync_now(pool: &SqlitePool) -> Result<()> {
     sqlx::query("UPDATE TCNSLabelSource SET FNLsoLeaseUntilUnix=0,FTLsoStatus=?,FDLsoLastSuccess=CASE WHEN ? THEN datetime('now') ELSE FDLsoLastSuccess END WHERE FNLsoID=1").bind(message).bind(result.is_ok()).execute(pool).await.map_err(|e|e.to_string())?;
     result
 }
-#[derive(Deserialize)]
-pub struct Trigger {
-    #[serde(default)]
-    pub pin: String,
-}
-pub async fn trigger(
-    State(st): State<AppState>,
-    headers: axum::http::HeaderMap,
-    body: Option<Json<Trigger>>,
-) -> Response {
-    let pin = body.map(|b| b.pin.clone()).unwrap_or_default();
-    let authorized = if !pin.trim().is_empty() {
-        crate::storage::valid_pin(&st.pool, &pin).await
-    } else {
-        crate::auth::has_active_session(&st.pool, &headers).await
-    };
-    if !authorized {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error":"PIN ผู้ดูแลระบบไม่ถูกต้อง หรือกรุณาเข้าสู่ระบบก่อนดาวน์โหลด"})),
-        )
-            .into_response();
-    }
+pub async fn trigger(State(st): State<AppState>) -> Response {
     match sync_now(&st.pool).await {
         Ok(()) => Json(json!({"ok":true,"message":"ดาวน์โหลดครบแล้ว"})).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error":e}))).into_response(),
@@ -736,14 +705,14 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn legacy_master_identity_preserves_codes_on_repeated_setup() {
+    async fn master_identity_preserves_codes_on_repeated_setup() {
         let dir = std::env::temp_dir().join(format!("barprint-identity-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("AdaAccD.db");
-        let options = SqliteConnectOptions::new().filename(&path).create_if_missing(true);
+        prepare_destination(&path).await.unwrap();
+        let options = SqliteConnectOptions::new().filename(&path);
         let mut c = sqlx::SqliteConnection::connect_with(&options).await.unwrap();
-        sqlx::raw_sql("CREATE TABLE ABMasterIdentity(id INTEGER PRIMARY KEY,agency TEXT,branch TEXT,pos TEXT);
-            INSERT INTO ABMasterIdentity VALUES(1,'00001','00002','00005')").execute(&mut c).await.unwrap();
+        sqlx::query("INSERT INTO TCNSLabelMasterIdentity(FNLmiID,FTAgnCode,FTBchCode,FTPosCode) VALUES(1,'00001','00002','00005')").execute(&mut c).await.unwrap();
         for _ in 0..2 { prepare_destination(&path).await.unwrap(); }
         let row: (i64,String,String,String) = sqlx::query_as("SELECT FNLmiID,FTAgnCode,FTBchCode,FTPosCode FROM TCNSLabelMasterIdentity")
             .fetch_one(&mut c).await.unwrap();

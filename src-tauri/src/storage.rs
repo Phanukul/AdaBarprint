@@ -234,7 +234,7 @@ async fn refresh_attachment(c: &mut SqliteConnection) -> Result<(), sqlx::Error>
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all="camelCase")]
 pub struct Config { #[serde(default,skip_serializing)] pub operator_password: String, #[serde(default)] pub path: String, #[serde(default="unified_mode")] pub mode:String, #[serde(default)] pub sync:Option<crate::standalone::SyncConfig>, #[serde(default)] pub branch: String,
-    #[serde(default="default_age")] pub max_age_minutes: i64, #[serde(default,skip_serializing)] pub pin: String, #[serde(default,skip_serializing)] pub new_pin: String }
+    #[serde(default="default_age")] pub max_age_minutes: i64 }
 fn unified_mode()->String{"UNIFIED".into()}
 fn default_age() -> i64 { 1440 }
 
@@ -401,20 +401,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changing_master_requires_pin_and_an_empty_active_queue() {
+    async fn changing_master_requires_an_empty_active_queue() {
         let (_root,master,pool)=fixture().await;
         crate::db::ensure_label_schema(&pool).await.unwrap();
         crate::print_center::ensure_schema(&pool).await.unwrap();
         crate::auth::ensure_auth_schema(&pool).await.unwrap();
-        sqlx::query("INSERT INTO TCNSSysOption(FTSopCode,FTSopApp,FTSopName,FTSopValue) VALUES('AutoPrintAdminPin','PrintBar','PIN','test-pin')").execute(&pool).await.unwrap();
-        let config=|pin:&str|Config{operator_password:String::new(),mode:"POS_SHARED".into(),sync:None,path:master.to_string_lossy().into_owned(),branch:"00001".into(),max_age_minutes:1440,pin:pin.into(),new_pin:String::new()};
+        let config=||Config{operator_password:String::new(),mode:"POS_SHARED".into(),sync:None,path:master.to_string_lossy().into_owned(),branch:"00001".into(),max_age_minutes:1440};
         let state=||State(AppState{pool:pool.clone()});
-        assert_eq!(save_config(state(),Json(config("wrong"))).await.status(),StatusCode::UNAUTHORIZED);
         sqlx::query("INSERT INTO TCNTLabelQueueJob(FTLqjJobID,FTLqjSource,FTLqjName,FTLqjStatus,FDCreateOn,FTLqjConfigJson) VALUES('hold','MANUAL','hold','QUEUED','now','{}')").execute(&pool).await.unwrap();
-        assert_eq!(save_config(state(),Json(config("test-pin"))).await.status(),StatusCode::BAD_REQUEST);
+        assert_eq!(save_config(state(),Json(config())).await.status(),StatusCode::BAD_REQUEST);
         assert!(configured_branch(&pool).await.is_empty());
         sqlx::query("UPDATE TCNTLabelQueueJob SET FTLqjStatus='CANCELLED'").execute(&pool).await.unwrap();
-        assert!(save_config(state(),Json(config("test-pin"))).await.status().is_success());
+        assert!(save_config(state(),Json(config())).await.status().is_success());
         assert_eq!(configured_branch(&pool).await,"00001");
         assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM master.TCNMPdt").fetch_one(&pool).await.unwrap(),1);
         pool.close().await;
@@ -426,14 +424,6 @@ mod tests {
         crate::db::ensure_label_schema(&pool).await.unwrap();
         crate::print_center::ensure_schema(&pool).await.unwrap();
         crate::auth::ensure_auth_schema(&pool).await.unwrap();
-        sqlx::query("INSERT INTO TCNSSysOption(FTSopCode,FTSopApp,FTSopName,FTSopValue) VALUES('AutoPrintAdminPin','PrintBar','PIN','1234')").execute(&pool).await.unwrap();
-
-        // First-time Admin Gate verification must require setting a new PIN when current PIN is 1234
-        let err_missing = verify_and_update_admin_pin(&pool, "1234", "").await.unwrap_err();
-        assert_eq!(err_missing.0, StatusCode::BAD_REQUEST);
-        assert!(err_missing.2);
-        assert!(!verify_and_update_admin_pin(&pool, "1234", "246810").await.unwrap());
-        assert!(!admin_pin_change_required(&pool).await);
 
         let state = || State(AppState { pool: pool.clone() });
         // 1) Unified save pointing to new local DB without API URL -> initializes local owned AdaAccD.db automatically
@@ -445,8 +435,6 @@ mod tests {
             path: local_db.to_string_lossy().into_owned(),
             branch: "00002".into(),
             max_age_minutes: 1440,
-            pin: "246810".into(),
-            new_pin: String::new(),
         })).await;
         assert!(res_local.status().is_success());
         assert!(local_db.is_file());
@@ -463,7 +451,7 @@ mod tests {
             let response = save_config(state(), Json(Config {
                 operator_password: String::new(), mode: mode.into(), sync: None,
                 path: path.to_string_lossy().into_owned(), branch: String::new(),
-                max_age_minutes: 1440, pin: "246810".into(), new_pin: String::new(),
+                max_age_minutes: 1440,
             })).await;
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
             assert_eq!(configured_branch(&pool).await, "00002");
@@ -482,8 +470,6 @@ mod tests {
             path: master.to_string_lossy().into_owned(),
             branch: String::new(), // single branch auto-detected
             max_age_minutes: 1440,
-            pin: "246810".into(),
-            new_pin: String::new(),
         })).await;
         assert!(res_pos.status().is_success());
         assert_eq!(crate::standalone::mode(&pool).await, "POS_SHARED");
@@ -568,7 +554,7 @@ pub async fn status(pool: &SqlitePool) -> Value {
     let root_dir = data_root();
     let sync_status = crate::standalone::status(pool).await;
     let api_configured = sync_status["config"]["baseUrl"].as_str().map(|s| !s.trim().is_empty()).unwrap_or(false);
-    json!({"sourceVersion":4,"platform":std::env::consts::OS,"supportsPosShared":cfg!(target_os="windows"),"supportsWindowsPrint":cfg!(target_os="windows"),"adminPinChangeRequired":admin_pin_change_required(pool).await,"mode":crate::standalone::mode(pool).await,"apiConfigured":api_configured,"defaultPath":default_path,"standalonePath":if crate::standalone::mode(pool).await=="STANDALONE" {PathBuf::from(&path)}else{crate::standalone::own_path()},"sync":sync_status,"configured":cfg.is_some(),"connected":connected,"path":path,"branch":branch,"maxAgeMinutes":age,
+    json!({"sourceVersion":4,"platform":std::env::consts::OS,"supportsPosShared":cfg!(target_os="windows"),"supportsWindowsPrint":cfg!(target_os="windows"),"mode":crate::standalone::mode(pool).await,"apiConfigured":api_configured,"defaultPath":default_path,"standalonePath":if crate::standalone::mode(pool).await=="STANDALONE" {PathBuf::from(&path)}else{crate::standalone::own_path()},"sync":sync_status,"configured":cfg.is_some(),"connected":connected,"path":path,"branch":branch,"maxAgeMinutes":age,
         "dataRoot":root_dir,"dataRootWritable":is_dir_writable(&root_dir),
         "printDb":print_db_path(),"readOnly":true,"autoReady":connected && auto_ready(pool).await,
         "error":checked.err(),"message":"พร้อมใช้งานกับแหล่งข้อมูลสินค้า และรัน Profile ผ่าน Windows Task Scheduler"})
@@ -576,67 +562,8 @@ pub async fn status(pool: &SqlitePool) -> Value {
 
 fn error(message: impl ToString) -> Response { (StatusCode::BAD_REQUEST,Json(json!({"error":message.to_string()}))).into_response() }
 pub async fn get_status(State(st):State<AppState>) -> Response { Json(status(&st.pool).await).into_response() }
-pub async fn check_config(State(st):State<AppState>,Json(cfg):Json<Config>) -> Response {
-    if !matches_admin_pin(&st.pool,&cfg.pin).await{return (StatusCode::UNAUTHORIZED,Json(json!({"error":"กรุณาระบุ PIN ผู้ดูแลระบบให้ถูกต้อง"}))).into_response();}
+pub async fn check_config(Json(cfg):Json<Config>) -> Response {
     match validate(&cfg.path).await { Ok(v)=>Json(v).into_response(), Err(e)=>error(e) }
-}
-async fn saved_admin_pin(pool:&SqlitePool)->String {
-    sqlx::query_scalar("SELECT FTSopValue FROM main.TCNSSysOption WHERE FTSopCode='AutoPrintAdminPin'").fetch_optional(pool).await.ok().flatten().unwrap_or_default()
-}
-pub async fn admin_pin_change_required(pool:&SqlitePool)->bool {
-    let pin=saved_admin_pin(pool).await;
-    pin.is_empty() || pin=="1234"
-}
-async fn matches_admin_pin(pool:&SqlitePool,pin:&str)->bool {
-    if pin.trim().is_empty(){return false;}
-    let saved=saved_admin_pin(pool).await;
-    let expected=if let Some(protected)=saved.strip_prefix("dpapi:") {
-        match crate::standalone::protect(protected,true).await {Ok(v)=>v,Err(_)=>return false}
-    }else if saved.starts_with("local:"){
-        match crate::standalone::protect(&saved,true).await {Ok(v)=>v,Err(_)=>return false}
-    }else{saved};
-    pin.trim()==expected
-}
-pub async fn valid_pin(pool:&SqlitePool,pin:&str)->bool {
-    !admin_pin_change_required(pool).await && matches_admin_pin(pool,pin).await
-}
-fn validate_new_pin_value(current_pin: &str, new_pin: &str) -> Result<(), &'static str> {
-    let np = new_pin.trim();
-    if !(6..=12).contains(&np.len())
-        || !np.bytes().all(|b| b.is_ascii_digit())
-        || np == current_pin.trim()
-        || np.bytes().all(|b| Some(b) == np.bytes().next())
-    {
-        return Err("PIN ใหม่ต้องเป็นตัวเลข 6–12 หลัก ไม่ซ้ำรหัสเดิมและไม่เป็นตัวเลขเดียวกันทั้งหมด");
-    }
-    Ok(())
-}
-async fn encrypt_admin_pin(new_pin: &str) -> Result<String, String> {
-    let encrypted = crate::standalone::protect(new_pin.trim(), false).await?;
-    Ok(if encrypted.starts_with("local:") { encrypted } else { format!("dpapi:{encrypted}") })
-}
-pub async fn verify_and_update_admin_pin(pool: &SqlitePool, pin: &str, new_pin: &str) -> Result<bool, (StatusCode, &'static str, bool)> {
-    if !matches_admin_pin(pool, pin).await {
-        return Err((StatusCode::UNAUTHORIZED, "รหัส PIN ผู้ดูแลระบบไม่ถูกต้อง", false));
-    }
-    let must_change = admin_pin_change_required(pool).await;
-    let trimmed_new = new_pin.trim();
-    if must_change && trimmed_new.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "กรุณาตั้ง PIN ผู้ดูแลระบบใหม่ (ตัวเลข 6–12 หลัก) ก่อนเข้าใช้งาน", true));
-    }
-    if !trimmed_new.is_empty() {
-        validate_new_pin_value(pin, trimmed_new).map_err(|msg| (StatusCode::BAD_REQUEST, msg, must_change))?;
-        let protected = encrypt_admin_pin(trimmed_new)
-            .await
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "ไม่สามารถเข้ารหัส PIN ใหม่ได้", must_change))?;
-        sqlx::query("INSERT INTO TCNSSysOption(FTSopCode,FTSopApp,FTSopName,FTSopValue) VALUES('AutoPrintAdminPin','PrintBar','Admin PIN',?) ON CONFLICT(FTSopCode) DO UPDATE SET FTSopValue=excluded.FTSopValue")
-            .bind(protected)
-            .execute(pool)
-            .await
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "บันทึก PIN ใหม่ไม่สำเร็จ", must_change))?;
-        return Ok(false);
-    }
-    Ok(must_change)
 }
 pub(crate) async fn has_barprint_identity(path: &Path) -> Result<bool, String> {
     let options = SqliteConnectOptions::new()
@@ -648,7 +575,7 @@ pub(crate) async fn has_barprint_identity(path: &Path) -> Result<bool, String> {
         .await
         .map_err(|_| "เปิดไฟล์ฐานข้อมูลเพื่อตรวจสอบไม่ได้".to_string())?;
     let owned: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('TCNSLabelMasterIdentity','ABMasterIdentity')",
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='TCNSLabelMasterIdentity'",
     )
     .fetch_one(&mut c)
     .await
@@ -657,18 +584,6 @@ pub(crate) async fn has_barprint_identity(path: &Path) -> Result<bool, String> {
     Ok(owned > 0)
 }
 pub async fn save_config(State(st):State<AppState>,Json(mut cfg):Json<Config>) -> Response {
-    if !matches_admin_pin(&st.pool,&cfg.pin).await{return (StatusCode::UNAUTHORIZED,Json(json!({"error":"กรุณาระบุ PIN ผู้ดูแลระบบให้ถูกต้อง"}))).into_response();}
-    let must_change=admin_pin_change_required(&st.pool).await;
-    if must_change && cfg.new_pin.trim().is_empty(){return error("กรุณาตั้ง PIN ผู้ดูแลระบบใหม่ก่อนเริ่มใช้งาน");}
-    let new_pin=cfg.new_pin.trim();
-    if !new_pin.is_empty() {
-        if let Err(msg) = validate_new_pin_value(&cfg.pin, new_pin) {
-            return error(msg);
-        }
-    }
-    let protected_pin=if !new_pin.is_empty(){
-        match encrypt_admin_pin(new_pin).await {Ok(v)=>Some(v),Err(e)=>return error(e)}
-    }else{None};
     if !["UNIFIED","POS_SHARED","STANDALONE"].contains(&cfg.mode.as_str()){return error("โหมดแหล่งข้อมูลไม่ถูกต้อง");}
     if cfg.path.trim().is_empty() {
         if cfg.mode == "POS_SHARED" { return error("ระบุพาธไฟล์ AdaAccD.db ของ POS"); }
@@ -840,13 +755,9 @@ pub async fn save_config(State(st):State<AppState>,Json(mut cfg):Json<Config>) -
             .bind(next_status)
             .execute(&mut *tx)
             .await?;
-        if let Some(pin)=protected_pin {
-            sqlx::query("UPDATE TCNSSysOption SET FTSopValue=? WHERE FTSopCode='AutoPrintAdminPin'").bind(pin).execute(&mut *tx).await?;
-        }
         if bootstrap {
             let mut local = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&canonical).create_if_missing(false)).await?;
             let mut write = local.begin_with("BEGIN IMMEDIATE").await?;
-            crate::standalone::migrate_master_identity(&mut write).await?;
             sqlx::query("SELECT FNLmiID FROM TCNSLabelMasterIdentity LIMIT 0").execute(&mut *write).await?;
             let count:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM TCNMUsrLogin").fetch_one(&mut *write).await?;
             if count != 0 { return Err(sqlx::Error::Protocol("ฐานนี้มีบัญชีผู้ใช้แล้ว ให้เข้าสู่ระบบด้วยบัญชีเดิม".into())); }

@@ -167,8 +167,8 @@ export function LoginPage({ onLoginSuccess }: LoginPageProps) {
             const source = await response.json();
             if (!cancelled && source.connected === false) {
               setUsersError(source.mode === 'STANDALONE' && !source.sync?.lastSuccess
-                ? 'ยังเปิดรายชื่อผู้ใช้ไม่ได้ เพราะแหล่งข้อมูลนี้ยังไม่มีผลดาวน์โหลดสำเร็จ กรุณาตรวจที่ตั้งค่าฐานข้อมูล (IT/Admin)'
-                : 'ยังเปิดฐานข้อมูลสินค้าและผู้ใช้ไม่ได้ กรุณาตรวจที่ตั้งค่าฐานข้อมูล (IT/Admin)');
+                ? 'ยังเปิดรายชื่อผู้ใช้ไม่ได้ เพราะแหล่งข้อมูลนี้ยังไม่มีผลดาวน์โหลดสำเร็จ กรุณาตรวจที่ตั้งค่าฐานข้อมูล'
+                : 'ยังเปิดฐานข้อมูลสินค้าและผู้ใช้ไม่ได้ กรุณาตรวจที่ตั้งค่าฐานข้อมูล');
             }
           }
         }

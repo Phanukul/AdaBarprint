@@ -1,5 +1,0 @@
-ALTER TABLE ABMasterIdentity RENAME TO TCNSLabelMasterIdentity;
-ALTER TABLE TCNSLabelMasterIdentity RENAME COLUMN id TO FNLmiID;
-ALTER TABLE TCNSLabelMasterIdentity RENAME COLUMN agency TO FTAgnCode;
-ALTER TABLE TCNSLabelMasterIdentity RENAME COLUMN branch TO FTBchCode;
-ALTER TABLE TCNSLabelMasterIdentity RENAME COLUMN pos TO FTPosCode;
