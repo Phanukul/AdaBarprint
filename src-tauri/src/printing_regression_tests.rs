@@ -187,9 +187,16 @@ async fn four_scheduler_profiles_enqueue_snapshots_without_sending() {
  assert_eq!(explicit["status"],"QUEUED");
  sqlx::query("UPDATE TCNTLabelQueueJob SET FTLqjStatus='CANCELLED' WHERE FTLqjJobID=?").bind(explicit["jobId"].as_str()).execute(&pool).await.unwrap();
  sqlx::query("UPDATE TCNMLabelPrintRule SET FTLprConfigJson=json_set(FTLprConfigJson,'$.quantity',2) WHERE FTLprRuleID='NEW_PDT'").execute(&pool).await.unwrap();
+ let unchanged=print_center::enqueue_profile(&pool,"NEW_PDT").await.unwrap();
+ assert_eq!(unchanged["status"],"ALREADY_SUBMITTED");
+ assert_eq!(unchanged["totalUnits"],0);
+ // Changing the paper routes creates two outstanding targets, one label each.
+ let targets = ["SIMULATION A","SIMULATION B"].map(|name|json!({"size":"SH-100x38","template":"REGRESSION","printer":name,"protocol":"ZEBRA","ip":"127.0.0.1","port":1,"dpi":203,"quantity":2}));
+ sqlx::query("UPDATE TCNMLabelPrintRule SET FTLprConfigJson=json_set(FTLprConfigJson,'$.targets',json(?)) WHERE FTLprRuleID='NEW_PDT'")
+     .bind(json!(targets).to_string()).execute(&pool).await.unwrap();
  let changed=print_center::enqueue_profile(&pool,"NEW_PDT").await.unwrap();
  assert_eq!(changed["totalUnits"],2);
- // If only copy one reached the transport, rescheduling should prepare only copy two.
+ // If only the first target was acknowledged, rescheduling prepares the second.
  let first_page:String=sqlx::query_scalar("SELECT FTLquPayloadJson FROM TCNTLabelQueueUnit WHERE FTLqjJobID=? AND FNLquSeq=0").bind(changed["jobId"].as_str()).fetch_one(&pool).await.unwrap();
  let first_page:serde_json::Value=serde_json::from_str(&first_page).unwrap();
  let mark=&first_page["marks"][0];

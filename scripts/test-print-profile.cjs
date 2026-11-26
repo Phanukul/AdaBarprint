@@ -6,7 +6,8 @@ assert.equal(resolveTemplateRoute(mapping,'BAR','1').printer,'Sticker');assert.e
 assert.equal(resolveTemplateRoute(mapping,'OLD','2').printer,'Promo');assert.equal(resolveTemplateRoute(mapping,'OLD','1').tray,'1');
 assert.equal(resolveTemplateRoute(undefined,'BAR','1').printer,'');
 assert.equal(manualTemplateProblem(JSON.stringify({elements:[{type:'barcode'}]})),'');
-assert.notEqual(manualTemplateProblem(JSON.stringify({elements:[{type:'qrcode'}]})),'');
+assert.equal(manualTemplateProblem(JSON.stringify({elements:[{type:'qrcode'}]})),'');
+assert.notEqual(manualTemplateProblem(JSON.stringify({elements:[{type:'unknown'}]})),'');
 console.log('Print profile checks passed: explicit template wins, legacy fallback preserved, unsupported layouts rejected.');
 
 const unified=context.exports.withManualRoute(mapping,{printer:'One',tray:'3',protocol:'WINDOWS'});
